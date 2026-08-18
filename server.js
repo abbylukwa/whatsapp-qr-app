@@ -692,21 +692,143 @@ async function downloadFromUrl(url, maxMB, _depth) {
   });
 }
 
+// METHOD 7: YouTube via yt-dlp CLI (bypasses Node.js network stack entirely)
+// Uses yt-dlp binary which handles YouTube's anti-bot measures better
+async function dlYtDlp(url, type, maxMB) {
+  if (!isRamSafe()) throw new Error('RAM_ABORT');
+  const videoId = ytVideoId(url);
+  if (!videoId) throw new Error('Not a YouTube URL');
+  const ext = type === 'audio' ? 'mp3' : 'mp4';
+  const tmpFile = path.join('/tmp', 'wabot_ytdlp_' + Date.now() + '.' + ext);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (err, val) => { if (!settled) { settled = true; if (err) { try { fs.unlinkSync(tmpFile); } catch {} reject(err); } else resolve(val); } };
+    const args = [
+      '--no-playlist', '--max-filesize', (maxMB * 1024 * 1024).toString(),
+      '-o', tmpFile,
+      '--ffmpeg-location', '/usr/bin/ffmpeg',
+    ];
+    if (type === 'audio') {
+      args.unshift('-x', '--audio-format', 'mp3', '--audio-quality', '128K');
+    } else {
+      args.unshift('-f', 'worst[ext=mp4]', '--merge-output-format', 'mp4');
+    }
+    args.push(url);
+    const child = require('child_process').spawn('yt-dlp', args, { timeout: DL_TIMEOUT });
+    let stderr = '';
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('close', code => {
+      if (settled) return;
+      if (code === 0) {
+        try {
+          const s = fs.statSync(tmpFile);
+          if (s.size < 10000) { done(new Error('FILE_TOO_SMALL')); return; }
+          done({ file: tmpFile, size: s.size });
+        } catch (e) { done(e); }
+      } else {
+        const msg = stderr.split('\n').filter(l => l.includes('ERROR')).pop()?.trim() || ('yt-dlp exit code ' + code);
+        done(new Error(msg));
+      }
+    });
+    child.on('error', e => done(e));
+    setTimeout(() => { if (!settled) { child.kill('SIGKILL'); done(new Error('DL_TIMEOUT')); } }, DL_TIMEOUT);
+  });
+}
+
+// METHOD 8: TikTok download via tikwm.com API (works from servers!)
+async function dlTikTok(url, maxMB) {
+  // Normalize URL (tikwm needs the full URL or short URL)
+  let tikUrl = url;
+  if (!url.includes('tiktok.com') && !url.includes('vm.tiktok')) throw new Error('Not a TikTok URL');
+  // First resolve any short URL
+  if (url.includes('vm.tiktok')) tikUrl = url; // tikwm handles short URLs fine
+
+  const apiUrl = 'https://www.tikwm.com/api/?url=' + encodeURIComponent(tikUrl) + '&hd=1';
+  const data = await httpGet(apiUrl);
+  if (!data || data.code !== 0) throw new Error('tikwm: ' + (data?.msg || 'failed'));
+
+  // Pick download URL: prefer HD play (video) or play (no watermark SD)
+  const dlUrl = data.data?.play || data.data?.hdplay || data.data?.music;
+  if (!dlUrl) throw new Error('tikwm: no download URL in response');
+
+  const result = await httpGetBuffer(dlUrl, DL_TIMEOUT);
+  if (result.size > maxMB * 1024 * 1024) throw new Error('SIZE_LIMIT');
+  if (result.size < 10000) throw new Error('FILE_TOO_SMALL');
+
+  const isAudio = !data.data.play && !data.data.hdplay && data.data.music;
+  const ext = isAudio ? 'mp3' : 'mp4';
+  const tmpFile = path.join('/tmp', 'wabot_tiktok_' + Date.now() + '.' + ext);
+  fs.writeFileSync(tmpFile, result.buffer);
+  return { file: tmpFile, size: result.size };
+}
+
+// METHOD 9: Instagram/Reels download via public API
+async function dlInstagram(url, maxMB) {
+  if (!url.includes('instagram.com') && !url.includes('instagr.am')) throw new Error('Not an Instagram URL');
+  // Use reelsave.io API (no auth needed)
+  const apiUrl = 'https://api.reelsave.io/download';
+  try {
+    const result = await httpPost(apiUrl, { url: url }, { 'Accept': 'application/json' });
+    const mediaUrl = result?.url || result?.downloadUrl || result?.data?.url;
+    if (!mediaUrl) throw new Error('No download URL in response');
+    const dl = await httpGetBuffer(mediaUrl, DL_TIMEOUT);
+    if (dl.size > maxMB * 1024 * 1024) throw new Error('SIZE_LIMIT');
+    if (dl.size < 10000) throw new Error('FILE_TOO_SMALL');
+    const ext = (mediaUrl.split('.').pop() || 'mp4').split('?')[0];
+    const tmpFile = path.join('/tmp', 'wabot_ig_' + Date.now() + '.' + ext);
+    fs.writeFileSync(tmpFile, dl.buffer);
+    return { file: tmpFile, size: dl.size };
+  } catch (e) {
+    console.log('[IG] reelsave failed: ' + e.message + ', trying direct...');
+    // Fallback: try Cobalt for Instagram
+    return await dlCobalt(url, maxMB);
+  }
+}
+
+// METHOD 10: Universal social media downloader (auto-detects platform)
+// For TikTok, Instagram, Twitter/X, Reddit, SoundCloud etc.
+async function dlSocialMedia(url, maxMB) {
+  const u = url.toLowerCase();
+  if (u.includes('tiktok.com') || u.includes('vm.tiktok')) return await dlTikTok(url, maxMB);
+  if (u.includes('instagram.com') || u.includes('instagr.am')) return await dlInstagram(url, maxMB);
+  // For everything else (Twitter, Reddit, SoundCloud), try Cobalt
+  return await dlCobalt(url, maxMB);
+}
+
 function safeDeleteFile(f) { try { if (f) fs.unlinkSync(f); } catch {} }
 
-// ═══ SMART CASCADE: tries all methods in order ═══
-// v15: For YouTube: play-dl → Piped → Invidious → ytdl (most reliable first)
-// For other URLs: Cobalt → direct download
+// ═══ SMART CASCADE v17: tries all methods in order ═══
+// YouTube: yt-dlp (CLI) → play-dl → Piped → Invidious → ytdl-core
+// TikTok: tikwm API
+// Instagram: reelsave → Cobalt
+// Other: Cobalt → direct download
 async function smartDownload(url, type, maxMB) {
   const isYT = ytVideoId(url);
   const errors = [];
+  const u = url.toLowerCase();
+
+  // TikTok: use tikwm (works from servers!)
+  if (u.includes('tiktok.com') || u.includes('vm.tiktok')) {
+    try { logRam('DL[tikwm]'); const r = await dlTikTok(url, maxMB); console.log('[DL] tikwm OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('tikwm: ' + e.message); console.log('[DL] tikwm fail: ' + e.message.substring(0, 60)); }
+    // Fallback to Cobalt
+    try { logRam('DL[cobalt-tt]'); const r = await dlCobalt(url, maxMB); return r; } catch (e) { errors.push('cobalt: ' + e.message); }
+    throw new Error('TikTok download failed: ' + errors.join(' | '));
+  }
+
+  // Instagram: use reelsave then Cobalt
+  if (u.includes('instagram.com') || u.includes('instagr.am')) {
+    try { logRam('DL[ig]'); const r = await dlInstagram(url, maxMB); console.log('[DL] Instagram OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('instagram: ' + e.message); console.log('[DL] Instagram fail: ' + e.message.substring(0, 60)); }
+    throw new Error('Instagram download failed: ' + errors.join(' | '));
+  }
 
   if (isYT) {
-    // Method 2: play-dl (often works when ytdl doesn't)
+    // Method 7: yt-dlp CLI (handles YouTube's bot detection best)
+    try { logRam('DL[yt-dlp]'); const r = await dlYtDlp(url, type, maxMB); console.log('[DL] yt-dlp OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('yt-dlp: ' + e.message.substring(0, 80)); console.log('[DL] yt-dlp fail: ' + e.message.substring(0, 60)); }
+    // Method 2: play-dl
     if (playdl) { try { logRam('DL[playdl]'); const r = await dlPlayDl(url, type, maxMB); console.log('[DL] play-dl OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('play-dl: ' + e.message); console.log('[DL] play-dl fail: ' + e.message.substring(0, 60)); } }
-    // Method 4: Piped (proxy avoids Google blocks)
+    // Method 4: Piped
     try { logRam('DL[piped]'); const r = await dlPiped(url, type, maxMB); console.log('[DL] Piped OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('Piped: ' + e.message); console.log('[DL] Piped fail: ' + e.message.substring(0, 60)); }
-    // Method 3: Invidious (proxy endpoint)
+    // Method 3: Invidious
     try { logRam('DL[invidious]'); const r = await dlInvidious(url, type, maxMB); console.log('[DL] Invidious OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('Invidious: ' + e.message); console.log('[DL] Invidious fail: ' + e.message.substring(0, 60)); }
     // Method 1: ytdl-core (last resort)
     try { logRam('DL[ytdl]'); const r = await dlYtdl(url, type, maxMB); console.log('[DL] ytdl OK: ' + (r.size/1024/1024).toFixed(1) + 'MB'); return r; } catch (e) { errors.push('ytdl: ' + e.message); console.log('[DL] ytdl fail: ' + e.message.substring(0, 60)); }
@@ -725,7 +847,11 @@ const DOWNLOAD_METHODS = {
   3: { name: 'Invidious', fn: (url, type, max) => dlInvidious(url, type, max), desc: 'Privacy API (Invidious)', youtube: true },
   4: { name: 'Piped', fn: (url, type, max) => dlPiped(url, type, max), desc: 'Privacy API (Piped)', youtube: true },
   5: { name: 'Cobalt', fn: (url, type, max) => dlCobalt(url, max), desc: 'Multi-platform (Cobalt)', youtube: false },
-  6: { name: 'Smart', fn: smartDownload, desc: 'Auto-cascade: playdl-Piped-Invidious-ytdl', youtube: true }
+  6: { name: 'Smart', fn: smartDownload, desc: 'v17: yt-dlp→playdl→Piped→Invidious→ytdl + TikTok/IG', youtube: true },
+  7: { name: 'yt-dlp', fn: (url, type, max) => dlYtDlp(url, type, max), desc: 'yt-dlp CLI (best YouTube)', youtube: true },
+  8: { name: 'TikTok', fn: (url, type, max) => dlTikTok(url, max), desc: 'TikTok via tikwm', youtube: false },
+  9: { name: 'Instagram', fn: (url, type, max) => dlInstagram(url, max), desc: 'Instagram via reelsave', youtube: false },
+  10: { name: 'Social', fn: (url, type, max) => dlSocialMedia(url, max), desc: 'Auto-detect: TikTok/IG/Cobalt', youtube: false },
 };
 
 function getGroupDlFn() { return DOWNLOAD_METHODS[groupDlMethod]?.fn || smartDownload; }
@@ -1569,14 +1695,17 @@ async function scanMessagesForInviteLinks() {
   if (!sock || connectionStatus !== 'connected') return;
   const linkRegex = /chat\.whatsapp\.com\/([A-Za-z0-9]+)/g;
   let found = 0;
-  // Scan recent message feed
+  const seenCodes = new Set(Object.values(GROUP_INVITES));
+
+  // 1. Scan recent message feed (live messages received this session)
   for (const msg of recentMessages) {
     if (!msg.text) continue;
     const matches = msg.text.match(linkRegex);
     if (!matches) continue;
     for (const match of matches) {
       const code = match.replace('chat.whatsapp.com/', '');
-      if (Object.values(GROUP_INVITES).includes(code)) continue; // already known
+      if (seenCodes.has(code)) continue;
+      seenCodes.add(code);
       try {
         console.log('[ScanLinks] Found: ' + code); await sleep(2000);
         const gJid = await sock.groupAcceptInvite(code);
@@ -1585,18 +1714,65 @@ async function scanMessagesForInviteLinks() {
       } catch (e) { console.log('[ScanLinks] Failed: ' + e.message); }
     }
   }
-  // Also scan message store
+  // 2. Scan Baileys message store (persisted messages from previous sessions)
   for (const [, m] of messageStore.entries()) {
     const t = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
     const matches = t.match(linkRegex);
     if (!matches) continue;
     for (const match of matches) {
       const code = match.replace('chat.whatsapp.com/', '');
-      if (Object.values(GROUP_INVITES).includes(code)) continue;
-      try { console.log('[ScanLinks] From history: ' + code); await sleep(2000); const gJid = await sock.groupAcceptInvite(code); knownGroups.add(gJid); groupActivity.set(gJid, Date.now()); found++; } catch {}
+      if (seenCodes.has(code)) continue;
+      seenCodes.add(code);
+      try { console.log('[ScanLinks] From store: ' + code); await sleep(2000); const gJid = await sock.groupAcceptInvite(code); knownGroups.add(gJid); groupActivity.set(gJid, Date.now()); found++; console.log('[ScanLinks] Joined from store: ' + gJid); } catch (e) { console.log('[ScanLinks] Store fail: ' + e.message); }
     }
   }
-  if (found) console.log('[ScanLinks] Joined ' + found + ' groups from message history');
+  // 3. Fetch chat history from WhatsApp (previous messages stored on the phone)
+  // This reads ALL chats the bot has ever had — DMs and groups
+  try {
+    console.log('[ScanLinks] Fetching chat list...');
+    const store = sock.store;
+    if (store && store.chats) {
+      const chats = store.chats;
+      let chatKeys = [];
+      if (chats instanceof Map) chatKeys = [...chats.keys()];
+      else if (Array.isArray(chats)) chatKeys = chats.map(c => c.id || c.jid || c);
+      else if (typeof chats === 'object') chatKeys = Object.keys(chats);
+      console.log('[ScanLinks] Found ' + chatKeys.length + ' chats in store');
+
+      // Fetch messages from each chat (limit to last 50 per chat to avoid memory issues)
+      let chatsProcessed = 0;
+      for (const jid of chatKeys.slice(0, 50)) {
+        if (found >= 10) break; // safety limit
+        try {
+          // Use Baileys store to fetch messages for this chat
+          const msgs = store.messages?.[jid];
+          if (!msgs) continue;
+          const msgList = msgs instanceof Map ? [...msgs.values()] : (Array.isArray(msgs) ? msgs : []);
+          for (const m of msgList.slice(-50)) {
+            const t = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
+            const matches = t.match(linkRegex);
+            if (!matches) continue;
+            for (const match of matches) {
+              const code = match.replace('chat.whatsapp.com/', '');
+              if (seenCodes.has(code)) continue;
+              seenCodes.add(code);
+              try {
+                console.log('[ScanLinks] From chat history [' + jid + ']: ' + code);
+                await sleep(2000);
+                const gJid = await sock.groupAcceptInvite(code);
+                knownGroups.add(gJid); groupActivity.set(gJid, Date.now()); found++;
+                console.log('[ScanLinks] Joined from history: ' + gJid);
+              } catch (e) { console.log('[ScanLinks] History fail: ' + e.message); }
+            }
+          }
+          chatsProcessed++;
+        } catch (e) { /* skip this chat */ }
+      }
+      console.log('[ScanLinks] Processed ' + chatsProcessed + ' chats from history');
+    }
+  } catch (e) { console.log('[ScanLinks] History scan error: ' + e.message); }
+
+  if (found) console.log('[ScanLinks] Total joined: ' + found + ' groups');
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2439,50 +2615,79 @@ app.get('/api/test-download', async (req, res) => {
   };
 
   try {
-    // Step 1: YouTube Search
-    const videos = await t('YouTube Search: "' + query + '"', async () => {
-      const v = await ytSearch(query);
-      if (!v.length) throw new Error('No results found for: ' + query);
-      return v.length + ' results. Top: ' + (v[0]?.title?.substring(0, 80) || 'none') + ' | URL: ' + (v[0]?.url || 'none');
-    });
+    // For non-YouTube methods (TikTok, Instagram, Social), use query as direct URL or skip YT search
+    if (dlMethod.youtube) {
+      // Step 1: YouTube Search
+      const videos = await t('YouTube Search: "' + query + '"', async () => {
+        const v = await ytSearch(query);
+        if (!v.length) throw new Error('No results found for: ' + query);
+        return v.length + ' results. Top: ' + (v[0]?.title?.substring(0, 80) || 'none') + ' | URL: ' + (v[0]?.url || 'none');
+      });
 
-    // Step 2: Get video URL
-    let videoUrl = null;
-    await t('Get Video URL', async () => {
-      const v = await ytSearch(query);
-      if (!v.length) throw new Error('No videos found');
-      videoUrl = v[0].url;
-      return 'URL: ' + videoUrl + ' | Duration: ' + (v[0].timestamp || 'unknown') + ' | Views: ' + (v[0].views || 'unknown');
-    });
+      // Step 2: Get video URL
+      let videoUrl = null;
+      await t('Get Video URL', async () => {
+        const v = await ytSearch(query);
+        if (!v.length) throw new Error('No videos found');
+        videoUrl = v[0].url;
+        return 'URL: ' + videoUrl + ' | Duration: ' + (v[0].timestamp || 'unknown') + ' | Views: ' + (v[0].views || 'unknown');
+      });
 
-    if (!videoUrl) { send('error', 'Cannot proceed without video URL'); res.end(); return; }
+      if (!videoUrl) { send('error', 'Cannot proceed without video URL'); res.end(); return; }
 
-    // Step 3: Audio Download
-    let audioFile = null;
-    await t('Audio Download (' + dlMethod.name + ')', async () => {
-      send('info', 'Attempting audio download via ' + dlMethod.name + '...');
-      send('info', 'URL: ' + videoUrl);
-      const dl = await dlMethod.fn(videoUrl, 'audio', MAX_MEDIA_MB);
-      audioFile = dl.file;
-      const mb = (dl.size / 1024 / 1024).toFixed(2);
-      send('info', 'File: ' + dl.file + ' | Size: ' + mb + 'MB');
-      if (dl.size < 10000) throw new Error('File too small: ' + dl.size + ' bytes');
-      if (dl.size > MAX_MEDIA_MB * 1024 * 1024) throw new Error('File too large: ' + mb + 'MB > ' + MAX_MEDIA_MB + 'MB limit');
-      return mb + 'MB audio downloaded successfully';
-    });
+      // Step 3: Audio Download
+      let audioFile = null;
+      await t('Audio Download (' + dlMethod.name + ')', async () => {
+        send('info', 'Attempting audio download via ' + dlMethod.name + '...');
+        send('info', 'URL: ' + videoUrl);
+        const dl = await dlMethod.fn(videoUrl, 'audio', MAX_MEDIA_MB);
+        audioFile = dl.file;
+        const mb = (dl.size / 1024 / 1024).toFixed(2);
+        send('info', 'File: ' + dl.file + ' | Size: ' + mb + 'MB');
+        if (dl.size < 10000) throw new Error('File too small: ' + dl.size + ' bytes');
+        if (dl.size > MAX_MEDIA_MB * 1024 * 1024) throw new Error('File too large: ' + mb + 'MB > ' + MAX_MEDIA_MB + 'MB limit');
+        return mb + 'MB audio downloaded successfully';
+      });
 
-    // Step 4: Cleanup
-    await t('Cleanup temp file', async () => {
-      if (audioFile) { try { fs.unlinkSync(audioFile); return 'Deleted: ' + audioFile; } catch (e) { return 'Could not delete: ' + e.message; } }
-      return 'No file to clean';
-    });
+      // Step 4: Cleanup
+      await t('Cleanup temp file', async () => {
+        if (audioFile) { try { fs.unlinkSync(audioFile); return 'Deleted: ' + audioFile; } catch (e) { return 'Could not delete: ' + e.message; } }
+        return 'No file to clean';
+      });
 
-    // Step 5: RAM after
-    await t('RAM After Download', async () => {
-      const mb = getRamMB();
-      const pct = Math.round(mb / MAX_RAM_MB * 100);
-      return mb + 'MB / ' + MAX_RAM_MB + 'MB (' + pct + '%) - ' + (isRamSafe() ? 'SAFE' : 'HIGH');
-    });
+      // Step 5: RAM after
+      await t('RAM After Download', async () => {
+        const mb = getRamMB();
+        const pct = Math.round(mb / MAX_RAM_MB * 100);
+        return mb + 'MB / ' + MAX_RAM_MB + 'MB (' + pct + '%) - ' + (isRamSafe() ? 'SAFE' : 'HIGH');
+      });
+    } else {
+      // Non-YouTube method (TikTok, Instagram, Social) — use query as URL
+      const testUrl = query.startsWith('http') ? query :
+        (method === 8 ? 'https://vm.tiktok.com/ZM6QxQBvP/' :
+         method === 9 ? 'https://www.instagram.com/reel/example/' :
+         'https://vm.tiktok.com/ZM6QxQBvP/');
+
+      send('info', 'Testing ' + dlMethod.name + ' with URL: ' + testUrl);
+      let testFile = null;
+      await t('Download (' + dlMethod.name + ')', async () => {
+        send('info', 'URL: ' + testUrl);
+        const dl = await dlMethod.fn(testUrl, 'audio', MAX_MEDIA_MB);
+        testFile = dl.file;
+        const mb = (dl.size / 1024 / 1024).toFixed(2);
+        return mb + 'MB downloaded from ' + testUrl.substring(0, 60);
+      });
+
+      await t('Cleanup', async () => {
+        if (testFile) { try { fs.unlinkSync(testFile); return 'Deleted'; } catch { return 'Skip'; } }
+        return 'No file';
+      });
+
+      await t('RAM After', async () => {
+        const mb = getRamMB();
+        return mb + 'MB / ' + MAX_RAM_MB + 'MB (' + Math.round(mb / MAX_RAM_MB * 100) + '%)';
+      });
+    }
 
     send('done', '═══ Test Complete: ' + dlMethod.name + ' ═══');
   } catch (e) {

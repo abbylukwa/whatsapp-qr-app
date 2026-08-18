@@ -362,7 +362,27 @@
                                 <div class="dl-method-btn active" id="tdlm6" onclick="selectTestMethod(6)">
                                     <div class="method-num">6</div>
                                     <div class="method-name">Smart</div>
-                                    <div class="method-desc">Auto-cascade</div>
+                                    <div class="method-desc">Auto-cascade v17</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm7" onclick="selectTestMethod(7)">
+                                    <div class="method-num">7</div>
+                                    <div class="method-name">yt-dlp</div>
+                                    <div class="method-desc">CLI YouTube</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm8" onclick="selectTestMethod(8)">
+                                    <div class="method-num">8</div>
+                                    <div class="method-name">TikTok</div>
+                                    <div class="method-desc">via tikwm</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm9" onclick="selectTestMethod(9)">
+                                    <div class="method-num">9</div>
+                                    <div class="method-name">Instagram</div>
+                                    <div class="method-desc">via reelsave</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm10" onclick="selectTestMethod(10)">
+                                    <div class="method-num">10</div>
+                                    <div class="method-name">Social</div>
+                                    <div class="method-desc">Auto-detect</div>
                                 </div>
                             </div>
                             <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1121,7 +1141,7 @@
 
         function selectTestMethod(num) {
             selectedTestMethod = num;
-            for (let i = 1; i <= 6; i++) {
+            for (let i = 1; i <= 10; i++) {
                 const btn = document.getElementById('tdlm' + i);
                 if (btn) btn.className = 'dl-method-btn' + (i === num ? ' active' : '');
             }
@@ -1193,15 +1213,20 @@
             if (dlTestRunning) { appendDlLog('warn', 'Test already running...'); return; }
             const query = document.getElementById('dlTestQuery').value.trim() || 'amapiano 2025';
             clearDlLog();
-            appendDlLog('info', '═══ Testing ALL 6 Download Methods ═══');
+            appendDlLog('info', '═══ Testing ALL 10 Download Methods ═══');
             appendDlLog('info', 'Query: "' + query + '"');
-            appendDlLog('info', 'This will test methods 1-6 sequentially...');
-            for (let m = 1; m <= 6; m++) {
+            appendDlLog('info', 'YouTube methods (1-4, 6-7) use search. TikTok/IG (8-9) use default URLs.');
+            // YouTube methods: 1,2,3,4,6,7
+            const ytMethods = [1, 2, 3, 4, 6, 7];
+            // Social methods: 8, 9, 10
+            const socialMethods = [8, 9, 10];
+            for (const m of [...ytMethods, ...socialMethods]) {
                 selectTestMethod(m);
                 appendDlLog('step', '─── Method ' + m + ' ───');
                 await new Promise(resolve => {
                     dlTestRunning = true;
-                    document.getElementById('dlTestStatus').textContent = 'Testing method ' + m + '/6...';
+                    const total = 10;
+                    document.getElementById('dlTestStatus').textContent = 'Testing method ' + m + '/' + total + '...';
                     const url = '/api/test-download?method=' + m + '&query=' + encodeURIComponent(query);
                     const es = new EventSource(url);
                     es.onmessage = function(e) {
@@ -1219,7 +1244,7 @@
             dlTestRunning = false;
             document.getElementById('dlTestStatus').textContent = '✅ All methods tested';
             document.getElementById('dlTestBtn').disabled = false;
-            appendDlLog('done', '═══ All Methods Tested ═══ Pass: ' + dlPassCount + ' | Fail: ' + dlFailCount);
+            appendDlLog('done', '═══ All 10 Methods Tested ═══ Pass: ' + dlPassCount + ' | Fail: ' + dlFailCount);
         }
 
         // ============================================================

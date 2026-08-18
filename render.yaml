@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     memory: 512MB
-    buildCommand: npm install
+    buildCommand: pip install yt-dlp && npm install
     startCommand: node server.js
     envVars:
       - key: NODE_ENV

@@ -3,22 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WhatsApp Bot v16.0</title>
+    <title>WhatsApp Bot v16.0 — Control Panel</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b141a; color: #e9edef; min-height: 100vh; }
-        .header { background: #1f2c34; padding: 16px 24px; border-bottom: 1px solid #2a3942; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+        .header { background: #1f2c34; padding: 16px 24px; border-bottom: 1px solid #2a3942; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; position: sticky; top: 0; z-index: 100; }
         .header-left { display: flex; align-items: center; gap: 12px; }
         .header h1 { font-size: 18px; font-weight: 600; color: #00a884; }
+        .header-subtitle { font-size: 12px; color: #8696a0; }
         .status-badge { padding: 6px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; white-space: nowrap; }
         .status-disconnected { background: #ea0038; color: white; }
         .status-connecting { background: #ff9800; color: #000; }
         .status-qr { background: #25d366; color: #000; }
         .status-connected { background: #25d366; color: #000; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        @media (max-width: 768px) { .container { grid-template-columns: 1fr; } }
-        .panel { background: #111b21; border-radius: 12px; border: 1px solid #2a3942; overflow: hidden; }
+        .nav-tabs { background: #1f2c34; border-bottom: 1px solid #2a3942; display: flex; overflow-x: auto; gap: 0; padding: 0 16px; }
+        .nav-tab { padding: 12px 20px; font-size: 13px; font-weight: 500; color: #8696a0; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; transition: all 0.2s; }
+        .nav-tab:hover { color: #e9edef; }
+        .nav-tab.active { color: #00a884; border-bottom-color: #00a884; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+        .grid-full { grid-column: 1 / -1; }
+        @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+        .panel { background: #111b21; border-radius: 12px; border: 1px solid #2a3942; overflow: hidden; margin-bottom: 20px; }
         .panel-header { background: #1f2c34; padding: 14px 18px; font-size: 15px; font-weight: 600; color: #00a884; border-bottom: 1px solid #2a3942; display: flex; justify-content: space-between; align-items: center; }
+        .panel-header .subtitle { font-size: 11px; color: #8696a0; font-weight: 400; margin-top: 2px; }
         .panel-body { padding: 16px; }
         .qr-container { display: flex; justify-content: center; align-items: center; min-height: 300px; flex-direction: column; gap: 12px; }
         .qr-container img { border-radius: 12px; max-width: 300px; }
@@ -37,7 +48,7 @@
         .msg-item:last-child { border-bottom: none; }
         .msg-sender { font-weight: 600; color: #00a884; margin-bottom: 2px; }
         .msg-text { color: #e9edef; word-break: break-word; }
-        .msg-meta { color: #667781; font-size: 11px; margin-top: 4px; display: flex; gap: 8px; }
+        .msg-meta { color: #667781; font-size: 11px; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap; }
         .badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
         .badge-group { background: #0084ff; color: white; }
         .badge-admin { background: #ff6600; color: white; }
@@ -51,69 +62,721 @@
         .bc-msg { color: #e9edef; font-size: 13px; margin-bottom: 4px; }
         .bc-info { color: #667781; font-size: 11px; }
         .empty-state { color: #667781; text-align: center; padding: 40px; font-size: 14px; }
-        .btn { background: #00a884; color: #000; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+        .btn { background: #00a884; color: #000; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; transition: background 0.2s; }
         .btn:hover { background: #00c49a; }
+        .btn:disabled { background: #3a4a54; color: #667781; cursor: not-allowed; }
         .btn-danger { background: #ea0038; color: white; }
         .btn-danger:hover { background: #ff1744; }
+        .btn-warn { background: #ff9800; color: #000; }
+        .btn-warn:hover { background: #ffb300; }
+        .btn-sm { padding: 5px 12px; font-size: 12px; }
+        .btn-outline { background: transparent; border: 1px solid #00a884; color: #00a884; }
+        .btn-outline:hover { background: #00a88420; }
         .qr-actions { display: flex; gap: 10px; justify-content: center; margin-top: 12px; }
+        .cmd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+        .cmd-btn { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; text-align: left; transition: all 0.2s; display: flex; flex-direction: column; gap: 4px; }
+        .cmd-btn:hover { border-color: #00a884; background: #1f2c3480; }
+        .cmd-btn .cmd-name { font-weight: 600; color: #00a884; font-family: monospace; font-size: 12px; }
+        .cmd-btn .cmd-desc { color: #8696a0; font-size: 11px; }
+        .input-row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+        .input-row label { color: #8696a0; font-size: 13px; min-width: 80px; }
+        .input-row input, .input-row select, .input-row textarea { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 8px 12px; border-radius: 8px; font-size: 13px; flex: 1; min-width: 120px; }
+        .input-row input:focus, .input-row select:focus, .input-row textarea:focus { outline: none; border-color: #00a884; }
+        .input-row textarea { resize: vertical; min-height: 60px; }
+        .result-box { background: #0b141a; border: 1px solid #2a3942; border-radius: 8px; padding: 12px; font-size: 12px; font-family: monospace; color: #e9edef; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 12px; }
+        .result-box.success { border-color: #25d366; }
+        .result-box.error { border-color: #ea0038; color: #ea0038; }
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+        .stat-card { background: #1f2c34; border-radius: 8px; padding: 12px; text-align: center; }
+        .stat-value { font-size: 22px; font-weight: 700; color: #00a884; }
+        .stat-label { font-size: 11px; color: #8696a0; margin-top: 4px; }
+        .log-feed { max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+        .log-item { padding: 6px 10px; border-bottom: 1px solid #1f2c34; color: #8696a0; }
+        .log-item.ok { color: #25d366; }
+        .log-item.fail { color: #ea0038; }
+        .log-item.info { color: #00a884; }
+        .log-item.warn { color: #ff9800; }
+        .section-title { font-size: 13px; font-weight: 600; color: #8696a0; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; margin-top: 16px; }
+        .section-title:first-child { margin-top: 0; }
+        .divider { border: none; border-top: 1px solid #2a3942; margin: 16px 0; }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+        .tag-admin { background: #ff660030; color: #ff9900; border: 1px solid #ff660050; }
+        .tag-member { background: #00a88430; color: #00a884; border: 1px solid #00a88450; }
+        .tag-auto { background: #0084ff30; color: #4da6ff; border: 1px solid #0084ff50; }
+        .progress-bar { background: #1f2c34; border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px; }
+        .progress-fill { height: 100%; background: #00a884; border-radius: 4px; transition: width 0.3s; }
+        .progress-fill.warn { background: #ff9800; }
+        .progress-fill.danger { background: #ea0038; }
+        .group-status { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #1f2c34; border-radius: 8px; margin-bottom: 8px; }
+        .group-dot { width: 8px; height: 8px; border-radius: 50%; background: #ea0038; flex-shrink: 0; }
+        .group-dot.active { background: #25d366; }
+        .group-info { flex: 1; }
+        .group-name { font-size: 13px; font-weight: 600; }
+        .group-meta { font-size: 11px; color: #8696a0; }
+        .dl-method-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .dl-method-btn { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 10px; border-radius: 8px; cursor: pointer; font-size: 12px; text-align: center; transition: all 0.2s; }
+        .dl-method-btn:hover { border-color: #00a884; }
+        .dl-method-btn.active { border-color: #00a884; background: #00a88420; color: #00a884; }
+        .dl-method-btn .method-num { font-size: 18px; font-weight: 700; color: #00a884; }
+        .dl-method-btn .method-name { font-weight: 600; font-size: 12px; }
+        .dl-method-btn .method-desc { font-size: 10px; color: #8696a0; margin-top: 2px; }
+        .ai-card { background: #1f2c34; border: 1px solid #2a3942; border-radius: 8px; padding: 12px; }
+        .ai-card .ai-name { font-weight: 600; color: #00a884; }
+        .ai-card .ai-status { font-size: 11px; margin-top: 4px; }
+        .ai-card .ai-status.online { color: #25d366; }
+        .ai-card .ai-status.offline { color: #ea0038; }
+        .ai-card .ai-status.unknown { color: #8696a0; }
+        .chat-box { background: #0b141a; border: 1px solid #2a3942; border-radius: 8px; padding: 12px; max-height: 350px; overflow-y: auto; margin-bottom: 12px; }
+        .chat-msg { margin-bottom: 10px; }
+        .chat-msg .from { font-size: 11px; color: #8696a0; margin-bottom: 2px; }
+        .chat-msg .text { background: #1f2c34; padding: 8px 12px; border-radius: 8px; font-size: 13px; display: inline-block; max-width: 80%; }
+        .chat-msg.bot .text { background: #005c4b; }
+        .test-result { padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 12px; font-family: monospace; }
+        .test-result.pass { background: #25d36620; border-left: 3px solid #25d366; color: #25d366; }
+        .test-result.fail { background: #ea003820; border-left: 3px solid #ea0038; color: #ea0038; }
+        .test-result.running { background: #ff980020; border-left: 3px solid #ff9800; color: #ff9800; }
+        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #2a3942; border-top-color: #00a884; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .notice { background: #1f2c34; border: 1px solid #2a3942; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #8696a0; margin-bottom: 16px; }
+        .notice.warn { border-color: #ff980050; color: #ff9800; background: #ff980010; }
+        .notice.info { border-color: #00a88450; color: #00a884; background: #00a88410; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #0b141a; }
+        ::-webkit-scrollbar-thumb { background: #2a3942; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a4a54; }
     </style>
 </head>
 <body>
     <div class="header">
         <div class="header-left">
-            <h1>WhatsApp Bot v16.0</h1>
+            <div>
+                <h1>WhatsApp Bot v16.0</h1>
+                <div class="header-subtitle">Control Panel &amp; Test Suite</div>
+            </div>
         </div>
         <span id="statusBadge" class="status-badge status-disconnected">Disconnected</span>
     </div>
-    <div class="container">
-        <div class="panel">
-            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
-                QR Code / Link Phone
-                <button class="btn btn-danger" onclick="refreshQR()">Refresh QR</button>
-            </div>
-            <div class="panel-body">
-                <div id="qrContainer" class="qr-container">
-                    <div class="qr-placeholder">Connecting...</div>
+
+    <div class="nav-tabs">
+        <div class="nav-tab active" onclick="switchTab('dashboard')">Dashboard</div>
+        <div class="nav-tab" onclick="switchTab('chat')">Chat &amp; Messages</div>
+        <div class="nav-tab" onclick="switchTab('downloads')">Downloads</div>
+        <div class="nav-tab" onclick="switchTab('admin')">Admin Commands</div>
+        <div class="nav-tab" onclick="switchTab('ai')">AI System</div>
+        <div class="nav-tab" onclick="switchTab('groups')">Groups &amp; Broadcasts</div>
+        <div class="nav-tab" onclick="switchTab('tests')">Test Suite</div>
+    </div>
+
+    <!-- DASHBOARD TAB -->
+    <div id="tab-dashboard" class="tab-content active">
+        <div class="container">
+            <div class="grid-2">
+                <!-- QR Code Panel (original) -->
+                <div class="panel">
+                    <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        QR Code / Link Phone
+                        <button class="btn btn-danger btn-sm" onclick="refreshQR()">Refresh QR</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="qrContainer" class="qr-container">
+                            <div class="qr-placeholder">Connecting...</div>
+                        </div>
+                        <div class="link-section">
+                            <p style="color:#8696a0;font-size:13px;margin-bottom:8px;">Or link your phone number to get the pairing code:</p>
+                            <input type="tel" id="phoneInput" placeholder="2637XXXXXXXX" maxlength="15" />
+                            <button id="linkBtn" onclick="linkPhone()">Get WhatsApp Code</button>
+                            <div id="linkStatus" class="link-status"></div>
+                        </div>
+                    </div>
                 </div>
-                <div class="link-section">
-                    <p style="color:#8696a0;font-size:13px;margin-bottom:8px;">Or link your phone number to get the pairing code:</p>
-                    <input type="tel" id="phoneInput" placeholder="2637XXXXXXXX" maxlength="15" />
-                    <button id="linkBtn" onclick="linkPhone()">Get WhatsApp Code</button>
-                    <div id="linkStatus" class="link-status"></div>
+
+                <!-- Bot Status Stats -->
+                <div class="panel">
+                    <div class="panel-header">Bot Status</div>
+                    <div class="panel-body">
+                        <div class="stat-grid" id="statGrid">
+                            <div class="stat-card"><div class="stat-value" id="statRam">--</div><div class="stat-label">RAM (MB)</div></div>
+                            <div class="stat-card"><div class="stat-value" id="statUptime">--</div><div class="stat-label">Uptime (h)</div></div>
+                            <div class="stat-card"><div class="stat-value" id="statGroups">--</div><div class="stat-label">Groups</div></div>
+                            <div class="stat-card"><div class="stat-value" id="statMembers">--</div><div class="stat-label">Members</div></div>
+                            <div class="stat-card"><div class="stat-value" id="statQueue">--</div><div class="stat-label">Queue</div></div>
+                            <div class="stat-card"><div class="stat-value" id="statLidMap">--</div><div class="stat-label">LID Map</div></div>
+                        </div>
+                        <hr class="divider">
+                        <div id="ramBar" style="margin-bottom:12px;">
+                            <div style="display:flex;justify-content:space-between;font-size:12px;color:#8696a0;margin-bottom:4px;"><span>RAM Usage</span><span id="ramPct">--</span></div>
+                            <div class="progress-bar"><div class="progress-fill" id="ramFill" style="width:0%"></div></div>
+                        </div>
+                        <div style="font-size:12px;color:#8696a0;">
+                            <div>DL Method: <span id="statDlMethod" style="color:#00a884;">--</span></div>
+                            <div style="margin-top:4px;">AI Online: <span id="statAi" style="color:#00a884;">--</span></div>
+                            <div style="margin-top:4px;">Admin LID: <span id="statAdminLid" style="color:#00a884;font-family:monospace;font-size:11px;">--</span></div>
+                            <div style="margin-top:4px;">Current Task: <span id="statTask" style="color:#ff9800;">--</span></div>
+                        </div>
+                        <hr class="divider">
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!status')">!status</button>
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!ram')">!ram</button>
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!queue')">!queue</button>
+                            <button class="btn btn-sm btn-danger" onclick="sendAdminCmd('!reconnect')">!reconnect</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Broadcasts Panel (original) -->
+            <div class="panel">
+                <div class="panel-header">Broadcasts</div>
+                <div class="panel-body">
+                    <div id="broadcastList">
+                        <div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Message Feed (original) -->
+            <div class="panel">
+                <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
+                    Message Feed
+                    <button class="btn btn-sm" onclick="loadMessages()">Refresh</button>
+                </div>
+                <div class="panel-body">
+                    <div id="msgFeed" class="msg-feed">
+                        <div class="empty-state">No messages yet. Send a message to the bot.</div>
+                    </div>
                 </div>
             </div>
         </div>
-        <div class="panel">
-            <div class="panel-header">Broadcasts</div>
-            <div class="panel-body">
-                <div id="broadcastList">
-                    <div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>
+    </div>
+
+    <!-- CHAT & MESSAGES TAB -->
+    <div id="tab-chat" class="tab-content">
+        <div class="container">
+            <div class="notice info">These simulate what group members can send to the bot. Results appear in the bot's WhatsApp inbox or group. The bot must be connected.</div>
+            <div class="grid-2">
+                <div class="panel">
+                    <div class="panel-header">Member Chat Commands <span class="tag tag-member">MEMBER</span></div>
+                    <div class="panel-body">
+                        <div class="section-title">Quick Commands</div>
+                        <div class="cmd-grid">
+                            <div class="cmd-btn" onclick="sendMemberCmd('help')">
+                                <span class="cmd-name">help</span>
+                                <span class="cmd-desc">Show all commands</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendMemberCmd('weather')">
+                                <span class="cmd-name">weather</span>
+                                <span class="cmd-desc">Get Harare weather</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendMemberCmd('ai')">
+                                <span class="cmd-name">ai</span>
+                                <span class="cmd-desc">Start AI chat session</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendMemberCmd('nsfw')">
+                                <span class="cmd-name">nsfw</span>
+                                <span class="cmd-desc">NSFW content (inbox)</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendMemberCmd('xnxx')">
+                                <span class="cmd-name">xnxx</span>
+                                <span class="cmd-desc">XNXX trending (inbox)</span>
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Search</div>
+                        <div class="input-row">
+                            <input type="text" id="searchQuery" placeholder="search query..." />
+                            <button class="btn" onclick="sendMemberCmd('search ' + document.getElementById('searchQuery').value)">Search</button>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Download from URL</div>
+                        <div class="input-row">
+                            <input type="text" id="getUrl" placeholder="https://..." />
+                            <button class="btn" onclick="sendMemberCmd('get ' + document.getElementById('getUrl').value)">Get</button>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">XNXX Search</div>
+                        <div class="input-row">
+                            <input type="text" id="xnxxQuery" placeholder="search term..." />
+                            <button class="btn" onclick="sendMemberCmd('xnxx ' + document.getElementById('xnxxQuery').value)">XNXX Search</button>
+                        </div>
+                        <div id="memberCmdResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">Live Message Feed</div>
+                    <div class="panel-body">
+                        <div id="chatMsgFeed" class="msg-feed">
+                            <div class="empty-state">Messages will appear here...</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
-        <div class="panel" style="grid-column: 1 / -1;">
-            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
-                Message Feed
-                <button class="btn" onclick="loadMessages()">Refresh</button>
+    </div>
+
+    <!-- DOWNLOADS TAB -->
+    <div id="tab-downloads" class="tab-content">
+        <div class="container">
+            <div class="notice info">Test all 5 download methods + Smart cascade. Downloads are sent to the bot's WhatsApp inbox. Bot must be connected.</div>
+            <div class="grid-2">
+                <div class="panel">
+                    <div class="panel-header">Download Music / Video</div>
+                    <div class="panel-body">
+                        <div class="section-title">Song / Music Download</div>
+                        <div class="input-row">
+                            <label>Song</label>
+                            <input type="text" id="dlSongName" placeholder="e.g. Jah Prayzah 2025" />
+                        </div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                            <button class="btn" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value)">Download (MP3)</button>
+                            <button class="btn btn-outline" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value + ' video')">Download (MP4)</button>
+                            <button class="btn btn-outline" onclick="sendMemberCmd('song ' + document.getElementById('dlSongName').value)">song command</button>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Admin Download (!download)</div>
+                        <div class="input-row">
+                            <label>Query</label>
+                            <input type="text" id="adminDlQuery" placeholder="e.g. amapiano mix 2025" />
+                        </div>
+                        <button class="btn" onclick="sendAdminCmd('!download ' + document.getElementById('adminDlQuery').value)">!download</button>
+                        <hr class="divider">
+                        <div class="section-title">Download History</div>
+                        <div style="display:flex;gap:8px;">
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!dlhistory')">!dlhistory</button>
+                            <button class="btn btn-sm btn-danger" onclick="sendAdminCmd('!dlclear')">!dlclear</button>
+                        </div>
+                        <div id="dlResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">Download Method Selector</div>
+                    <div class="panel-body">
+                        <div class="notice">Current method: <strong id="currentDlMethod">Loading...</strong></div>
+                        <div class="dl-method-grid">
+                            <div class="dl-method-btn" id="dlm1" onclick="setDlMethod(1)">
+                                <div class="method-num">1</div>
+                                <div class="method-name">ytdl-core</div>
+                                <div class="method-desc">Standard</div>
+                            </div>
+                            <div class="dl-method-btn" id="dlm2" onclick="setDlMethod(2)">
+                                <div class="method-num">2</div>
+                                <div class="method-name">play-dl</div>
+                                <div class="method-desc">Fallback</div>
+                            </div>
+                            <div class="dl-method-btn" id="dlm3" onclick="setDlMethod(3)">
+                                <div class="method-num">3</div>
+                                <div class="method-name">Invidious</div>
+                                <div class="method-desc">Privacy API</div>
+                            </div>
+                            <div class="dl-method-btn" id="dlm4" onclick="setDlMethod(4)">
+                                <div class="method-num">4</div>
+                                <div class="method-name">Piped</div>
+                                <div class="method-desc">Privacy API</div>
+                            </div>
+                            <div class="dl-method-btn" id="dlm5" onclick="setDlMethod(5)">
+                                <div class="method-num">5</div>
+                                <div class="method-name">Cobalt</div>
+                                <div class="method-desc">Multi-platform</div>
+                            </div>
+                            <div class="dl-method-btn" id="dlm6" onclick="setDlMethod(6)">
+                                <div class="method-num">6</div>
+                                <div class="method-name">Smart</div>
+                                <div class="method-desc">Auto-cascade</div>
+                            </div>
+                        </div>
+                        <div id="dlMethodResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
             </div>
-            <div class="panel-body">
-                <div id="msgFeed" class="msg-feed">
-                    <div class="empty-state">No messages yet. Send a message to the bot.</div>
+        </div>
+    </div>
+
+    <!-- ADMIN COMMANDS TAB -->
+    <div id="tab-admin" class="tab-content">
+        <div class="container">
+            <div class="notice warn">These are admin-only commands. They simulate what you send to the bot via WhatsApp DM. The bot must be connected and recognize you as admin.</div>
+            <div class="grid-2">
+                <div class="panel">
+                    <div class="panel-header">Bot Control <span class="tag tag-admin">ADMIN</span></div>
+                    <div class="panel-body">
+                        <div class="section-title">Status &amp; Info</div>
+                        <div class="cmd-grid">
+                            <div class="cmd-btn" onclick="sendAdminCmd('!status')">
+                                <span class="cmd-name">!status</span>
+                                <span class="cmd-desc">Full bot status</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!ram')">
+                                <span class="cmd-name">!ram</span>
+                                <span class="cmd-desc">RAM usage</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!queue')">
+                                <span class="cmd-name">!queue</span>
+                                <span class="cmd-desc">Task queue</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!debug')">
+                                <span class="cmd-name">!debug</span>
+                                <span class="cmd-desc">Admin detection debug</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!dump')">
+                                <span class="cmd-name">!dump</span>
+                                <span class="cmd-desc">Raw participant data</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!resolveadmin')">
+                                <span class="cmd-name">!resolveadmin</span>
+                                <span class="cmd-desc">Re-resolve admin LID</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!iamadmin')">
+                                <span class="cmd-name">!iamadmin</span>
+                                <span class="cmd-desc">Register as admin</span>
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Connection</div>
+                        <div class="cmd-grid">
+                            <div class="cmd-btn" onclick="sendAdminCmd('!reconnect')">
+                                <span class="cmd-name">!reconnect</span>
+                                <span class="cmd-desc">Force reconnect</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!morning')">
+                                <span class="cmd-name">!morning</span>
+                                <span class="cmd-desc">Send morning tutorial</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!weather')">
+                                <span class="cmd-name">!weather</span>
+                                <span class="cmd-desc">Send weather to groups</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!scanlinks')">
+                                <span class="cmd-name">!scanlinks</span>
+                                <span class="cmd-desc">Scan for group links</span>
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Custom Command</div>
+                        <div class="input-row">
+                            <input type="text" id="customAdminCmd" placeholder="e.g. !status" />
+                            <button class="btn" onclick="sendAdminCmd(document.getElementById('customAdminCmd').value)">Send</button>
+                        </div>
+                        <div id="adminCmdResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">Group Management <span class="tag tag-admin">ADMIN</span></div>
+                    <div class="panel-body">
+                        <div class="section-title">Groups</div>
+                        <div class="cmd-grid">
+                            <div class="cmd-btn" onclick="sendAdminCmd('!groups')">
+                                <span class="cmd-name">!groups</span>
+                                <span class="cmd-desc">Group info</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!joingroups')">
+                                <span class="cmd-name">!joingroups</span>
+                                <span class="cmd-desc">Join target groups</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!fetchhistory music')">
+                                <span class="cmd-name">!fetchhistory music</span>
+                                <span class="cmd-desc">Fetch music group history</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!fetchhistory movies')">
+                                <span class="cmd-name">!fetchhistory movies</span>
+                                <span class="cmd-desc">Fetch movies group history</span>
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Post Content</div>
+                        <div class="cmd-grid">
+                            <div class="cmd-btn" onclick="sendAdminCmd('!postgroup music')">
+                                <span class="cmd-name">!postgroup music</span>
+                                <span class="cmd-desc">Post to music group</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!postgroup movies')">
+                                <span class="cmd-name">!postgroup movies</span>
+                                <span class="cmd-desc">Post to movies group</span>
+                            </div>
+                            <div class="cmd-btn" onclick="sendAdminCmd('!postallgroups')">
+                                <span class="cmd-name">!postallgroups</span>
+                                <span class="cmd-desc">Post to all groups</span>
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div class="section-title">Schedule Interval</div>
+                        <div class="input-row">
+                            <label>Minutes</label>
+                            <input type="number" id="intervalMins" placeholder="10-60" min="10" max="60" value="30" />
+                            <button class="btn" onclick="sendAdminCmd('!interval ' + document.getElementById('intervalMins').value)">Set</button>
+                        </div>
+                        <div id="groupMgmtResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Broadcast Panel -->
+            <div class="panel">
+                <div class="panel-header">Broadcast System <span class="tag tag-admin">ADMIN</span></div>
+                <div class="panel-body">
+                    <div class="grid-2">
+                        <div>
+                            <div class="section-title">Start Broadcast</div>
+                            <div class="input-row">
+                                <textarea id="bcMessage" placeholder="Broadcast message..."></textarea>
+                            </div>
+                            <button class="btn" onclick="startBroadcast()">!broadcast</button>
+                            <hr class="divider">
+                            <div class="section-title">Stop Broadcast</div>
+                            <div class="input-row">
+                                <input type="text" id="bcStopId" placeholder="Broadcast ID (e.g. 1)" />
+                                <button class="btn btn-danger" onclick="sendAdminCmd('!stop ' + document.getElementById('bcStopId').value)">!stop</button>
+                            </div>
+                            <div id="bcResult" class="result-box" style="display:none;"></div>
+                        </div>
+                        <div>
+                            <div class="section-title">Active Broadcasts</div>
+                            <div id="adminBroadcastList">
+                                <div class="empty-state">No broadcasts</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI SYSTEM TAB -->
+    <div id="tab-ai" class="tab-content">
+        <div class="container">
+            <div class="grid-2">
+                <div class="panel">
+                    <div class="panel-header">AI Provider Status</div>
+                    <div class="panel-body">
+                        <div class="notice">Check which AI providers are online and their latency.</div>
+                        <div style="display:flex;gap:8px;margin-bottom:16px;">
+                            <button class="btn" onclick="checkAiStatus()">!ai list</button>
+                            <button class="btn btn-outline" onclick="sendAdminCmd('!ai status')">Force Refresh</button>
+                        </div>
+                        <div id="aiStatusGrid" class="cmd-grid">
+                            <div class="ai-card"><div class="ai-name">DadGPT</div><div class="ai-status unknown">Unknown</div></div>
+                            <div class="ai-card"><div class="ai-name">Groq</div><div class="ai-status unknown">Unknown</div></div>
+                            <div class="ai-card"><div class="ai-name">Zai</div><div class="ai-status unknown">Unknown</div></div>
+                            <div class="ai-card"><div class="ai-name">Uncensored AI</div><div class="ai-status unknown">Unknown</div></div>
+                        </div>
+                        <div id="aiStatusResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">AI Chat Test</div>
+                    <div class="panel-body">
+                        <div class="notice">Test AI chat as a group member. Replies go to bot's WhatsApp inbox.</div>
+                        <div class="input-row">
+                            <label>Command</label>
+                            <select id="aiChatCmd">
+                                <option value="ai">ai (start session)</option>
+                                <option value="1">1 (select DadGPT)</option>
+                                <option value="2">2 (select Groq)</option>
+                                <option value="3">3 (select Zai)</option>
+                                <option value="ai end">ai end (stop)</option>
+                                <option value="ai switch">ai switch (change AI)</option>
+                            </select>
+                            <button class="btn" onclick="sendMemberCmd(document.getElementById('aiChatCmd').value)">Send</button>
+                        </div>
+                        <div class="input-row">
+                            <input type="text" id="aiChatMsg" placeholder="Type a message to AI..." />
+                            <button class="btn" onclick="sendMemberCmd(document.getElementById('aiChatMsg').value)">Send</button>
+                        </div>
+                        <div id="aiChatResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- GROUPS & BROADCASTS TAB -->
+    <div id="tab-groups" class="tab-content">
+        <div class="container">
+            <div class="grid-2">
+                <div class="panel">
+                    <div class="panel-header">Target Groups</div>
+                    <div class="panel-body">
+                        <div id="groupStatusList">
+                            <div class="group-status">
+                                <div class="group-dot" id="musicDot"></div>
+                                <div class="group-info">
+                                    <div class="group-name">MUSIC Group</div>
+                                    <div class="group-meta" id="musicMeta">Not joined</div>
+                                </div>
+                                <button class="btn btn-sm" onclick="sendAdminCmd('!postgroup music')">Post</button>
+                            </div>
+                            <div class="group-status">
+                                <div class="group-dot" id="moviesDot"></div>
+                                <div class="group-info">
+                                    <div class="group-name">MOVIES Group</div>
+                                    <div class="group-meta" id="moviesMeta">Not joined</div>
+                                </div>
+                                <button class="btn btn-sm" onclick="sendAdminCmd('!postgroup movies')">Post</button>
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!joingroups')">Join Groups</button>
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!groups')">Refresh Info</button>
+                            <button class="btn btn-sm" onclick="sendAdminCmd('!postallgroups')">Post All</button>
+                        </div>
+                        <div id="groupsResult" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">Broadcasts (original)</div>
+                    <div class="panel-body">
+                        <div id="broadcastList2">
+                            <div class="empty-state">No broadcasts yet.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TEST SUITE TAB -->
+    <div id="tab-tests" class="tab-content">
+        <div class="container">
+            <div class="notice info">Run test suites to verify bot functionality. Results are sent to your WhatsApp DM AND shown here.</div>
+            <div class="grid-2">
+                <div class="panel">
+                    <div class="panel-header">Test Suites <span class="tag tag-admin">ADMIN</span></div>
+                    <div class="panel-body">
+                        <div class="section-title">Basic Test</div>
+                        <button class="btn" onclick="runTest('basic')">!test (Basic)</button>
+                        <p style="font-size:12px;color:#8696a0;margin-top:6px;">Tests: RAM, utilities, weather, YouTube search, meme API, AI, admin detection, translation, web search, schedule, members</p>
+                        <hr class="divider">
+                        <div class="section-title">Full Test (!test all on)</div>
+                        <div class="input-row">
+                            <input type="text" id="testQuery" placeholder="e.g. amapiano 2025" value="amapiano 2025" />
+                            <button class="btn" onclick="runTest('all')">Run Full Test</button>
+                        </div>
+                        <p style="font-size:12px;color:#8696a0;margin-top:6px;">Tests: RAM, weather, YouTube, AI chat, web search, meme, download audio, download video, image, AI content decision, members, translation, schedule</p>
+                        <hr class="divider">
+                        <div class="section-title">Download Method Tests</div>
+                        <div class="dl-method-grid">
+                            <button class="btn btn-outline btn-sm" onclick="runTest('dl1')">test download1<br><small>ytdl-core</small></button>
+                            <button class="btn btn-outline btn-sm" onclick="runTest('dl2')">test download2<br><small>play-dl</small></button>
+                            <button class="btn btn-outline btn-sm" onclick="runTest('dl3')">test download3<br><small>Invidious</small></button>
+                            <button class="btn btn-outline btn-sm" onclick="runTest('dl4')">test download4<br><small>Piped</small></button>
+                            <button class="btn btn-outline btn-sm" onclick="runTest('dl5')">test download5<br><small>Cobalt</small></button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">Test Results</div>
+                    <div class="panel-body">
+                        <div id="testStatus" style="font-size:13px;color:#8696a0;margin-bottom:12px;">No test running.</div>
+                        <div id="testResults"></div>
+                        <div id="testSummary" class="result-box" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- API Endpoint Tester -->
+            <div class="panel">
+                <div class="panel-header">API Endpoints</div>
+                <div class="panel-body">
+                    <div class="notice">Test the bot's REST API endpoints directly.</div>
+                    <div class="cmd-grid">
+                        <div class="cmd-btn" onclick="testApi('/api/status')">
+                            <span class="cmd-name">GET /api/status</span>
+                            <span class="cmd-desc">Bot status JSON</span>
+                        </div>
+                        <div class="cmd-btn" onclick="testApi('/api/qr')">
+                            <span class="cmd-name">GET /api/qr</span>
+                            <span class="cmd-desc">QR code data</span>
+                        </div>
+                        <div class="cmd-btn" onclick="testApi('/api/messages')">
+                            <span class="cmd-name">GET /api/messages</span>
+                            <span class="cmd-desc">Recent messages</span>
+                        </div>
+                        <div class="cmd-btn" onclick="testApi('/api/broadcasts')">
+                            <span class="cmd-name">GET /api/broadcasts</span>
+                            <span class="cmd-desc">Broadcast list</span>
+                        </div>
+                        <div class="cmd-btn" onclick="testApi('/health')">
+                            <span class="cmd-name">GET /health</span>
+                            <span class="cmd-desc">Health check</span>
+                        </div>
+                        <div class="cmd-btn" onclick="testApi('/ping')">
+                            <span class="cmd-name">GET /ping</span>
+                            <span class="cmd-desc">Ping pong</span>
+                        </div>
+                    </div>
+                    <div id="apiTestResult" class="result-box" style="display:none;"></div>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
+        // ============================================================
+        //  STATE
+        // ============================================================
         let lastMsgCount = 0;
+        let currentTab = 'dashboard';
+        let botStatus = {};
+        let actionLog = [];
 
+        // ============================================================
+        //  TAB NAVIGATION
+        // ============================================================
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + tab).classList.add('active');
+            event.target.classList.add('active');
+            currentTab = tab;
+        }
+
+        // ============================================================
+        //  ORIGINAL FUNCTIONS (kept intact)
+        // ============================================================
         async function loadStatus() {
             try {
                 const res = await fetch('/api/status');
                 const data = await res.json();
+                botStatus = data;
                 const badge = document.getElementById('statusBadge');
                 badge.textContent = data.connection.charAt(0).toUpperCase() + data.connection.slice(1);
                 badge.className = 'status-badge status-' + data.connection;
+                // Update stats
+                const ramMB = data.ramMB || 0;
+                const maxRam = 512;
+                const ramPct = Math.round(ramMB / maxRam * 100);
+                document.getElementById('statRam').textContent = ramMB;
+                document.getElementById('statUptime').textContent = Math.floor((data.uptime || 0) / 3600);
+                document.getElementById('statGroups').textContent = data.groups || 0;
+                document.getElementById('statMembers').textContent = data.memberCount || 0;
+                document.getElementById('statQueue').textContent = data.queueSize || 0;
+                document.getElementById('statLidMap').textContent = data.lidMapSize || 0;
+                document.getElementById('ramPct').textContent = ramPct + '%';
+                const fill = document.getElementById('ramFill');
+                fill.style.width = ramPct + '%';
+                fill.className = 'progress-fill' + (ramPct > 80 ? ' danger' : ramPct > 60 ? ' warn' : '');
+                document.getElementById('statDlMethod').textContent = data.groupDlName || '--';
+                document.getElementById('statAi').textContent = (data.aiOnline || []).join(', ') || 'None';
+                document.getElementById('statAdminLid').textContent = data.adminLidJid || 'NOT SET';
+                document.getElementById('statTask').textContent = data.currentTask || 'none';
+                // Update DL method buttons
+                const dlm = data.groupDlMethod || 6;
+                document.getElementById('currentDlMethod').textContent = data.groupDlName || 'Smart';
+                for (let i = 1; i <= 6; i++) {
+                    const btn = document.getElementById('dlm' + i);
+                    if (btn) btn.className = 'dl-method-btn' + (i === dlm ? ' active' : '');
+                }
+                // Update group status
+                const tg = data.targetGroups || {};
+                document.getElementById('musicDot').className = 'group-dot' + (tg.music === 'set' ? ' active' : '');
+                document.getElementById('moviesDot').className = 'group-dot' + (tg.movies === 'set' ? ' active' : '');
+                document.getElementById('musicMeta').textContent = tg.music === 'set' ? 'Joined' : 'Not joined';
+                document.getElementById('moviesMeta').textContent = tg.movies === 'set' ? 'Joined' : 'Not joined';
                 return data;
             } catch (e) { return {}; }
         }
@@ -172,22 +835,26 @@
             try {
                 const res = await fetch('/api/messages');
                 const messages = await res.json();
-                const feed = document.getElementById('msgFeed');
-                if (messages.length === 0) {
-                    feed.innerHTML = '<div class="empty-state">No messages yet.</div>';
-                    return;
-                }
-                feed.innerHTML = messages.slice().reverse().map(function(m) {
-                    var badges = '';
-                    if (m.isGroup) badges += '<span class="badge badge-group">Group</span>';
-                    else badges += '<span class="badge badge-dm">DM</span>';
-                    if (m.isAdmin) badges += '<span class="badge badge-admin">Admin</span>';
-                    return '<div class="msg-item">'
-                        + '<div class="msg-sender">' + (m.pushName || m.bare) + ' <span style="color:#667781;font-weight:400;font-size:11px;">' + m.bare + '</span></div>'
-                        + '<div class="msg-text">' + escapeHtml(m.text) + '</div>'
-                        + '<div class="msg-meta">' + badges + '<span>' + new Date(m.ts).toLocaleTimeString() + '</span></div>'
-                        + '</div>';
-                }).join('');
+                const feeds = ['msgFeed', 'chatMsgFeed'];
+                feeds.forEach(function(feedId) {
+                    const feed = document.getElementById(feedId);
+                    if (!feed) return;
+                    if (messages.length === 0) {
+                        feed.innerHTML = '<div class="empty-state">No messages yet.</div>';
+                        return;
+                    }
+                    feed.innerHTML = messages.slice().reverse().map(function(m) {
+                        var badges = '';
+                        if (m.isGroup) badges += '<span class="badge badge-group">Group</span>';
+                        else badges += '<span class="badge badge-dm">DM</span>';
+                        if (m.isAdmin) badges += '<span class="badge badge-admin">Admin</span>';
+                        return '<div class="msg-item">'
+                            + '<div class="msg-sender">' + escapeHtml(m.pushName || m.bare) + ' <span style="color:#667781;font-weight:400;font-size:11px;">' + escapeHtml(m.bare) + '</span></div>'
+                            + '<div class="msg-text">' + escapeHtml(m.text) + '</div>'
+                            + '<div class="msg-meta">' + badges + '<span>' + new Date(m.ts).toLocaleTimeString() + '</span></div>'
+                            + '</div>';
+                    }).join('');
+                });
             } catch (e) {}
         }
 
@@ -195,21 +862,25 @@
             try {
                 const res = await fetch('/api/broadcasts');
                 const list = await res.json();
-                var container = document.getElementById('broadcastList');
-                if (list.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>';
-                    return;
-                }
-                container.innerHTML = list.map(function(b) {
-                    return '<div class="bc-item">'
-                        + '<div class="bc-header">'
-                        + '<span class="bc-id">#' + b.id + '</span>'
-                        + '<span class="' + (b.active ? 'bc-active' : 'bc-stopped') + '">' + (b.active ? 'Active' : 'Stopped') + '</span>'
-                        + '</div>'
-                        + '<div class="bc-msg">' + escapeHtml(b.message.substring(0, 80)) + '</div>'
-                        + '<div class="bc-info">Groups: ' + b.groups + ' | Sent: ' + (b.sentCount || 0) + 'x</div>'
-                        + '</div>';
-                }).join('');
+                var containers = ['broadcastList', 'broadcastList2', 'adminBroadcastList'];
+                containers.forEach(function(cid) {
+                    var container = document.getElementById(cid);
+                    if (!container) return;
+                    if (list.length === 0) {
+                        container.innerHTML = '<div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>';
+                        return;
+                    }
+                    container.innerHTML = list.map(function(b) {
+                        return '<div class="bc-item">'
+                            + '<div class="bc-header">'
+                            + '<span class="bc-id">#' + b.id + '</span>'
+                            + '<span class="' + (b.active ? 'bc-active' : 'bc-stopped') + '">' + (b.active ? 'Active' : 'Stopped') + '</span>'
+                            + '</div>'
+                            + '<div class="bc-msg">' + escapeHtml(b.message.substring(0, 80)) + '</div>'
+                            + '<div class="bc-info">Groups: ' + b.groups + ' | Sent: ' + (b.sentCount || 0) + 'x</div>'
+                            + '</div>';
+                    }).join('');
+                });
             } catch (e) {}
         }
 
@@ -222,15 +893,142 @@
 
         function escapeHtml(text) {
             var div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = text || '';
             return div.innerHTML;
         }
 
+        // ============================================================
+        //  NEW: ADMIN COMMAND SENDER
+        // ============================================================
+        async function sendAdminCmd(cmd) {
+            if (!cmd || !cmd.trim()) return;
+            logAction('ADMIN', cmd);
+            try {
+                const res = await fetch('/api/admin-cmd', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cmd: cmd.trim() })
+                });
+                const data = await res.json();
+                showResult('adminCmdResult', data.ok ? 'Sent: ' + cmd + '\n\nResult: ' + (data.result || 'Command queued') : 'Error: ' + (data.error || 'Failed'), data.ok);
+                showResult('groupMgmtResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
+                showResult('groupsResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
+                showResult('dlResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
+                showResult('bcResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
+            } catch (e) {
+                showResult('adminCmdResult', 'Network error: ' + e.message, false);
+            }
+        }
+
+        // ============================================================
+        //  NEW: MEMBER COMMAND SENDER
+        // ============================================================
+        async function sendMemberCmd(cmd) {
+            if (!cmd || !cmd.trim()) return;
+            logAction('MEMBER', cmd);
+            try {
+                const res = await fetch('/api/member-cmd', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cmd: cmd.trim() })
+                });
+                const data = await res.json();
+                const msg = data.ok ? 'Sent: ' + cmd + '\n\nResult: ' + (data.result || 'Command sent to bot') : 'Error: ' + (data.error || 'Failed');
+                showResult('memberCmdResult', msg, data.ok);
+                showResult('aiChatResult', msg, data.ok);
+            } catch (e) {
+                showResult('memberCmdResult', 'Network error: ' + e.message, false);
+            }
+        }
+
+        // ============================================================
+        //  NEW: DL METHOD SETTER
+        // ============================================================
+        async function setDlMethod(num) {
+            await sendAdminCmd('!dlmethod ' + num);
+            showResult('dlMethodResult', 'Set download method to ' + num, true);
+            setTimeout(loadStatus, 1000);
+        }
+
+        // ============================================================
+        //  NEW: AI STATUS CHECK
+        // ============================================================
+        async function checkAiStatus() {
+            await sendAdminCmd('!ai list');
+            showResult('aiStatusResult', 'AI status check sent. Results will appear in your WhatsApp DM.', true);
+        }
+
+        // ============================================================
+        //  NEW: BROADCAST STARTER
+        // ============================================================
+        async function startBroadcast() {
+            const msg = document.getElementById('bcMessage').value.trim();
+            if (!msg) { alert('Enter a broadcast message'); return; }
+            await sendAdminCmd('!broadcast' + msg);
+            document.getElementById('bcMessage').value = '';
+        }
+
+        // ============================================================
+        //  NEW: TEST RUNNER
+        // ============================================================
+        async function runTest(type) {
+            const query = document.getElementById('testQuery') ? document.getElementById('testQuery').value.trim() : 'amapiano 2025';
+            let cmd = '';
+            if (type === 'basic') cmd = '!test';
+            else if (type === 'all') cmd = '!test all on ' + (query || 'amapiano 2025');
+            else if (type.startsWith('dl')) cmd = 'test download' + type.replace('dl', '');
+            document.getElementById('testStatus').innerHTML = '<span class="spinner"></span>Running: ' + cmd + '...';
+            document.getElementById('testResults').innerHTML = '';
+            document.getElementById('testSummary').style.display = 'none';
+            await sendAdminCmd(cmd);
+            document.getElementById('testStatus').textContent = 'Test sent! Results will appear in your WhatsApp DM.';
+            showResult('testSummary', 'Test command sent: ' + cmd + '\n\nResults will be sent to your WhatsApp DM by the bot.\nCheck your WhatsApp for detailed results.', true);
+        }
+
+        // ============================================================
+        //  NEW: API TESTER
+        // ============================================================
+        async function testApi(endpoint) {
+            try {
+                const res = await fetch(endpoint);
+                const text = await res.text();
+                let pretty = text;
+                try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch {}
+                showResult('apiTestResult', 'GET ' + endpoint + ' -> ' + res.status + '\n\n' + pretty, res.ok);
+            } catch (e) {
+                showResult('apiTestResult', 'Error: ' + e.message, false);
+            }
+        }
+
+        // ============================================================
+        //  HELPERS
+        // ============================================================
+        function showResult(id, text, ok) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.style.display = 'block';
+            el.textContent = text;
+            el.className = 'result-box ' + (ok ? 'success' : 'error');
+        }
+
+        function logAction(type, cmd) {
+            actionLog.unshift({ type, cmd, ts: new Date().toLocaleTimeString() });
+            if (actionLog.length > 50) actionLog.pop();
+        }
+
+        // ============================================================
+        //  INIT & POLLING
+        // ============================================================
         loadStatus();
         loadQR();
         loadMessages();
         loadBroadcasts();
-        setInterval(function() { loadStatus(); loadQR(); loadMessages(); loadBroadcasts(); }, 3000);
+        setInterval(function() {
+            loadStatus();
+            loadQR();
+            loadMessages();
+            loadBroadcasts();
+        }, 3000);
     </script>
 </body>
 </html>

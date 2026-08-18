@@ -2262,6 +2262,45 @@ sock.ev.on('messaging-history.set', ({ messages, chats, contacts }) => {
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+// ═══════════════════════════════════════════════════════════════
+//  WEB UI: Admin Command Endpoint — sends a command as if admin DM'd the bot
+// ═══════════════════════════════════════════════════════════════
+app.post('/api/admin-cmd', async (req, res) => {
+  const { cmd } = req.body || {};
+  if (!cmd) return res.json({ ok: false, error: 'No command provided' });
+  if (!sock || connectionStatus !== 'connected') return res.json({ ok: false, error: 'Bot not connected' });
+  try {
+    // Simulate admin DM by processing the command directly
+    const replyJid = ADMIN + '@s.whatsapp.net';
+    const fakeMsg = { key: { remoteJid: replyJid, fromMe: false, id: 'webui_' + Date.now() }, message: { conversation: cmd }, pushName: 'WebUI' };
+    // Inject into message handler by emitting a fake upsert
+    sock.ev.emit('messages.upsert', { messages: [fakeMsg], type: 'notify' });
+    res.json({ ok: true, result: 'Command "' + cmd + '" sent to bot. Check your WhatsApp DM for response.' });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  WEB UI: Member Command Endpoint — sends a command as if a group member sent it
+// ═══════════════════════════════════════════════════════════════
+app.post('/api/member-cmd', async (req, res) => {
+  const { cmd } = req.body || {};
+  if (!cmd) return res.json({ ok: false, error: 'No command provided' });
+  if (!sock || connectionStatus !== 'connected') return res.json({ ok: false, error: 'Bot not connected' });
+  try {
+    // Find a target group to simulate the command from
+    const groupJid = targetGroups.music || targetGroups.movies || [...knownGroups][0];
+    if (!groupJid) return res.json({ ok: false, error: 'No group joined yet. Use !joingroups first.' });
+    const senderJid = ADMIN + '@s.whatsapp.net';
+    const fakeMsg = { key: { remoteJid: groupJid, fromMe: false, id: 'webui_mem_' + Date.now(), participant: senderJid }, message: { conversation: cmd }, pushName: 'WebUI' };
+    sock.ev.emit('messages.upsert', { messages: [fakeMsg], type: 'notify' });
+    res.json({ ok: true, result: 'Member command "' + cmd + '" sent. Response will go to your WhatsApp inbox.' });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/api/status', (req, res) => {
   res.json({ connection: connectionStatus, adminOnline: isAdminOnline, qrAvailable: !!qrCodeData, ramMB: getRamMB(), queueSize: queueSize(), currentTask: currentTaskName, groups: knownGroups.size, targetGroups: Object.fromEntries(Object.entries(targetGroups).map(([k, v]) => [k, v ? 'set' : 'null'])), reconnectAttempts, uptime: Math.round((Date.now() - botStartTime) / 1000), version: VERSION, adminLidJid: ADMIN_LID_JID || null, groupDlMethod, groupDlName: getGroupDlName(), aiOnline: getAvailableAis('both').map(k => AI_CONFIG[k].name), translate: !!translator, memberCount: [...groupMembers.values()].reduce((s, m) => s + m.size, 0), adminCount: [...groupAdmins.values()].reduce((s, a) => s + a.size, 0), lidMapSize: lidToPhone.size });
 });

@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Bot v16.0</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b141a; color: #e9edef; min-height: 100vh; }
+        .header { background: #1f2c34; padding: 16px 24px; border-bottom: 1px solid #2a3942; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .header h1 { font-size: 18px; font-weight: 600; color: #00a884; }
+        .status-badge { padding: 6px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; white-space: nowrap; }
+        .status-disconnected { background: #ea0038; color: white; }
+        .status-connecting { background: #ff9800; color: #000; }
+        .status-qr { background: #25d366; color: #000; }
+        .status-connected { background: #25d366; color: #000; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 768px) { .container { grid-template-columns: 1fr; } }
+        .panel { background: #111b21; border-radius: 12px; border: 1px solid #2a3942; overflow: hidden; }
+        .panel-header { background: #1f2c34; padding: 14px 18px; font-size: 15px; font-weight: 600; color: #00a884; border-bottom: 1px solid #2a3942; display: flex; justify-content: space-between; align-items: center; }
+        .panel-body { padding: 16px; }
+        .qr-container { display: flex; justify-content: center; align-items: center; min-height: 300px; flex-direction: column; gap: 12px; }
+        .qr-container img { border-radius: 12px; max-width: 300px; }
+        .qr-placeholder { color: #8696a0; font-size: 14px; text-align: center; }
+        .connected-msg { color: #25d366; font-size: 16px; text-align: center; padding: 40px 20px; }
+        .link-section { margin-top: 16px; text-align: center; }
+        .link-section input { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 10px 14px; border-radius: 8px; width: 220px; font-size: 14px; text-align: center; }
+        .link-section button { background: #00a884; color: #000; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; margin-top: 8px; width: 220px; }
+        .link-section button:hover { background: #00c49a; }
+        .link-section button:disabled { background: #3a4a54; color: #667781; cursor: not-allowed; }
+        .link-status { color: #8696a0; font-size: 12px; margin-top: 8px; min-height: 18px; }
+        .link-status.success { color: #25d366; }
+        .link-status.error { color: #ea0038; }
+        .msg-feed { max-height: 500px; overflow-y: auto; }
+        .msg-item { padding: 10px 14px; border-bottom: 1px solid #1f2c34; font-size: 13px; }
+        .msg-item:last-child { border-bottom: none; }
+        .msg-sender { font-weight: 600; color: #00a884; margin-bottom: 2px; }
+        .msg-text { color: #e9edef; word-break: break-word; }
+        .msg-meta { color: #667781; font-size: 11px; margin-top: 4px; display: flex; gap: 8px; }
+        .badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+        .badge-group { background: #0084ff; color: white; }
+        .badge-admin { background: #ff6600; color: white; }
+        .badge-dm { background: #667781; color: white; }
+        .bc-item { padding: 12px 14px; border-bottom: 1px solid #1f2c34; }
+        .bc-item:last-child { border-bottom: none; }
+        .bc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .bc-id { font-weight: 700; color: #00a884; }
+        .bc-active { color: #25d366; font-weight: 600; }
+        .bc-stopped { color: #ea0038; font-weight: 600; }
+        .bc-msg { color: #e9edef; font-size: 13px; margin-bottom: 4px; }
+        .bc-info { color: #667781; font-size: 11px; }
+        .empty-state { color: #667781; text-align: center; padding: 40px; font-size: 14px; }
+        .btn { background: #00a884; color: #000; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+        .btn:hover { background: #00c49a; }
+        .btn-danger { background: #ea0038; color: white; }
+        .btn-danger:hover { background: #ff1744; }
+        .qr-actions { display: flex; gap: 10px; justify-content: center; margin-top: 12px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <h1>WhatsApp Bot v16.0</h1>
+        </div>
+        <span id="statusBadge" class="status-badge status-disconnected">Disconnected</span>
+    </div>
+    <div class="container">
+        <div class="panel">
+            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
+                QR Code / Link Phone
+                <button class="btn btn-danger" onclick="refreshQR()">Refresh QR</button>
+            </div>
+            <div class="panel-body">
+                <div id="qrContainer" class="qr-container">
+                    <div class="qr-placeholder">Connecting...</div>
+                </div>
+                <div class="link-section">
+                    <p style="color:#8696a0;font-size:13px;margin-bottom:8px;">Or link your phone number to get the pairing code:</p>
+                    <input type="tel" id="phoneInput" placeholder="2637XXXXXXXX" maxlength="15" />
+                    <button id="linkBtn" onclick="linkPhone()">Get WhatsApp Code</button>
+                    <div id="linkStatus" class="link-status"></div>
+                </div>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="panel-header">Broadcasts</div>
+            <div class="panel-body">
+                <div id="broadcastList">
+                    <div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>
+                </div>
+            </div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
+            <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
+                Message Feed
+                <button class="btn" onclick="loadMessages()">Refresh</button>
+            </div>
+            <div class="panel-body">
+                <div id="msgFeed" class="msg-feed">
+                    <div class="empty-state">No messages yet. Send a message to the bot.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let lastMsgCount = 0;
+
+        async function loadStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                const badge = document.getElementById('statusBadge');
+                badge.textContent = data.connection.charAt(0).toUpperCase() + data.connection.slice(1);
+                badge.className = 'status-badge status-' + data.connection;
+                return data;
+            } catch (e) { return {}; }
+        }
+
+        async function loadQR() {
+            try {
+                const res = await fetch('/api/qr');
+                const data = await res.json();
+                const container = document.getElementById('qrContainer');
+                if (data.qr) {
+                    container.innerHTML = '<img src="' + data.qr + '" alt="Scan QR Code" />';
+                } else if (data.connection === 'connected') {
+                    container.innerHTML = '<div class="connected-msg">Bot is connected!<br><br>Messages will appear in the feed below.<br><br><small>Test from a DIFFERENT phone than the one linked.</small></div>';
+                } else {
+                    container.innerHTML = '<div class="qr-placeholder">Waiting for QR code...<br><small>Status: ' + (data.connection || 'connecting') + '</small></div>';
+                }
+            } catch (e) {}
+        }
+
+        async function linkPhone() {
+            const phone = document.getElementById('phoneInput').value.replace(/[^0-9]/g, '');
+            const btn = document.getElementById('linkBtn');
+            const status = document.getElementById('linkStatus');
+            if (!phone || phone.length < 10) {
+                status.textContent = 'Enter a valid phone number (10+ digits)';
+                status.className = 'link-status error';
+                return;
+            }
+            btn.disabled = true;
+            btn.textContent = 'Getting code...';
+            status.textContent = '';
+            status.className = 'link-status';
+            try {
+                const res = await fetch('/api/link-phone', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone: phone })
+                });
+                const data = await res.json();
+                if (data.code) {
+                    status.innerHTML = '<span class="success">Code: ' + data.code + '</span><br><small>Open WhatsApp > Linked Devices > Link a device > Enter this code</small>';
+                    status.className = 'link-status success';
+                } else {
+                    status.textContent = data.error || 'Failed to get code';
+                    status.className = 'link-status error';
+                }
+            } catch (e) {
+                status.textContent = 'Error: ' + (e.message || 'Unknown error');
+                status.className = 'link-status error';
+            }
+            btn.disabled = false;
+            btn.textContent = 'Get WhatsApp Code';
+        }
+
+        async function loadMessages() {
+            try {
+                const res = await fetch('/api/messages');
+                const messages = await res.json();
+                const feed = document.getElementById('msgFeed');
+                if (messages.length === 0) {
+                    feed.innerHTML = '<div class="empty-state">No messages yet.</div>';
+                    return;
+                }
+                feed.innerHTML = messages.slice().reverse().map(function(m) {
+                    var badges = '';
+                    if (m.isGroup) badges += '<span class="badge badge-group">Group</span>';
+                    else badges += '<span class="badge badge-dm">DM</span>';
+                    if (m.isAdmin) badges += '<span class="badge badge-admin">Admin</span>';
+                    return '<div class="msg-item">'
+                        + '<div class="msg-sender">' + (m.pushName || m.bare) + ' <span style="color:#667781;font-weight:400;font-size:11px;">' + m.bare + '</span></div>'
+                        + '<div class="msg-text">' + escapeHtml(m.text) + '</div>'
+                        + '<div class="msg-meta">' + badges + '<span>' + new Date(m.ts).toLocaleTimeString() + '</span></div>'
+                        + '</div>';
+                }).join('');
+            } catch (e) {}
+        }
+
+        async function loadBroadcasts() {
+            try {
+                const res = await fetch('/api/broadcasts');
+                const list = await res.json();
+                var container = document.getElementById('broadcastList');
+                if (list.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>';
+                    return;
+                }
+                container.innerHTML = list.map(function(b) {
+                    return '<div class="bc-item">'
+                        + '<div class="bc-header">'
+                        + '<span class="bc-id">#' + b.id + '</span>'
+                        + '<span class="' + (b.active ? 'bc-active' : 'bc-stopped') + '">' + (b.active ? 'Active' : 'Stopped') + '</span>'
+                        + '</div>'
+                        + '<div class="bc-msg">' + escapeHtml(b.message.substring(0, 80)) + '</div>'
+                        + '<div class="bc-info">Groups: ' + b.groups + ' | Sent: ' + (b.sentCount || 0) + 'x</div>'
+                        + '</div>';
+                }).join('');
+            } catch (e) {}
+        }
+
+        async function refreshQR() {
+            if (!confirm('This will clear the current session and generate a new QR code. Continue?')) return;
+            document.getElementById('qrContainer').innerHTML = '<div class="qr-placeholder">Reconnecting...</div>';
+            document.getElementById('linkStatus').textContent = '';
+            try { await fetch('/api/reconnect', { method: 'POST' }); } catch (e) {}
+        }
+
+        function escapeHtml(text) {
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        loadStatus();
+        loadQR();
+        loadMessages();
+        loadBroadcasts();
+        setInterval(function() { loadStatus(); loadQR(); loadMessages(); loadBroadcasts(); }, 3000);
+    </script>
+</body>
+</html>

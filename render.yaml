@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: whatsapp-bot
+    runtime: node
+    plan: free
+    memory: 512MB
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      # v16: ADMIN_LID — set this on Render dashboard if onWhatsApp() fails
+      # Value: the LID hex string e.g. "115110005706891" (without @lid — bot adds it)
+      # Or full JID: "115110005706891@lid"
+      # Check your DMs after bot connects — the resolve attempt messages will tell you the LID
+      - key: ADMIN_LID
+        sync: false
+      # AI Keys — set your values on Render dashboard
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ZAI_API_KEY
+        sync: false
+      - key: DADGPT_API_KEY
+        sync: false
+      - key: UNCENSORED_API_KEY
+        sync: false
+      - key: UNCENSORED_API_URL
+        sync: false
+      # External service URLs (if self-hosting APIs)
+      - key: NSFW_API_URL
+        sync: false
+      - key: XNXX_API_URL
+        sync: false

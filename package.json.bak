@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot",
-  "version": "17.0.0",
-  "description": "WhatsApp bot v17.0 — Aion Labs AI Group Manager | NSFW xvideos | All Downloads",
+  "version": "16.0.0",
+  "description": "WhatsApp bot v16.0 — Bulletproof admin detection, lazy per-message LID resolve, heartbeat re-verify, ADMIN_LID env var fallback",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -20,7 +20,6 @@
     "yt-search": "^2.12.1",
     "google-translate-api": "^2.3.0",
     "axios": "^1.7.0",
-    "cheerio": "^1.0.0",
-    "@rodrigogs/xvideos": "^3.2.0"
+    "cheerio": "^1.0.0"
   }
 }

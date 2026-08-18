@@ -1,1317 +1,483 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WhatsApp Bot v16.0 — Control Panel</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b141a; color: #e9edef; min-height: 100vh; }
-        .header { background: #1f2c34; padding: 16px 24px; border-bottom: 1px solid #2a3942; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; position: sticky; top: 0; z-index: 100; }
-        .header-left { display: flex; align-items: center; gap: 12px; }
-        .header h1 { font-size: 18px; font-weight: 600; color: #00a884; }
-        .header-subtitle { font-size: 12px; color: #8696a0; }
-        .status-badge { padding: 6px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; white-space: nowrap; }
-        .status-disconnected { background: #ea0038; color: white; }
-        .status-connecting { background: #ff9800; color: #000; }
-        .status-qr { background: #25d366; color: #000; }
-        .status-connected { background: #25d366; color: #000; }
-        .nav-tabs { background: #1f2c34; border-bottom: 1px solid #2a3942; display: flex; overflow-x: auto; gap: 0; padding: 0 16px; }
-        .nav-tab { padding: 12px 20px; font-size: 13px; font-weight: 500; color: #8696a0; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; transition: all 0.2s; }
-        .nav-tab:hover { color: #e9edef; }
-        .nav-tab.active { color: #00a884; border-bottom-color: #00a884; }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
-        .grid-full { grid-column: 1 / -1; }
-        @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
-        .panel { background: #111b21; border-radius: 12px; border: 1px solid #2a3942; overflow: hidden; margin-bottom: 20px; }
-        .panel-header { background: #1f2c34; padding: 14px 18px; font-size: 15px; font-weight: 600; color: #00a884; border-bottom: 1px solid #2a3942; display: flex; justify-content: space-between; align-items: center; }
-        .panel-header .subtitle { font-size: 11px; color: #8696a0; font-weight: 400; margin-top: 2px; }
-        .panel-body { padding: 16px; }
-        .qr-container { display: flex; justify-content: center; align-items: center; min-height: 300px; flex-direction: column; gap: 12px; }
-        .qr-container img { border-radius: 12px; max-width: 300px; }
-        .qr-placeholder { color: #8696a0; font-size: 14px; text-align: center; }
-        .connected-msg { color: #25d366; font-size: 16px; text-align: center; padding: 40px 20px; }
-        .link-section { margin-top: 16px; text-align: center; }
-        .link-section input { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 10px 14px; border-radius: 8px; width: 220px; font-size: 14px; text-align: center; }
-        .link-section button { background: #00a884; color: #000; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; margin-top: 8px; width: 220px; }
-        .link-section button:hover { background: #00c49a; }
-        .link-section button:disabled { background: #3a4a54; color: #667781; cursor: not-allowed; }
-        .link-status { color: #8696a0; font-size: 12px; margin-top: 8px; min-height: 18px; }
-        .link-status.success { color: #25d366; }
-        .link-status.error { color: #ea0038; }
-        .msg-feed { max-height: 500px; overflow-y: auto; }
-        .msg-item { padding: 10px 14px; border-bottom: 1px solid #1f2c34; font-size: 13px; }
-        .msg-item:last-child { border-bottom: none; }
-        .msg-sender { font-weight: 600; color: #00a884; margin-bottom: 2px; }
-        .msg-text { color: #e9edef; word-break: break-word; }
-        .msg-meta { color: #667781; font-size: 11px; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap; }
-        .badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
-        .badge-group { background: #0084ff; color: white; }
-        .badge-admin { background: #ff6600; color: white; }
-        .badge-dm { background: #667781; color: white; }
-        .bc-item { padding: 12px 14px; border-bottom: 1px solid #1f2c34; }
-        .bc-item:last-child { border-bottom: none; }
-        .bc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-        .bc-id { font-weight: 700; color: #00a884; }
-        .bc-active { color: #25d366; font-weight: 600; }
-        .bc-stopped { color: #ea0038; font-weight: 600; }
-        .bc-msg { color: #e9edef; font-size: 13px; margin-bottom: 4px; }
-        .bc-info { color: #667781; font-size: 11px; }
-        .empty-state { color: #667781; text-align: center; padding: 40px; font-size: 14px; }
-        .btn { background: #00a884; color: #000; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; transition: background 0.2s; }
-        .btn:hover { background: #00c49a; }
-        .btn:disabled { background: #3a4a54; color: #667781; cursor: not-allowed; }
-        .btn-danger { background: #ea0038; color: white; }
-        .btn-danger:hover { background: #ff1744; }
-        .btn-warn { background: #ff9800; color: #000; }
-        .btn-warn:hover { background: #ffb300; }
-        .btn-sm { padding: 5px 12px; font-size: 12px; }
-        .btn-outline { background: transparent; border: 1px solid #00a884; color: #00a884; }
-        .btn-outline:hover { background: #00a88420; }
-        .qr-actions { display: flex; gap: 10px; justify-content: center; margin-top: 12px; }
-        .cmd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
-        .cmd-btn { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; text-align: left; transition: all 0.2s; display: flex; flex-direction: column; gap: 4px; }
-        .cmd-btn:hover { border-color: #00a884; background: #1f2c3480; }
-        .cmd-btn .cmd-name { font-weight: 600; color: #00a884; font-family: monospace; font-size: 12px; }
-        .cmd-btn .cmd-desc { color: #8696a0; font-size: 11px; }
-        .input-row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-        .input-row label { color: #8696a0; font-size: 13px; min-width: 80px; }
-        .input-row input, .input-row select, .input-row textarea { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 8px 12px; border-radius: 8px; font-size: 13px; flex: 1; min-width: 120px; }
-        .input-row input:focus, .input-row select:focus, .input-row textarea:focus { outline: none; border-color: #00a884; }
-        .input-row textarea { resize: vertical; min-height: 60px; }
-        .result-box { background: #0b141a; border: 1px solid #2a3942; border-radius: 8px; padding: 12px; font-size: 12px; font-family: monospace; color: #e9edef; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 12px; }
-        .result-box.success { border-color: #25d366; }
-        .result-box.error { border-color: #ea0038; color: #ea0038; }
-        .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-        .stat-card { background: #1f2c34; border-radius: 8px; padding: 12px; text-align: center; }
-        .stat-value { font-size: 22px; font-weight: 700; color: #00a884; }
-        .stat-label { font-size: 11px; color: #8696a0; margin-top: 4px; }
-        .log-feed { max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 12px; }
-        .log-item { padding: 6px 10px; border-bottom: 1px solid #1f2c34; color: #8696a0; }
-        .log-item.ok { color: #25d366; }
-        .log-item.fail { color: #ea0038; }
-        .log-item.info { color: #00a884; }
-        .log-item.warn { color: #ff9800; }
-        .section-title { font-size: 13px; font-weight: 600; color: #8696a0; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; margin-top: 16px; }
-        .section-title:first-child { margin-top: 0; }
-        .divider { border: none; border-top: 1px solid #2a3942; margin: 16px 0; }
-        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-right: 4px; }
-        .tag-admin { background: #ff660030; color: #ff9900; border: 1px solid #ff660050; }
-        .tag-member { background: #00a88430; color: #00a884; border: 1px solid #00a88450; }
-        .tag-auto { background: #0084ff30; color: #4da6ff; border: 1px solid #0084ff50; }
-        .progress-bar { background: #1f2c34; border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px; }
-        .progress-fill { height: 100%; background: #00a884; border-radius: 4px; transition: width 0.3s; }
-        .progress-fill.warn { background: #ff9800; }
-        .progress-fill.danger { background: #ea0038; }
-        .group-status { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #1f2c34; border-radius: 8px; margin-bottom: 8px; }
-        .group-dot { width: 8px; height: 8px; border-radius: 50%; background: #ea0038; flex-shrink: 0; }
-        .group-dot.active { background: #25d366; }
-        .group-info { flex: 1; }
-        .group-name { font-size: 13px; font-weight: 600; }
-        .group-meta { font-size: 11px; color: #8696a0; }
-        .dl-method-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-        .dl-method-btn { background: #1f2c34; border: 1px solid #2a3942; color: #e9edef; padding: 10px; border-radius: 8px; cursor: pointer; font-size: 12px; text-align: center; transition: all 0.2s; }
-        .dl-method-btn:hover { border-color: #00a884; }
-        .dl-method-btn.active { border-color: #00a884; background: #00a88420; color: #00a884; }
-        .dl-method-btn .method-num { font-size: 18px; font-weight: 700; color: #00a884; }
-        .dl-method-btn .method-name { font-weight: 600; font-size: 12px; }
-        .dl-method-btn .method-desc { font-size: 10px; color: #8696a0; margin-top: 2px; }
-        .ai-card { background: #1f2c34; border: 1px solid #2a3942; border-radius: 8px; padding: 12px; }
-        .ai-card .ai-name { font-weight: 600; color: #00a884; }
-        .ai-card .ai-status { font-size: 11px; margin-top: 4px; }
-        .ai-card .ai-status.online { color: #25d366; }
-        .ai-card .ai-status.offline { color: #ea0038; }
-        .ai-card .ai-status.unknown { color: #8696a0; }
-        .chat-box { background: #0b141a; border: 1px solid #2a3942; border-radius: 8px; padding: 12px; max-height: 350px; overflow-y: auto; margin-bottom: 12px; }
-        .chat-msg { margin-bottom: 10px; }
-        .chat-msg .from { font-size: 11px; color: #8696a0; margin-bottom: 2px; }
-        .chat-msg .text { background: #1f2c34; padding: 8px 12px; border-radius: 8px; font-size: 13px; display: inline-block; max-width: 80%; }
-        .chat-msg.bot .text { background: #005c4b; }
-        .test-result { padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 12px; font-family: monospace; }
-        .test-result.pass { background: #25d36620; border-left: 3px solid #25d366; color: #25d366; }
-        .test-result.fail { background: #ea003820; border-left: 3px solid #ea0038; color: #ea0038; }
-        .test-result.running { background: #ff980020; border-left: 3px solid #ff9800; color: #ff9800; }
-        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #2a3942; border-top-color: #00a884; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .notice { background: #1f2c34; border: 1px solid #2a3942; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #8696a0; margin-bottom: 16px; }
-        .notice.warn { border-color: #ff980050; color: #ff9800; background: #ff980010; }
-        .notice.info { border-color: #00a88450; color: #00a884; background: #00a88410; }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #0b141a; }
-        ::-webkit-scrollbar-thumb { background: #2a3942; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #3a4a54; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhatsApp Bot v17.0 — Control Panel</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0b141a;--card:#1f2c34;--card-hover:#263542;--border:#2a3942;--text:#e9edef;--text2:#8696a0;--green:#00a884;--green2:#00c87e;--red:#ea4335;--yellow:#f9a825;--blue:#53bdeb;--radius:12px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+header h1{font-size:18px;font-weight:600;display:flex;align-items:center;gap:8px}
+header h1 span.ver{background:var(--green);color:#000;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700}
+.status-badge{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
+.status-dot.connected{background:var(--green2)}
+.nav{display:flex;gap:0;background:var(--card);border-bottom:1px solid var(--border);overflow-x:auto}
+.nav button{background:none;border:none;color:var(--text2);padding:12px 20px;cursor:pointer;font-size:13px;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent;transition:all .2s}
+.nav button:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.nav button.active{color:var(--green);border-bottom-color:var(--green)}
+main{flex:1;padding:20px;max-width:1400px;margin:0 auto;width:100%}
+.tab{display:none}.tab.active{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;transition:all .2s}
+.card:hover{border-color:rgba(0,168,132,.3)}
+.card h3{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h3 .icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
+.icon.green{background:rgba(0,168,132,.15);color:var(--green)}
+.icon.blue{background:rgba(83,189,235,.15);color:var(--blue)}
+.icon.yellow{background:rgba(249,168,37,.15);color:var(--yellow)}
+.icon.red{background:rgba(234,67,53,.15);color:var(--red)}
+.stat-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.stat-row:last-child{border:none}
+.stat-label{color:var(--text2);font-size:13px}
+.stat-value{font-weight:600;font-size:13px}
+input,select,textarea{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:14px;width:100%;outline:none;transition:border-color .2s}
+input:focus,select:focus,textarea:focus{border-color:var(--green)}
+button.btn{background:var(--green);color:#000;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+button.btn:hover{background:var(--green2);transform:translateY(-1px)}
+button.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+button.btn-outline{background:transparent;color:var(--green);border:1px solid var(--green)}
+button.btn-outline:hover{background:rgba(0,168,132,.1)}
+button.btn-danger{background:var(--red);color:#fff}
+button.btn-danger:hover{background:#d33426}
+.btn-row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.log-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'Courier New',monospace;font-size:12px;max-height:350px;overflow-y:auto;min-height:120px;white-space:pre-wrap;word-break:break-all}
+.log-box::-webkit-scrollbar{width:6px}
+.log-box::-webkit-scrollbar-track{background:transparent}
+.log-box::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.log-line{padding:2px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.log-line.info{color:var(--blue)}
+.log-line.pass{color:var(--green)}
+.log-line.fail{color:var(--red)}
+.log-line.done{color:var(--yellow)}
+.log-line.trace{color:var(--text2);font-size:11px}
+.log-line.step{color:#a78bfa}
+.ram-bar{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:6px}
+.ram-bar-fill{height:100%;background:var(--green);border-radius:4px;transition:width .5s}
+.ram-bar-fill.warn{background:var(--yellow)}
+.ram-bar-fill.danger{background:var(--red)}
+.qr-container{display:flex;justify-content:center;align-items:center;min-height:200px}
+.qr-container img{max-width:280px;border-radius:12px;border:8px solid #fff}
+.qr-placeholder{color:var(--text2);font-size:14px;text-align:center}
+.inline{display:flex;gap:8px;align-items:center}
+.inline input{flex:1}
+.tag{display:inline-block;background:rgba(0,168,132,.15);color:var(--green);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.tag.offline{background:rgba(234,67,53,.15);color:var(--red)}
+footer{background:var(--card);border-top:1px solid var(--border);padding:12px 24px;text-align:center;color:var(--text2);font-size:12px;margin-top:auto}
+@media(max-width:768px){.grid{grid-template-columns:1fr}header h1{font-size:15px}.nav button{padding:10px 14px;font-size:12px}}
+</style>
 </head>
 <body>
-    <div class="header">
-        <div class="header-left">
-            <div>
-                <h1>WhatsApp Bot v16.0</h1>
-                <div class="header-subtitle">Control Panel &amp; Test Suite</div>
-            </div>
+<header>
+  <h1>WhatsApp Bot <span class="ver">v17.0</span></h1>
+  <div class="status-badge"><div class="status-dot" id="statusDot"></div><span id="statusText">Loading...</span></div>
+</header>
+<nav class="nav">
+  <button class="active" data-tab="dashboard">Dashboard</button>
+  <button data-tab="ai">AI Manager</button>
+  <button data-tab="nsfw">NSFW</button>
+  <button data-tab="downloads">Downloads</button>
+  <button data-tab="groups">Groups</button>
+  <button data-tab="commands">Commands</button>
+</nav>
+<main>
+  <!-- DASHBOARD -->
+  <div class="tab active" id="tab-dashboard">
+    <div class="grid">
+      <div class="card">
+        <h3><div class="icon green">&#9742;</div> Connection</h3>
+        <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value" id="connStatus">—</span></div>
+        <div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value" id="uptime">—</span></div>
+        <div class="stat-row"><span class="stat-label">Reconnects</span><span class="stat-value" id="reconnects">—</span></div>
+        <div class="stat-row"><span class="stat-label">Admin Online</span><span class="stat-value" id="adminOnline">—</span></div>
+        <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value" id="version">—</span></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon yellow">&#128190;</div> Resources</h3>
+        <div class="stat-row"><span class="stat-label">RAM</span><span class="stat-value" id="ramValue">—</span></div>
+        <div class="ram-bar"><div class="ram-bar-fill" id="ramBar" style="width:0%"></div></div>
+        <div class="stat-row" style="margin-top:8px"><span class="stat-label">Queue Size</span><span class="stat-value" id="queueSize">—</span></div>
+        <div class="stat-row"><span class="stat-label">Current Task</span><span class="stat-value" id="currentTask">—</span></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon blue">&#129302;</div> AI Health</h3>
+        <div id="aiHealth">—</div>
+      </div>
+      <div class="card">
+        <h3><div class="icon green">&#128101;</div> Members & Groups</h3>
+        <div class="stat-row"><span class="stat-label">Total Groups</span><span class="stat-value" id="totalGroups">—</span></div>
+        <div class="stat-row"><span class="stat-label">Target: Music</span><span class="stat-value" id="musicGroup">—</span></div>
+        <div class="stat-row"><span class="stat-label">Target: Movies</span><span class="stat-value" id="moviesGroup">—</span></div>
+        <div class="stat-row"><span class="stat-label">Total Members</span><span class="stat-value" id="totalMembers">—</span></div>
+        <div class="stat-row"><span class="stat-label">Group Admins</span><span class="stat-value" id="totalAdmins">—</span></div>
+        <div class="stat-row"><span class="stat-label">LID Map</span><span class="stat-value" id="lidMap">—</span></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon yellow">&#9881;</div> Settings</h3>
+        <div class="stat-row"><span class="stat-label">DL Method</span><span class="stat-value" id="dlMethod">—</span></div>
+        <div class="stat-row"><span class="stat-label">Translation</span><span class="stat-value" id="translateStatus">—</span></div>
+        <div class="stat-row"><span class="stat-label">Admin LID</span><span class="stat-value" id="adminLid">—</span></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon blue">&#128247;</div> QR Code</h3>
+        <div class="qr-container" id="qrContainer"><div class="qr-placeholder">No QR available</div></div>
+      </div>
+    </div>
+  </div>
+  <!-- AI MANAGER -->
+  <div class="tab" id="tab-ai">
+    <div class="grid">
+      <div class="card">
+        <h3><div class="icon green">&#127911;</div> AI Content Decision</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Test the AI Group Manager's content decision for each group</p>
+        <div class="btn-row">
+          <button class="btn" onclick="testAiDecide('music')">Test Music Decision</button>
+          <button class="btn" onclick="testAiDecide('movies')">Test Movies Decision</button>
         </div>
-        <span id="statusBadge" class="status-badge status-disconnected">Disconnected</span>
-    </div>
-
-    <div class="nav-tabs">
-        <div class="nav-tab active" onclick="switchTab('dashboard')">Dashboard</div>
-        <div class="nav-tab" onclick="switchTab('chat')">Chat &amp; Messages</div>
-        <div class="nav-tab" onclick="switchTab('downloads')">Downloads</div>
-        <div class="nav-tab" onclick="switchTab('admin')">Admin Commands</div>
-        <div class="nav-tab" onclick="switchTab('ai')">AI System</div>
-        <div class="nav-tab" onclick="switchTab('groups')">Groups &amp; Broadcasts</div>
-        <div class="nav-tab" onclick="switchTab('tests')">Test Suite</div>
-    </div>
-
-    <!-- DASHBOARD TAB -->
-    <div id="tab-dashboard" class="tab-content active">
-        <div class="container">
-            <div class="grid-2">
-                <!-- QR Code Panel (original) -->
-                <div class="panel">
-                    <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
-                        QR Code / Link Phone
-                        <button class="btn btn-danger btn-sm" onclick="refreshQR()">Refresh QR</button>
-                    </div>
-                    <div class="panel-body">
-                        <div id="qrContainer" class="qr-container">
-                            <div class="qr-placeholder">Connecting...</div>
-                        </div>
-                        <div class="link-section">
-                            <p style="color:#8696a0;font-size:13px;margin-bottom:8px;">Or link your phone number to get the pairing code:</p>
-                            <input type="tel" id="phoneInput" placeholder="2637XXXXXXXX" maxlength="15" />
-                            <button id="linkBtn" onclick="linkPhone()">Get WhatsApp Code</button>
-                            <div id="linkStatus" class="link-status"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Bot Status Stats -->
-                <div class="panel">
-                    <div class="panel-header">Bot Status</div>
-                    <div class="panel-body">
-                        <div class="stat-grid" id="statGrid">
-                            <div class="stat-card"><div class="stat-value" id="statRam">--</div><div class="stat-label">RAM (MB)</div></div>
-                            <div class="stat-card"><div class="stat-value" id="statUptime">--</div><div class="stat-label">Uptime (h)</div></div>
-                            <div class="stat-card"><div class="stat-value" id="statGroups">--</div><div class="stat-label">Groups</div></div>
-                            <div class="stat-card"><div class="stat-value" id="statMembers">--</div><div class="stat-label">Members</div></div>
-                            <div class="stat-card"><div class="stat-value" id="statQueue">--</div><div class="stat-label">Queue</div></div>
-                            <div class="stat-card"><div class="stat-value" id="statLidMap">--</div><div class="stat-label">LID Map</div></div>
-                        </div>
-                        <hr class="divider">
-                        <div id="ramBar" style="margin-bottom:12px;">
-                            <div style="display:flex;justify-content:space-between;font-size:12px;color:#8696a0;margin-bottom:4px;"><span>RAM Usage</span><span id="ramPct">--</span></div>
-                            <div class="progress-bar"><div class="progress-fill" id="ramFill" style="width:0%"></div></div>
-                        </div>
-                        <div style="font-size:12px;color:#8696a0;">
-                            <div>DL Method: <span id="statDlMethod" style="color:#00a884;">--</span></div>
-                            <div style="margin-top:4px;">AI Online: <span id="statAi" style="color:#00a884;">--</span></div>
-                            <div style="margin-top:4px;">Admin LID: <span id="statAdminLid" style="color:#00a884;font-family:monospace;font-size:11px;">--</span></div>
-                            <div style="margin-top:4px;">Current Task: <span id="statTask" style="color:#ff9800;">--</span></div>
-                        </div>
-                        <hr class="divider">
-                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!status')">!status</button>
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!ram')">!ram</button>
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!queue')">!queue</button>
-                            <button class="btn btn-sm btn-danger" onclick="sendAdminCmd('!reconnect')">!reconnect</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Broadcasts Panel (original) -->
-            <div class="panel">
-                <div class="panel-header">Broadcasts</div>
-                <div class="panel-body">
-                    <div id="broadcastList">
-                        <div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Message Feed (original) -->
-            <div class="panel">
-                <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;">
-                    Message Feed
-                    <button class="btn btn-sm" onclick="loadMessages()">Refresh</button>
-                </div>
-                <div class="panel-body">
-                    <div id="msgFeed" class="msg-feed">
-                        <div class="empty-state">No messages yet. Send a message to the bot.</div>
-                    </div>
-                </div>
-            </div>
+        <div class="log-box" id="decideLog" style="margin-top:12px"></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon yellow">&#128499;</div> Poll/Voting Reasoning</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Test AI's poll reasoning capability</p>
+        <textarea id="pollText" rows="3" placeholder="Enter a poll or voting question...\ne.g. Which is better: amapiano or dancehall?">Which is better: amapiano or dancehall?</textarea>
+        <div class="btn-row">
+          <button class="btn" onclick="testPollReasoning()">Test Poll Reasoning</button>
         </div>
-    </div>
-
-    <!-- CHAT & MESSAGES TAB -->
-    <div id="tab-chat" class="tab-content">
-        <div class="container">
-            <div class="notice info">These simulate what group members can send to the bot. Results appear in the bot's WhatsApp inbox or group. The bot must be connected.</div>
-            <div class="grid-2">
-                <div class="panel">
-                    <div class="panel-header">Member Chat Commands <span class="tag tag-member">MEMBER</span></div>
-                    <div class="panel-body">
-                        <div class="section-title">Quick Commands</div>
-                        <div class="cmd-grid">
-                            <div class="cmd-btn" onclick="sendMemberCmd('help')">
-                                <span class="cmd-name">help</span>
-                                <span class="cmd-desc">Show all commands</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendMemberCmd('weather')">
-                                <span class="cmd-name">weather</span>
-                                <span class="cmd-desc">Get Harare weather</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendMemberCmd('ai')">
-                                <span class="cmd-name">ai</span>
-                                <span class="cmd-desc">Start AI chat session</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendMemberCmd('nsfw')">
-                                <span class="cmd-name">nsfw</span>
-                                <span class="cmd-desc">NSFW content (inbox)</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendMemberCmd('xnxx')">
-                                <span class="cmd-name">xnxx</span>
-                                <span class="cmd-desc">XNXX trending (inbox)</span>
-                            </div>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">Search</div>
-                        <div class="input-row">
-                            <input type="text" id="searchQuery" placeholder="search query..." />
-                            <button class="btn" onclick="sendMemberCmd('search ' + document.getElementById('searchQuery').value)">Search</button>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">Download from URL</div>
-                        <div class="input-row">
-                            <input type="text" id="getUrl" placeholder="https://..." />
-                            <button class="btn" onclick="sendMemberCmd('get ' + document.getElementById('getUrl').value)">Get</button>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">XNXX Search</div>
-                        <div class="input-row">
-                            <input type="text" id="xnxxQuery" placeholder="search term..." />
-                            <button class="btn" onclick="sendMemberCmd('xnxx ' + document.getElementById('xnxxQuery').value)">XNXX Search</button>
-                        </div>
-                        <div id="memberCmdResult" class="result-box" style="display:none;"></div>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">Live Message Feed</div>
-                    <div class="panel-body">
-                        <div id="chatMsgFeed" class="msg-feed">
-                            <div class="empty-state">Messages will appear here...</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <div class="log-box" id="pollLog" style="margin-top:12px"></div>
+      </div>
+      <div class="card" style="grid-column:1/-1">
+        <h3><div class="icon blue">&#9889;</div> AI Provider Test (SSE)</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Test all AI providers with streaming output</p>
+        <div class="inline" style="margin-bottom:12px">
+          <select id="aiProvider" style="width:auto;min-width:140px">
+            <option value="all">All Providers</option>
+            <option value="aion">Aion Labs</option>
+            <option value="dadgpt">DadGPT</option>
+            <option value="groq">Groq</option>
+            <option value="zai">Zai</option>
+            <option value="uncensored">Uncensored</option>
+          </select>
+          <button class="btn" onclick="testAi()" id="btnTestAi">Run AI Test</button>
         </div>
+        <div class="log-box" id="aiLog"></div>
+      </div>
     </div>
-
-    <!-- DOWNLOADS TAB -->
-    <div id="tab-downloads" class="tab-content">
-        <div class="container">
-            <div class="notice info">Test all 5 download methods + Smart cascade with <strong>live traceback logs</strong>. Watch every step in real-time — search, URL fetch, download attempt, errors, stack traces.</div>
-
-            <!-- Live Download Tester -->
-            <div class="panel">
-                <div class="panel-header">🔴 Live Download Tester — Real-time Traceback
-                    <span id="dlTestStatus" style="font-size:11px;color:#8696a0;font-weight:400;">Idle</span>
-                </div>
-                <div class="panel-body">
-                    <div class="grid-2">
-                        <div>
-                            <div class="section-title">Test Query</div>
-                            <div class="input-row">
-                                <input type="text" id="dlTestQuery" placeholder="e.g. Jah Prayzah 2025" value="amapiano 2025" />
-                            </div>
-                            <div class="section-title">Select Method to Test</div>
-                            <div class="dl-method-grid" style="margin-bottom:12px;">
-                                <div class="dl-method-btn" id="tdlm1" onclick="selectTestMethod(1)">
-                                    <div class="method-num">1</div>
-                                    <div class="method-name">ytdl-core</div>
-                                    <div class="method-desc">Standard</div>
-                                </div>
-                                <div class="dl-method-btn" id="tdlm2" onclick="selectTestMethod(2)">
-                                    <div class="method-num">2</div>
-                                    <div class="method-name">play-dl</div>
-                                    <div class="method-desc">Fallback</div>
-                                </div>
-                                <div class="dl-method-btn" id="tdlm3" onclick="selectTestMethod(3)">
-                                    <div class="method-num">3</div>
-                                    <div class="method-name">Invidious</div>
-                                    <div class="method-desc">Privacy API</div>
-                                </div>
-                                <div class="dl-method-btn" id="tdlm4" onclick="selectTestMethod(4)">
-                                    <div class="method-num">4</div>
-                                    <div class="method-name">Piped</div>
-                                    <div class="method-desc">Privacy API</div>
-                                </div>
-                                <div class="dl-method-btn" id="tdlm5" onclick="selectTestMethod(5)">
-                                    <div class="method-num">5</div>
-                                    <div class="method-name">Cobalt</div>
-                                    <div class="method-desc">Multi-platform</div>
-                                </div>
-                                <div class="dl-method-btn active" id="tdlm6" onclick="selectTestMethod(6)">
-                                    <div class="method-num">6</div>
-                                    <div class="method-name">Smart</div>
-                                    <div class="method-desc">Auto-cascade</div>
-                                </div>
-                            </div>
-                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                                <button class="btn" id="dlTestBtn" onclick="startDlTest()">▶ Run Download Test</button>
-                                <button class="btn btn-warn" onclick="testAllMethods()">Test All Methods</button>
-                                <button class="btn btn-danger btn-sm" onclick="clearDlLog()">Clear Log</button>
-                            </div>
-                            <hr class="divider">
-                            <div class="section-title">Quick Download (sends to WhatsApp)</div>
-                            <div class="input-row">
-                                <input type="text" id="dlSongName" placeholder="e.g. Jah Prayzah 2025" />
-                            </div>
-                            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                                <button class="btn btn-sm" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value)">Download MP3</button>
-                                <button class="btn btn-outline btn-sm" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value + ' video')">Download MP4</button>
-                                <button class="btn btn-outline btn-sm" onclick="sendMemberCmd('song ' + document.getElementById('dlSongName').value)">song cmd</button>
-                            </div>
-                            <div class="input-row">
-                                <input type="text" id="adminDlQuery" placeholder="Admin: !download query" />
-                                <button class="btn btn-sm" onclick="sendAdminCmd('!download ' + document.getElementById('adminDlQuery').value)">!download</button>
-                            </div>
-                            <div style="display:flex;gap:8px;">
-                                <button class="btn btn-sm" onclick="sendAdminCmd('!dlhistory')">!dlhistory</button>
-                                <button class="btn btn-sm btn-danger" onclick="sendAdminCmd('!dlclear')">!dlclear</button>
-                            </div>
-                            <div id="dlResult" class="result-box" style="display:none;"></div>
-                        </div>
-                        <div>
-                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                                <div class="section-title" style="margin:0;">Live Log — Traceback</div>
-                                <div id="dlLogStats" style="font-size:11px;color:#8696a0;"></div>
-                            </div>
-                            <div id="dlLiveLog" style="background:#0b141a;border:1px solid #2a3942;border-radius:8px;padding:10px;height:480px;overflow-y:auto;font-family:monospace;font-size:12px;">
-                                <div style="color:#667781;">Click "Run Download Test" to start live logging...</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Download Method Selector (for bot's active method) -->
-            <div class="panel">
-                <div class="panel-header">Bot Download Method (Active)</div>
-                <div class="panel-body">
-                    <div class="notice">Current active method: <strong id="currentDlMethod">Loading...</strong> — This is what the bot uses when members request downloads.</div>
-                    <div class="dl-method-grid">
-                        <div class="dl-method-btn" id="dlm1" onclick="setDlMethod(1)"><div class="method-num">1</div><div class="method-name">ytdl-core</div><div class="method-desc">Standard</div></div>
-                        <div class="dl-method-btn" id="dlm2" onclick="setDlMethod(2)"><div class="method-num">2</div><div class="method-name">play-dl</div><div class="method-desc">Fallback</div></div>
-                        <div class="dl-method-btn" id="dlm3" onclick="setDlMethod(3)"><div class="method-num">3</div><div class="method-name">Invidious</div><div class="method-desc">Privacy API</div></div>
-                        <div class="dl-method-btn" id="dlm4" onclick="setDlMethod(4)"><div class="method-num">4</div><div class="method-name">Piped</div><div class="method-desc">Privacy API</div></div>
-                        <div class="dl-method-btn" id="dlm5" onclick="setDlMethod(5)"><div class="method-num">5</div><div class="method-name">Cobalt</div><div class="method-desc">Multi-platform</div></div>
-                        <div class="dl-method-btn" id="dlm6" onclick="setDlMethod(6)"><div class="method-num">6</div><div class="method-name">Smart</div><div class="method-desc">Auto-cascade</div></div>
-                    </div>
-                    <div id="dlMethodResult" class="result-box" style="display:none;"></div>
-                </div>
-            </div>
+  </div>
+  <!-- NSFW -->
+  <div class="tab" id="tab-nsfw">
+    <div class="grid">
+      <div class="card">
+        <h3><div class="icon red">&#128269;</div> NSFW Search</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Search xvideos library</p>
+        <div class="inline" style="margin-bottom:8px">
+          <input id="nsfwQuery" placeholder="Search query..." value="trending">
+          <button class="btn" onclick="testNsfwSearch()" id="btnNsfwSearch">Search</button>
         </div>
-    </div>
-
-    <!-- ADMIN COMMANDS TAB -->
-    <div id="tab-admin" class="tab-content">
-        <div class="container">
-            <div class="notice warn">These are admin-only commands. They simulate what you send to the bot via WhatsApp DM. The bot must be connected and recognize you as admin.</div>
-            <div class="grid-2">
-                <div class="panel">
-                    <div class="panel-header">Bot Control <span class="tag tag-admin">ADMIN</span></div>
-                    <div class="panel-body">
-                        <div class="section-title">Status &amp; Info</div>
-                        <div class="cmd-grid">
-                            <div class="cmd-btn" onclick="sendAdminCmd('!status')">
-                                <span class="cmd-name">!status</span>
-                                <span class="cmd-desc">Full bot status</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!ram')">
-                                <span class="cmd-name">!ram</span>
-                                <span class="cmd-desc">RAM usage</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!queue')">
-                                <span class="cmd-name">!queue</span>
-                                <span class="cmd-desc">Task queue</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!debug')">
-                                <span class="cmd-name">!debug</span>
-                                <span class="cmd-desc">Admin detection debug</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!dump')">
-                                <span class="cmd-name">!dump</span>
-                                <span class="cmd-desc">Raw participant data</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!resolveadmin')">
-                                <span class="cmd-name">!resolveadmin</span>
-                                <span class="cmd-desc">Re-resolve admin LID</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!iamadmin')">
-                                <span class="cmd-name">!iamadmin</span>
-                                <span class="cmd-desc">Register as admin</span>
-                            </div>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">Connection</div>
-                        <div class="cmd-grid">
-                            <div class="cmd-btn" onclick="sendAdminCmd('!reconnect')">
-                                <span class="cmd-name">!reconnect</span>
-                                <span class="cmd-desc">Force reconnect</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!morning')">
-                                <span class="cmd-name">!morning</span>
-                                <span class="cmd-desc">Send morning tutorial</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!weather')">
-                                <span class="cmd-name">!weather</span>
-                                <span class="cmd-desc">Send weather to groups</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!scanlinks')">
-                                <span class="cmd-name">!scanlinks</span>
-                                <span class="cmd-desc">Scan for group links</span>
-                            </div>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">Custom Command</div>
-                        <div class="input-row">
-                            <input type="text" id="customAdminCmd" placeholder="e.g. !status" />
-                            <button class="btn" onclick="sendAdminCmd(document.getElementById('customAdminCmd').value)">Send</button>
-                        </div>
-                        <div id="adminCmdResult" class="result-box" style="display:none;"></div>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">Group Management <span class="tag tag-admin">ADMIN</span></div>
-                    <div class="panel-body">
-                        <div class="section-title">Groups</div>
-                        <div class="cmd-grid">
-                            <div class="cmd-btn" onclick="sendAdminCmd('!groups')">
-                                <span class="cmd-name">!groups</span>
-                                <span class="cmd-desc">Group info</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!joingroups')">
-                                <span class="cmd-name">!joingroups</span>
-                                <span class="cmd-desc">Join target groups</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!fetchhistory music')">
-                                <span class="cmd-name">!fetchhistory music</span>
-                                <span class="cmd-desc">Fetch music group history</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!fetchhistory movies')">
-                                <span class="cmd-name">!fetchhistory movies</span>
-                                <span class="cmd-desc">Fetch movies group history</span>
-                            </div>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">Post Content</div>
-                        <div class="cmd-grid">
-                            <div class="cmd-btn" onclick="sendAdminCmd('!postgroup music')">
-                                <span class="cmd-name">!postgroup music</span>
-                                <span class="cmd-desc">Post to music group</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!postgroup movies')">
-                                <span class="cmd-name">!postgroup movies</span>
-                                <span class="cmd-desc">Post to movies group</span>
-                            </div>
-                            <div class="cmd-btn" onclick="sendAdminCmd('!postallgroups')">
-                                <span class="cmd-name">!postallgroups</span>
-                                <span class="cmd-desc">Post to all groups</span>
-                            </div>
-                        </div>
-                        <hr class="divider">
-                        <div class="section-title">Schedule Interval</div>
-                        <div class="input-row">
-                            <label>Minutes</label>
-                            <input type="number" id="intervalMins" placeholder="10-60" min="10" max="60" value="30" />
-                            <button class="btn" onclick="sendAdminCmd('!interval ' + document.getElementById('intervalMins').value)">Set</button>
-                        </div>
-                        <div id="groupMgmtResult" class="result-box" style="display:none;"></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Broadcast Panel -->
-            <div class="panel">
-                <div class="panel-header">Broadcast System <span class="tag tag-admin">ADMIN</span></div>
-                <div class="panel-body">
-                    <div class="grid-2">
-                        <div>
-                            <div class="section-title">Start Broadcast</div>
-                            <div class="input-row">
-                                <textarea id="bcMessage" placeholder="Broadcast message..."></textarea>
-                            </div>
-                            <button class="btn" onclick="startBroadcast()">!broadcast</button>
-                            <hr class="divider">
-                            <div class="section-title">Stop Broadcast</div>
-                            <div class="input-row">
-                                <input type="text" id="bcStopId" placeholder="Broadcast ID (e.g. 1)" />
-                                <button class="btn btn-danger" onclick="sendAdminCmd('!stop ' + document.getElementById('bcStopId').value)">!stop</button>
-                            </div>
-                            <div id="bcResult" class="result-box" style="display:none;"></div>
-                        </div>
-                        <div>
-                            <div class="section-title">Active Broadcasts</div>
-                            <div id="adminBroadcastList">
-                                <div class="empty-state">No broadcasts</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="testNsfwFresh()" id="btnNsfwFresh">Get Fresh/Trending</button>
         </div>
-    </div>
-
-    <!-- AI SYSTEM TAB -->
-    <div id="tab-ai" class="tab-content">
-        <div class="container">
-            <!-- Live AI Tester -->
-            <div class="panel">
-                <div class="panel-header">🤖 Live AI Agent Tester — Real-time Traceback
-                    <span id="aiTestStatus" style="font-size:11px;color:#8696a0;font-weight:400;">Idle</span>
-                </div>
-                <div class="panel-body">
-                    <div class="grid-2">
-                        <div>
-                            <div class="section-title">Test Message</div>
-                            <div class="input-row">
-                                <input type="text" id="aiTestMsg" placeholder="e.g. Say hello in 5 words" value="Say hello in 5 words" />
-                            </div>
-                            <div class="section-title">Select AI to Test</div>
-                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
-                                <div class="ai-card" id="aisel-all" onclick="selectAiProvider('all')" style="cursor:pointer;border-color:#00a884;background:#00a88420;">
-                                    <div class="ai-name" style="color:#00a884;">🔄 All Providers</div>
-                                    <div class="ai-status" style="color:#8696a0;font-size:11px;">Test all at once</div>
-                                </div>
-                                <div class="ai-card" id="aisel-dadgpt" onclick="selectAiProvider('dadgpt')" style="cursor:pointer;">
-                                    <div class="ai-name">DadGPT</div>
-                                    <div class="ai-status unknown" id="aicard-dadgpt">Unknown</div>
-                                </div>
-                                <div class="ai-card" id="aisel-groq" onclick="selectAiProvider('groq')" style="cursor:pointer;">
-                                    <div class="ai-name">Groq</div>
-                                    <div class="ai-status unknown" id="aicard-groq">Unknown</div>
-                                </div>
-                                <div class="ai-card" id="aisel-zai" onclick="selectAiProvider('zai')" style="cursor:pointer;">
-                                    <div class="ai-name">Zai</div>
-                                    <div class="ai-status unknown" id="aicard-zai">Unknown</div>
-                                </div>
-                                <div class="ai-card" id="aisel-uncensored" onclick="selectAiProvider('uncensored')" style="cursor:pointer;">
-                                    <div class="ai-name">Uncensored AI</div>
-                                    <div class="ai-status unknown" id="aicard-uncensored">Unknown</div>
-                                </div>
-                            </div>
-                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                                <button class="btn" id="aiTestBtn" onclick="startAiTest()">▶ Run AI Test</button>
-                                <button class="btn btn-danger btn-sm" onclick="clearAiLog()">Clear Log</button>
-                            </div>
-                            <hr class="divider">
-                            <div class="section-title">AI Chat (sends to WhatsApp)</div>
-                            <div class="notice" style="margin-bottom:8px;">Test AI chat as a group member. Replies go to bot's WhatsApp inbox.</div>
-                            <div class="input-row">
-                                <select id="aiChatCmd">
-                                    <option value="ai">ai (start session)</option>
-                                    <option value="1">1 (select DadGPT)</option>
-                                    <option value="2">2 (select Groq)</option>
-                                    <option value="3">3 (select Zai)</option>
-                                    <option value="ai end">ai end (stop)</option>
-                                    <option value="ai switch">ai switch (change AI)</option>
-                                </select>
-                                <button class="btn btn-sm" onclick="sendMemberCmd(document.getElementById('aiChatCmd').value)">Send</button>
-                            </div>
-                            <div class="input-row">
-                                <input type="text" id="aiChatMsg" placeholder="Type a message to AI..." />
-                                <button class="btn btn-sm" onclick="sendMemberCmd(document.getElementById('aiChatMsg').value)">Send</button>
-                            </div>
-                            <div id="aiChatResult" class="result-box" style="display:none;"></div>
-                        </div>
-                        <div>
-                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                                <div class="section-title" style="margin:0;">Live Log — Traceback</div>
-                                <div id="aiLogStats" style="font-size:11px;color:#8696a0;"></div>
-                            </div>
-                            <div id="aiLiveLog" style="background:#0b141a;border:1px solid #2a3942;border-radius:8px;padding:10px;height:480px;overflow-y:auto;font-family:monospace;font-size:12px;">
-                                <div style="color:#667781;">Click "Run AI Test" to start live logging...</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- AI Provider Status -->
-            <div class="panel">
-                <div class="panel-header">AI Provider Status (Quick Check)</div>
-                <div class="panel-body">
-                    <div class="notice">Quick status check via WhatsApp DM. For detailed traceback, use the Live AI Tester above.</div>
-                    <div style="display:flex;gap:8px;margin-bottom:16px;">
-                        <button class="btn" onclick="checkAiStatus()">!ai list (via WhatsApp)</button>
-                        <button class="btn btn-outline" onclick="startAiTest()">Live Test (above)</button>
-                    </div>
-                    <div id="aiStatusGrid" class="cmd-grid">
-                        <div class="ai-card"><div class="ai-name">DadGPT</div><div class="ai-status unknown">Unknown</div></div>
-                        <div class="ai-card"><div class="ai-name">Groq</div><div class="ai-status unknown">Unknown</div></div>
-                        <div class="ai-card"><div class="ai-name">Zai</div><div class="ai-status unknown">Unknown</div></div>
-                        <div class="ai-card"><div class="ai-name">Uncensored AI</div><div class="ai-status unknown">Unknown</div></div>
-                    </div>
-                    <div id="aiStatusResult" class="result-box" style="display:none;"></div>
-                </div>
-            </div>
+        <div class="log-box" id="nsfwLog" style="margin-top:12px"></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon yellow">&#11015;</div> NSFW Download Test</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Test downloading from xvideos (uses smallest file)</p>
+        <div class="inline" style="margin-bottom:8px">
+          <input id="nsfwDlQuery" placeholder="Query for download test..." value="trending">
+          <button class="btn btn-danger" onclick="testNsfwDownload()" id="btnNsfwDl">Test Download</button>
         </div>
+        <div class="log-box" id="nsfwDlLog" style="margin-top:12px"></div>
+      </div>
     </div>
-
-    <!-- GROUPS & BROADCASTS TAB -->
-    <div id="tab-groups" class="tab-content">
-        <div class="container">
-            <div class="grid-2">
-                <div class="panel">
-                    <div class="panel-header">Target Groups</div>
-                    <div class="panel-body">
-                        <div id="groupStatusList">
-                            <div class="group-status">
-                                <div class="group-dot" id="musicDot"></div>
-                                <div class="group-info">
-                                    <div class="group-name">MUSIC Group</div>
-                                    <div class="group-meta" id="musicMeta">Not joined</div>
-                                </div>
-                                <button class="btn btn-sm" onclick="sendAdminCmd('!postgroup music')">Post</button>
-                            </div>
-                            <div class="group-status">
-                                <div class="group-dot" id="moviesDot"></div>
-                                <div class="group-info">
-                                    <div class="group-name">MOVIES Group</div>
-                                    <div class="group-meta" id="moviesMeta">Not joined</div>
-                                </div>
-                                <button class="btn btn-sm" onclick="sendAdminCmd('!postgroup movies')">Post</button>
-                            </div>
-                        </div>
-                        <hr class="divider">
-                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!joingroups')">Join Groups</button>
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!groups')">Refresh Info</button>
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!postallgroups')">Post All</button>
-                        </div>
-                        <div id="groupsResult" class="result-box" style="display:none;"></div>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">Broadcasts (original)</div>
-                    <div class="panel-body">
-                        <div id="broadcastList2">
-                            <div class="empty-state">No broadcasts yet.</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+  </div>
+  <!-- DOWNLOADS -->
+  <div class="tab" id="tab-downloads">
+    <div class="grid">
+      <div class="card" style="grid-column:1/-1">
+        <h3><div class="icon green">&#127925;</div> Download Test</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Test YouTube/URL download methods</p>
+        <div class="inline" style="margin-bottom:8px">
+          <input id="dlQuery" placeholder="YouTube search query..." value="amapiano 2025 short">
+          <select id="dlMethod" style="width:auto;min-width:180px">
+            <option value="1">1: ytdl-core</option>
+            <option value="2">2: play-dl</option>
+            <option value="3">3: Invidious</option>
+            <option value="4">4: Piped</option>
+            <option value="5">5: Cobalt</option>
+            <option value="6" selected>6: Smart Cascade</option>
+          </select>
+          <button class="btn" onclick="testDownload()" id="btnDl">Test Download</button>
         </div>
+        <div class="log-box" id="dlLog"></div>
+      </div>
     </div>
-
-    <!-- TEST SUITE TAB -->
-    <div id="tab-tests" class="tab-content">
-        <div class="container">
-            <div class="notice info">Run test suites to verify bot functionality. Results are sent to your WhatsApp DM AND shown here.</div>
-            <div class="grid-2">
-                <div class="panel">
-                    <div class="panel-header">Test Suites <span class="tag tag-admin">ADMIN</span></div>
-                    <div class="panel-body">
-                        <div class="section-title">Basic Test</div>
-                        <button class="btn" onclick="runTest('basic')">!test (Basic)</button>
-                        <p style="font-size:12px;color:#8696a0;margin-top:6px;">Tests: RAM, utilities, weather, YouTube search, meme API, AI, admin detection, translation, web search, schedule, members</p>
-                        <hr class="divider">
-                        <div class="section-title">Full Test (!test all on)</div>
-                        <div class="input-row">
-                            <input type="text" id="testQuery" placeholder="e.g. amapiano 2025" value="amapiano 2025" />
-                            <button class="btn" onclick="runTest('all')">Run Full Test</button>
-                        </div>
-                        <p style="font-size:12px;color:#8696a0;margin-top:6px;">Tests: RAM, weather, YouTube, AI chat, web search, meme, download audio, download video, image, AI content decision, members, translation, schedule</p>
-                        <hr class="divider">
-                        <div class="section-title">Download Method Tests</div>
-                        <div class="dl-method-grid">
-                            <button class="btn btn-outline btn-sm" onclick="runTest('dl1')">test download1<br><small>ytdl-core</small></button>
-                            <button class="btn btn-outline btn-sm" onclick="runTest('dl2')">test download2<br><small>play-dl</small></button>
-                            <button class="btn btn-outline btn-sm" onclick="runTest('dl3')">test download3<br><small>Invidious</small></button>
-                            <button class="btn btn-outline btn-sm" onclick="runTest('dl4')">test download4<br><small>Piped</small></button>
-                            <button class="btn btn-outline btn-sm" onclick="runTest('dl5')">test download5<br><small>Cobalt</small></button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">Test Results</div>
-                    <div class="panel-body">
-                        <div id="testStatus" style="font-size:13px;color:#8696a0;margin-bottom:12px;">No test running.</div>
-                        <div id="testResults"></div>
-                        <div id="testSummary" class="result-box" style="display:none;"></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- API Endpoint Tester -->
-            <div class="panel">
-                <div class="panel-header">API Endpoints</div>
-                <div class="panel-body">
-                    <div class="notice">Test the bot's REST API endpoints directly.</div>
-                    <div class="cmd-grid">
-                        <div class="cmd-btn" onclick="testApi('/api/status')">
-                            <span class="cmd-name">GET /api/status</span>
-                            <span class="cmd-desc">Bot status JSON</span>
-                        </div>
-                        <div class="cmd-btn" onclick="testApi('/api/qr')">
-                            <span class="cmd-name">GET /api/qr</span>
-                            <span class="cmd-desc">QR code data</span>
-                        </div>
-                        <div class="cmd-btn" onclick="testApi('/api/messages')">
-                            <span class="cmd-name">GET /api/messages</span>
-                            <span class="cmd-desc">Recent messages</span>
-                        </div>
-                        <div class="cmd-btn" onclick="testApi('/api/broadcasts')">
-                            <span class="cmd-name">GET /api/broadcasts</span>
-                            <span class="cmd-desc">Broadcast list</span>
-                        </div>
-                        <div class="cmd-btn" onclick="testApi('/health')">
-                            <span class="cmd-name">GET /health</span>
-                            <span class="cmd-desc">Health check</span>
-                        </div>
-                        <div class="cmd-btn" onclick="testApi('/ping')">
-                            <span class="cmd-name">GET /ping</span>
-                            <span class="cmd-desc">Ping pong</span>
-                        </div>
-                    </div>
-                    <div id="apiTestResult" class="result-box" style="display:none;"></div>
-                </div>
-            </div>
+  </div>
+  <!-- GROUPS -->
+  <div class="tab" id="tab-groups">
+    <div class="grid">
+      <div class="card">
+        <h3><div class="icon green">&#127926;</div> Music Group</h3>
+        <div class="stat-row"><span class="stat-label">JID</span><span class="stat-value" id="musicJid">—</span></div>
+        <div class="stat-row"><span class="stat-label">Members</span><span class="stat-value" id="musicMembers">—</span></div>
+        <div class="stat-row"><span class="stat-label">Recent Genre</span><span class="stat-value" id="musicGenre">—</span></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon blue">&#127916;</div> Movies Group</h3>
+        <div class="stat-row"><span class="stat-label">JID</span><span class="stat-value" id="moviesJid">—</span></div>
+        <div class="stat-row"><span class="stat-label">Members</span><span class="stat-value" id="moviesMembers">—</span></div>
+        <div class="stat-row"><span class="stat-label">Recent Category</span><span class="stat-value" id="moviesGenre">—</span></div>
+      </div>
+      <div class="card" style="grid-column:1/-1">
+        <h3><div class="icon yellow">&#128197;</div> Posting Schedule</h3>
+        <div class="log-box" id="scheduleLog">Loading schedule...</div>
+      </div>
+    </div>
+  </div>
+  <!-- COMMANDS -->
+  <div class="tab" id="tab-commands">
+    <div class="grid">
+      <div class="card">
+        <h3><div class="icon green">&#128100;</div> Admin Command</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Send a command as the bot admin</p>
+        <input id="adminCmd" placeholder="e.g. !status, !ram, !test all on amapiano">
+        <div class="btn-row">
+          <button class="btn" onclick="sendAdminCmd()" id="btnAdmin">Send</button>
+          <button class="btn btn-outline" onclick="document.getElementById('adminCmd').value='!status';sendAdminCmd()">Quick: !status</button>
+          <button class="btn btn-outline" onclick="document.getElementById('adminCmd').value='!ram';sendAdminCmd()">Quick: !ram</button>
+          <button class="btn btn-outline" onclick="document.getElementById('adminCmd').value='!groups';sendAdminCmd()">Quick: !groups</button>
         </div>
+        <div class="log-box" id="adminLog" style="margin-top:12px"></div>
+      </div>
+      <div class="card">
+        <h3><div class="icon blue">&#128101;</div> Member Command</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Send a command as a group member</p>
+        <input id="memberCmd" placeholder="e.g. download amapiano, help, weather">
+        <div class="btn-row">
+          <button class="btn" onclick="sendMemberCmd()" id="btnMember">Send</button>
+          <button class="btn btn-outline" onclick="document.getElementById('memberCmd').value='help';sendMemberCmd()">Quick: help</button>
+        </div>
+        <div class="log-box" id="memberLog" style="margin-top:12px"></div>
+      </div>
     </div>
+  </div>
+</main>
+<footer>WhatsApp Bot v17.0 &mdash; Aion Labs AI Group Manager | NSFW xvideos | All Downloads</footer>
+<script>
+// Tab navigation
+document.querySelectorAll('.nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
 
-    <script>
-        // ============================================================
-        //  STATE
-        // ============================================================
-        let lastMsgCount = 0;
-        let currentTab = 'dashboard';
-        let botStatus = {};
-        let actionLog = [];
+// Status polling
+async function fetchStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const dot = document.getElementById('statusDot');
+    const stxt = document.getElementById('statusText');
+    dot.className = 'status-dot' + (d.connection === 'connected' ? ' connected' : '');
+    stxt.textContent = d.connection || 'unknown';
+    document.getElementById('connStatus').innerHTML = d.connection === 'connected' ? '<span style="color:var(--green)">Connected</span>' : '<span style="color:var(--red)">' + d.connection + '</span>';
+    document.getElementById('uptime').textContent = fmtDuration(d.uptime);
+    document.getElementById('reconnects').textContent = d.reconnectAttempts;
+    document.getElementById('adminOnline').textContent = d.adminOnline ? 'Yes' : 'No';
+    document.getElementById('version').textContent = d.version;
+    document.getElementById('ramValue').textContent = d.ramMB + 'MB / 512MB';
+    const pct = Math.round(d.ramMB / 512 * 100);
+    const bar = document.getElementById('ramBar');
+    bar.style.width = pct + '%';
+    bar.className = 'ram-bar-fill' + (pct > 80 ? ' danger' : pct > 60 ? ' warn' : '');
+    document.getElementById('queueSize').textContent = d.queueSize;
+    document.getElementById('currentTask').textContent = d.currentTask || 'idle';
+    document.getElementById('totalGroups').textContent = d.groups;
+    document.getElementById('musicGroup').innerHTML = d.targetGroups.music === 'set' ? '<span class="tag">Joined</span>' : '<span class="tag offline">Not joined</span>';
+    document.getElementById('moviesGroup').innerHTML = d.targetGroups.movies === 'set' ? '<span class="tag">Joined</span>' : '<span class="tag offline">Not joined</span>';
+    document.getElementById('totalMembers').textContent = d.memberCount;
+    document.getElementById('totalAdmins').textContent = d.adminCount;
+    document.getElementById('lidMap').textContent = d.lidMapSize;
+    document.getElementById('dlMethod').textContent = d.groupDlName + ' (' + d.groupDlMethod + ')';
+    document.getElementById('translateStatus').textContent = d.translate ? 'Enabled' : 'Disabled';
+    document.getElementById('adminLid').textContent = d.adminLidJid || 'Not set';
+    // AI health
+    const aiDiv = document.getElementById('aiHealth');
+    if (d.aiOnline && d.aiOnline.length) {
+      aiDiv.innerHTML = d.aiOnline.map(n => '<div class="stat-row"><span class="stat-label">' + n + '</span><span class="stat-value"><span class="tag">Online</span></span></div>').join('');
+    } else {
+      aiDiv.innerHTML = '<span style="color:var(--red)">No AI providers online</span>';
+    }
+  } catch (e) { console.error('Status fetch error:', e); }
+}
+function fmtDuration(s) {
+  if (!s) return '—';
+  const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+}
 
-        // ============================================================
-        //  TAB NAVIGATION
-        // ============================================================
-        function switchTab(tab) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
-            document.getElementById('tab-' + tab).classList.add('active');
-            event.target.classList.add('active');
-            currentTab = tab;
+// QR Code
+async function fetchQr() {
+  try {
+    const r = await fetch('/api/qr');
+    const d = await r.json();
+    const c = document.getElementById('qrContainer');
+    if (d.qr) {
+      c.innerHTML = '<img src="' + d.qr + '" alt="QR Code">';
+    } else {
+      c.innerHTML = '<div class="qr-placeholder">No QR available (bot connected or not started)</div>';
+    }
+  } catch (e) { console.error('QR fetch error:', e); }
+}
+
+// SSE log helper
+function setupSSE(url, logId, btnId) {
+  const log = document.getElementById(logId);
+  if (btnId) document.getElementById(btnId).disabled = true;
+  log.innerHTML = '';
+  try {
+    const es = new EventSource(url);
+    es.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        const line = document.createElement('div');
+        line.className = 'log-line ' + (d.type || 'info');
+        line.textContent = '[' + (d.type || '?').toUpperCase() + '] ' + (d.msg || '');
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+        if (d.type === 'done' || d.type === 'error') {
+          es.close();
+          if (btnId) document.getElementById(btnId).disabled = false;
         }
+      } catch (err) { console.error('SSE parse error:', err); }
+    };
+    es.onerror = () => { es.close(); if (btnId) document.getElementById(btnId).disabled = false; log.innerHTML += '<div class="log-line fail">Connection closed</div>'; };
+  } catch (e) {
+    log.innerHTML += '<div class="log-line fail">Failed: ' + e.message + '</div>';
+    if (btnId) document.getElementById(btnId).disabled = false;
+  }
+}
 
-        // ============================================================
-        //  ORIGINAL FUNCTIONS (kept intact)
-        // ============================================================
-        async function loadStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                botStatus = data;
-                const badge = document.getElementById('statusBadge');
-                badge.textContent = data.connection.charAt(0).toUpperCase() + data.connection.slice(1);
-                badge.className = 'status-badge status-' + data.connection;
-                // Update stats
-                const ramMB = data.ramMB || 0;
-                const maxRam = 512;
-                const ramPct = Math.round(ramMB / maxRam * 100);
-                document.getElementById('statRam').textContent = ramMB;
-                document.getElementById('statUptime').textContent = Math.floor((data.uptime || 0) / 3600);
-                document.getElementById('statGroups').textContent = data.groups || 0;
-                document.getElementById('statMembers').textContent = data.memberCount || 0;
-                document.getElementById('statQueue').textContent = data.queueSize || 0;
-                document.getElementById('statLidMap').textContent = data.lidMapSize || 0;
-                document.getElementById('ramPct').textContent = ramPct + '%';
-                const fill = document.getElementById('ramFill');
-                fill.style.width = ramPct + '%';
-                fill.className = 'progress-fill' + (ramPct > 80 ? ' danger' : ramPct > 60 ? ' warn' : '');
-                document.getElementById('statDlMethod').textContent = data.groupDlName || '--';
-                document.getElementById('statAi').textContent = (data.aiOnline || []).join(', ') || 'None';
-                document.getElementById('statAdminLid').textContent = data.adminLidJid || 'NOT SET';
-                document.getElementById('statTask').textContent = data.currentTask || 'none';
-                // Update DL method buttons
-                const dlm = data.groupDlMethod || 6;
-                document.getElementById('currentDlMethod').textContent = data.groupDlName || 'Smart';
-                for (let i = 1; i <= 6; i++) {
-                    const btn = document.getElementById('dlm' + i);
-                    if (btn) btn.className = 'dl-method-btn' + (i === dlm ? ' active' : '');
-                }
-                // Update group status
-                const tg = data.targetGroups || {};
-                document.getElementById('musicDot').className = 'group-dot' + (tg.music === 'set' ? ' active' : '');
-                document.getElementById('moviesDot').className = 'group-dot' + (tg.movies === 'set' ? ' active' : '');
-                document.getElementById('musicMeta').textContent = tg.music === 'set' ? 'Joined' : 'Not joined';
-                document.getElementById('moviesMeta').textContent = tg.movies === 'set' ? 'Joined' : 'Not joined';
-                return data;
-            } catch (e) { return {}; }
-        }
+// AI Test
+function testAi() {
+  const p = document.getElementById('aiProvider').value;
+  setupSSE('/api/test-ai?provider=' + p, 'aiLog', 'btnTestAi');
+}
 
-        async function loadQR() {
-            try {
-                const res = await fetch('/api/qr');
-                const data = await res.json();
-                const container = document.getElementById('qrContainer');
-                if (data.qr) {
-                    container.innerHTML = '<img src="' + data.qr + '" alt="Scan QR Code" />';
-                } else if (data.connection === 'connected') {
-                    container.innerHTML = '<div class="connected-msg">Bot is connected!<br><br>Messages will appear in the feed below.<br><br><small>Test from a DIFFERENT phone than the one linked.</small></div>';
-                } else {
-                    container.innerHTML = '<div class="qr-placeholder">Waiting for QR code...<br><small>Status: ' + (data.connection || 'connecting') + '</small></div>';
-                }
-            } catch (e) {}
-        }
+// Download Test
+function testDownload() {
+  const q = document.getElementById('dlQuery').value;
+  const m = document.getElementById('dlMethod').value;
+  setupSSE('/api/test-download?query=' + encodeURIComponent(q) + '&method=' + m, 'dlLog', 'btnDl');
+}
 
-        async function linkPhone() {
-            const phone = document.getElementById('phoneInput').value.replace(/[^0-9]/g, '');
-            const btn = document.getElementById('linkBtn');
-            const status = document.getElementById('linkStatus');
-            if (!phone || phone.length < 10) {
-                status.textContent = 'Enter a valid phone number (10+ digits)';
-                status.className = 'link-status error';
-                return;
-            }
-            btn.disabled = true;
-            btn.textContent = 'Getting code...';
-            status.textContent = '';
-            status.className = 'link-status';
-            try {
-                const res = await fetch('/api/link-phone', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phone: phone })
-                });
-                const data = await res.json();
-                if (data.code) {
-                    status.innerHTML = '<span class="success">Code: ' + data.code + '</span><br><small>Open WhatsApp > Linked Devices > Link a device > Enter this code</small>';
-                    status.className = 'link-status success';
-                } else {
-                    status.textContent = data.error || 'Failed to get code';
-                    status.className = 'link-status error';
-                }
-            } catch (e) {
-                status.textContent = 'Error: ' + (e.message || 'Unknown error');
-                status.className = 'link-status error';
-            }
-            btn.disabled = false;
-            btn.textContent = 'Get WhatsApp Code';
-        }
+// NSFW Search Test
+function testNsfwSearch() {
+  const q = document.getElementById('nsfwQuery').value;
+  setupSSE('/api/test-nsfw?query=' + encodeURIComponent(q), 'nsfwLog', 'btnNsfwSearch');
+}
 
-        async function loadMessages() {
-            try {
-                const res = await fetch('/api/messages');
-                const messages = await res.json();
-                const feeds = ['msgFeed', 'chatMsgFeed'];
-                feeds.forEach(function(feedId) {
-                    const feed = document.getElementById(feedId);
-                    if (!feed) return;
-                    if (messages.length === 0) {
-                        feed.innerHTML = '<div class="empty-state">No messages yet.</div>';
-                        return;
-                    }
-                    feed.innerHTML = messages.slice().reverse().map(function(m) {
-                        var badges = '';
-                        if (m.isGroup) badges += '<span class="badge badge-group">Group</span>';
-                        else badges += '<span class="badge badge-dm">DM</span>';
-                        if (m.isAdmin) badges += '<span class="badge badge-admin">Admin</span>';
-                        return '<div class="msg-item">'
-                            + '<div class="msg-sender">' + escapeHtml(m.pushName || m.bare) + ' <span style="color:#667781;font-weight:400;font-size:11px;">' + escapeHtml(m.bare) + '</span></div>'
-                            + '<div class="msg-text">' + escapeHtml(m.text) + '</div>'
-                            + '<div class="msg-meta">' + badges + '<span>' + new Date(m.ts).toLocaleTimeString() + '</span></div>'
-                            + '</div>';
-                    }).join('');
-                });
-            } catch (e) {}
-        }
+// NSFW Fresh Test
+function testNsfwFresh() {
+  setupSSE('/api/test-nsfw?query=fresh', 'nsfwLog', 'btnNsfwFresh');
+}
 
-        async function loadBroadcasts() {
-            try {
-                const res = await fetch('/api/broadcasts');
-                const list = await res.json();
-                var containers = ['broadcastList', 'broadcastList2', 'adminBroadcastList'];
-                containers.forEach(function(cid) {
-                    var container = document.getElementById(cid);
-                    if (!container) return;
-                    if (list.length === 0) {
-                        container.innerHTML = '<div class="empty-state">No broadcasts yet.<br>Use !broadcast&lt;message&gt; from admin DM</div>';
-                        return;
-                    }
-                    container.innerHTML = list.map(function(b) {
-                        return '<div class="bc-item">'
-                            + '<div class="bc-header">'
-                            + '<span class="bc-id">#' + b.id + '</span>'
-                            + '<span class="' + (b.active ? 'bc-active' : 'bc-stopped') + '">' + (b.active ? 'Active' : 'Stopped') + '</span>'
-                            + '</div>'
-                            + '<div class="bc-msg">' + escapeHtml(b.message.substring(0, 80)) + '</div>'
-                            + '<div class="bc-info">Groups: ' + b.groups + ' | Sent: ' + (b.sentCount || 0) + 'x</div>'
-                            + '</div>';
-                    }).join('');
-                });
-            } catch (e) {}
-        }
+// NSFW Download Test
+function testNsfwDownload() {
+  const q = document.getElementById('nsfwDlQuery').value;
+  setupSSE('/api/test-nsfw-dl?query=' + encodeURIComponent(q), 'nsfwDlLog', 'btnNsfwDl');
+}
 
-        async function refreshQR() {
-            if (!confirm('This will clear the current session and generate a new QR code. Continue?')) return;
-            document.getElementById('qrContainer').innerHTML = '<div class="qr-placeholder">Reconnecting...</div>';
-            document.getElementById('linkStatus').textContent = '';
-            try { await fetch('/api/reconnect', { method: 'POST' }); } catch (e) {}
-        }
+// AI Decision Test
+async function testAiDecide(group) {
+  const log = document.getElementById('decideLog');
+  log.innerHTML = '<div class="log-line info">Testing AI decision for ' + group + '...</div>';
+  try {
+    const r = await fetch('/api/ai-decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group })
+    });
+    const d = await r.json();
+    log.innerHTML += '<div class="log-line step">Weather: ' + (d.weather?.desc || '?') + ', ' + (d.weather?.temp || '?') + 'C, Mood: ' + (d.weather?.mood || '?') + '</div>';
+    log.innerHTML += '<div class="log-line info">Hour: ' + d.hour + ':00 CAT</div>';
+    log.innerHTML += '<div class="log-line info">Recently posted: ' + (d.recentGenre || 'nothing') + '</div>';
+    if (d.ok) {
+      log.innerHTML += '<div class="log-line pass">AI Decision: ' + d.decision + '</div>';
+    } else {
+      log.innerHTML += '<div class="log-line fail">Error: ' + d.error + '</div>';
+    }
+  } catch (e) { log.innerHTML += '<div class="log-line fail">Request failed: ' + e.message + '</div>'; }
+}
 
-        function escapeHtml(text) {
-            var div = document.createElement('div');
-            div.textContent = text || '';
-            return div.innerHTML;
-        }
+// Poll Reasoning Test
+async function testPollReasoning() {
+  const text = document.getElementById('pollText').value;
+  const log = document.getElementById('pollLog');
+  log.innerHTML = '<div class="log-line info">Testing poll reasoning...</div>';
+  if (!text.trim()) { log.innerHTML += '<div class="log-line fail">Enter a poll text first</div>'; return; }
+  try {
+    const r = await fetch('/api/ai-poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ poll_text: text })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      log.innerHTML += '<div class="log-line step">Provider: ' + d.provider + '</div>';
+      log.innerHTML += '<div class="log-line pass">Reasoning: ' + d.reasoning + '</div>';
+    } else {
+      log.innerHTML += '<div class="log-line fail">Error: ' + d.error + '</div>';
+    }
+  } catch (e) { log.innerHTML += '<div class="log-line fail">Request failed: ' + e.message + '</div>'; }
+}
 
-        // ============================================================
-        //  NEW: ADMIN COMMAND SENDER
-        // ============================================================
-        async function sendAdminCmd(cmd) {
-            if (!cmd || !cmd.trim()) return;
-            logAction('ADMIN', cmd);
-            try {
-                const res = await fetch('/api/admin-cmd', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cmd: cmd.trim() })
-                });
-                const data = await res.json();
-                showResult('adminCmdResult', data.ok ? 'Sent: ' + cmd + '\n\nResult: ' + (data.result || 'Command queued') : 'Error: ' + (data.error || 'Failed'), data.ok);
-                showResult('groupMgmtResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
-                showResult('groupsResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
-                showResult('dlResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
-                showResult('bcResult', data.ok ? 'Sent: ' + cmd : 'Error: ' + (data.error || 'Failed'), data.ok);
-            } catch (e) {
-                showResult('adminCmdResult', 'Network error: ' + e.message, false);
-            }
-        }
+// Admin Command
+async function sendAdminCmd() {
+  const cmd = document.getElementById('adminCmd').value;
+  const log = document.getElementById('adminLog');
+  if (!cmd.trim()) return;
+  document.getElementById('btnAdmin').disabled = true;
+  log.innerHTML += '<div class="log-line info">Sending: ' + cmd + '</div>';
+  try {
+    const r = await fetch('/api/admin-cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cmd })
+    });
+    const d = await r.json();
+    log.innerHTML += '<div class="log-line ' + (d.ok ? 'pass' : 'fail') + '">' + (d.result || d.error) + '</div>';
+  } catch (e) { log.innerHTML += '<div class="log-line fail">Failed: ' + e.message + '</div>'; }
+  document.getElementById('btnAdmin').disabled = false;
+}
 
-        // ============================================================
-        //  NEW: MEMBER COMMAND SENDER
-        // ============================================================
-        async function sendMemberCmd(cmd) {
-            if (!cmd || !cmd.trim()) return;
-            logAction('MEMBER', cmd);
-            try {
-                const res = await fetch('/api/member-cmd', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cmd: cmd.trim() })
-                });
-                const data = await res.json();
-                const msg = data.ok ? 'Sent: ' + cmd + '\n\nResult: ' + (data.result || 'Command sent to bot') : 'Error: ' + (data.error || 'Failed');
-                showResult('memberCmdResult', msg, data.ok);
-                showResult('aiChatResult', msg, data.ok);
-            } catch (e) {
-                showResult('memberCmdResult', 'Network error: ' + e.message, false);
-            }
-        }
+// Member Command
+async function sendMemberCmd() {
+  const cmd = document.getElementById('memberCmd').value;
+  const log = document.getElementById('memberLog');
+  if (!cmd.trim()) return;
+  document.getElementById('btnMember').disabled = true;
+  log.innerHTML += '<div class="log-line info">Sending: ' + cmd + '</div>';
+  try {
+    const r = await fetch('/api/member-cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cmd })
+    });
+    const d = await r.json();
+    log.innerHTML += '<div class="log-line ' + (d.ok ? 'pass' : 'fail') + '">' + (d.result || d.error) + '</div>';
+  } catch (e) { log.innerHTML += '<div class="log-line fail">Failed: ' + e.message + '</div>'; }
+  document.getElementById('btnMember').disabled = false;
+}
 
-        // ============================================================
-        //  LIVE DOWNLOAD TESTER
-        // ============================================================
-        let selectedTestMethod = 6;
-        let dlTestRunning = false;
-        let dlTestEventSource = null;
-        let dlPassCount = 0, dlFailCount = 0;
-
-        function selectTestMethod(num) {
-            selectedTestMethod = num;
-            for (let i = 1; i <= 6; i++) {
-                const btn = document.getElementById('tdlm' + i);
-                if (btn) btn.className = 'dl-method-btn' + (i === num ? ' active' : '');
-            }
-        }
-
-        function appendDlLog(type, msg, ts) {
-            const log = document.getElementById('dlLiveLog');
-            if (!log) return;
-            const line = document.createElement('div');
-            const time = ts ? new Date(ts).toLocaleTimeString() : new Date().toLocaleTimeString();
-            let color = '#8696a0';
-            let prefix = '';
-            if (type === 'pass') { color = '#25d366'; prefix = '✅ '; dlPassCount++; }
-            else if (type === 'fail') { color = '#ea0038'; prefix = '❌ '; dlFailCount++; }
-            else if (type === 'error') { color = '#ff4444'; prefix = '🔴 '; }
-            else if (type === 'step') { color = '#00a884'; prefix = '▶ '; }
-            else if (type === 'info') { color = '#e9edef'; prefix = '   '; }
-            else if (type === 'trace') { color = '#ff9800'; prefix = '📋 '; }
-            else if (type === 'done') { color = '#25d366'; prefix = '🏁 '; }
-            line.style.cssText = 'color:' + color + ';padding:2px 0;border-bottom:1px solid #1a2530;white-space:pre-wrap;word-break:break-all;';
-            line.textContent = '[' + time + '] ' + prefix + msg;
-            log.appendChild(line);
-            log.scrollTop = log.scrollHeight;
-            document.getElementById('dlLogStats').textContent = '✅ ' + dlPassCount + '  ❌ ' + dlFailCount;
-        }
-
-        function clearDlLog() {
-            const log = document.getElementById('dlLiveLog');
-            if (log) log.innerHTML = '<div style="color:#667781;">Log cleared. Click "Run Download Test" to start.</div>';
-            dlPassCount = 0; dlFailCount = 0;
-            document.getElementById('dlLogStats').textContent = '';
-        }
-
-        async function startDlTest() {
-            if (dlTestRunning) { appendDlLog('warn', 'Test already running...'); return; }
-            const query = document.getElementById('dlTestQuery').value.trim() || 'amapiano 2025';
-            const method = selectedTestMethod;
-            clearDlLog();
-            dlTestRunning = true;
-            document.getElementById('dlTestStatus').textContent = 'Running...';
-            document.getElementById('dlTestBtn').disabled = true;
-            appendDlLog('info', '═══ Starting Download Test: Method ' + method + ' ═══');
-            appendDlLog('info', 'Query: "' + query + '"');
-            if (dlTestEventSource) { dlTestEventSource.close(); }
-            const url = '/api/test-download?method=' + method + '&query=' + encodeURIComponent(query);
-            dlTestEventSource = new EventSource(url);
-            dlTestEventSource.onmessage = function(e) {
-                try {
-                    const d = JSON.parse(e.data);
-                    appendDlLog(d.type, d.msg, d.ts);
-                    if (d.type === 'done' || d.type === 'error') {
-                        dlTestRunning = false;
-                        document.getElementById('dlTestStatus').textContent = d.type === 'done' ? '✅ Done' : '❌ Error';
-                        document.getElementById('dlTestBtn').disabled = false;
-                        dlTestEventSource.close();
-                    }
-                } catch(err) { appendDlLog('error', 'Parse error: ' + err.message); }
-            };
-            dlTestEventSource.onerror = function() {
-                appendDlLog('error', 'Connection closed or error.');
-                dlTestRunning = false;
-                document.getElementById('dlTestStatus').textContent = 'Disconnected';
-                document.getElementById('dlTestBtn').disabled = false;
-                dlTestEventSource.close();
-            };
-        }
-
-        async function testAllMethods() {
-            if (dlTestRunning) { appendDlLog('warn', 'Test already running...'); return; }
-            const query = document.getElementById('dlTestQuery').value.trim() || 'amapiano 2025';
-            clearDlLog();
-            appendDlLog('info', '═══ Testing ALL 6 Download Methods ═══');
-            appendDlLog('info', 'Query: "' + query + '"');
-            appendDlLog('info', 'This will test methods 1-6 sequentially...');
-            for (let m = 1; m <= 6; m++) {
-                selectTestMethod(m);
-                appendDlLog('step', '─── Method ' + m + ' ───');
-                await new Promise(resolve => {
-                    dlTestRunning = true;
-                    document.getElementById('dlTestStatus').textContent = 'Testing method ' + m + '/6...';
-                    const url = '/api/test-download?method=' + m + '&query=' + encodeURIComponent(query);
-                    const es = new EventSource(url);
-                    es.onmessage = function(e) {
-                        try {
-                            const d = JSON.parse(e.data);
-                            appendDlLog(d.type, '[M' + m + '] ' + d.msg, d.ts);
-                            if (d.type === 'done' || d.type === 'error') { es.close(); resolve(); }
-                        } catch(err) { appendDlLog('error', 'Parse error: ' + err.message); }
-                    };
-                    es.onerror = function() { es.close(); resolve(); };
-                });
-                dlTestRunning = false;
-                await new Promise(r => setTimeout(r, 1000));
-            }
-            dlTestRunning = false;
-            document.getElementById('dlTestStatus').textContent = '✅ All methods tested';
-            document.getElementById('dlTestBtn').disabled = false;
-            appendDlLog('done', '═══ All Methods Tested ═══ Pass: ' + dlPassCount + ' | Fail: ' + dlFailCount);
-        }
-
-        // ============================================================
-        //  LIVE AI TESTER
-        // ============================================================
-        let selectedAiProvider = 'all';
-        let aiTestRunning = false;
-        let aiTestEventSource = null;
-        let aiPassCount = 0, aiFailCount = 0;
-
-        function selectAiProvider(provider) {
-            selectedAiProvider = provider;
-            ['all','dadgpt','groq','zai','uncensored'].forEach(function(p) {
-                const el = document.getElementById('aisel-' + p);
-                if (!el) return;
-                if (p === provider) {
-                    el.style.borderColor = '#00a884';
-                    el.style.background = '#00a88420';
-                } else {
-                    el.style.borderColor = '';
-                    el.style.background = '';
-                }
-            });
-        }
-
-        function appendAiLog(type, msg, ts) {
-            const log = document.getElementById('aiLiveLog');
-            if (!log) return;
-            const line = document.createElement('div');
-            const time = ts ? new Date(ts).toLocaleTimeString() : new Date().toLocaleTimeString();
-            let color = '#8696a0';
-            let prefix = '';
-            if (type === 'pass') { color = '#25d366'; prefix = '✅ '; aiPassCount++; }
-            else if (type === 'fail') { color = '#ea0038'; prefix = '❌ '; aiFailCount++; }
-            else if (type === 'error') { color = '#ff4444'; prefix = '🔴 '; }
-            else if (type === 'step') { color = '#00a884'; prefix = '▶ '; }
-            else if (type === 'info') { color = '#e9edef'; prefix = '   '; }
-            else if (type === 'trace') { color = '#ff9800'; prefix = '📋 '; }
-            else if (type === 'done') { color = '#25d366'; prefix = '🏁 '; }
-            line.style.cssText = 'color:' + color + ';padding:2px 0;border-bottom:1px solid #1a2530;white-space:pre-wrap;word-break:break-all;';
-            line.textContent = '[' + time + '] ' + prefix + msg;
-            log.appendChild(line);
-            log.scrollTop = log.scrollHeight;
-            document.getElementById('aiLogStats').textContent = '✅ ' + aiPassCount + '  ❌ ' + aiFailCount;
-            // Update AI card status
-            const providers = ['dadgpt','groq','zai','uncensored'];
-            providers.forEach(function(p) {
-                const card = document.getElementById('aicard-' + p);
-                if (!card) return;
-                if (msg.includes('[PASS]') && msg.toLowerCase().includes(p)) {
-                    card.textContent = '✅ Online'; card.className = 'ai-status online';
-                } else if (msg.includes('[FAIL]') && msg.toLowerCase().includes(p)) {
-                    card.textContent = '❌ Offline'; card.className = 'ai-status offline';
-                }
-            });
-        }
-
-        function clearAiLog() {
-            const log = document.getElementById('aiLiveLog');
-            if (log) log.innerHTML = '<div style="color:#667781;">Log cleared. Click "Run AI Test" to start.</div>';
-            aiPassCount = 0; aiFailCount = 0;
-            document.getElementById('aiLogStats').textContent = '';
-        }
-
-        async function startAiTest() {
-            if (aiTestRunning) { appendAiLog('warn', 'Test already running...'); return; }
-            const message = document.getElementById('aiTestMsg').value.trim() || 'Say hello in 5 words';
-            const provider = selectedAiProvider;
-            clearAiLog();
-            aiTestRunning = true;
-            document.getElementById('aiTestStatus').textContent = 'Running...';
-            document.getElementById('aiTestBtn').disabled = true;
-            appendAiLog('info', '═══ Starting AI Test: ' + provider + ' ═══');
-            appendAiLog('info', 'Message: "' + message + '"');
-            if (aiTestEventSource) { aiTestEventSource.close(); }
-            const url = '/api/test-ai?provider=' + encodeURIComponent(provider) + '&message=' + encodeURIComponent(message);
-            aiTestEventSource = new EventSource(url);
-            aiTestEventSource.onmessage = function(e) {
-                try {
-                    const d = JSON.parse(e.data);
-                    appendAiLog(d.type, d.msg, d.ts);
-                    if (d.type === 'done' || d.type === 'error') {
-                        aiTestRunning = false;
-                        document.getElementById('aiTestStatus').textContent = d.type === 'done' ? '✅ Done' : '❌ Error';
-                        document.getElementById('aiTestBtn').disabled = false;
-                        aiTestEventSource.close();
-                    }
-                } catch(err) { appendAiLog('error', 'Parse error: ' + err.message); }
-            };
-            aiTestEventSource.onerror = function() {
-                appendAiLog('error', 'Connection closed or error.');
-                aiTestRunning = false;
-                document.getElementById('aiTestStatus').textContent = 'Disconnected';
-                document.getElementById('aiTestBtn').disabled = false;
-                aiTestEventSource.close();
-            };
-        }
-
-        // ============================================================
-        //  NEW: DL METHOD SETTER
-        // ============================================================
-        async function setDlMethod(num) {
-            await sendAdminCmd('!dlmethod ' + num);
-            showResult('dlMethodResult', 'Set download method to ' + num, true);
-            setTimeout(loadStatus, 1000);
-        }
-
-        // ============================================================
-        //  NEW: AI STATUS CHECK
-        // ============================================================
-        async function checkAiStatus() {
-            await sendAdminCmd('!ai list');
-            showResult('aiStatusResult', 'AI status check sent. Results will appear in your WhatsApp DM.', true);
-        }
-
-        // ============================================================
-        //  NEW: BROADCAST STARTER
-        // ============================================================
-        async function startBroadcast() {
-            const msg = document.getElementById('bcMessage').value.trim();
-            if (!msg) { alert('Enter a broadcast message'); return; }
-            await sendAdminCmd('!broadcast' + msg);
-            document.getElementById('bcMessage').value = '';
-        }
-
-        // ============================================================
-        //  NEW: TEST RUNNER
-        // ============================================================
-        async function runTest(type) {
-            const query = document.getElementById('testQuery') ? document.getElementById('testQuery').value.trim() : 'amapiano 2025';
-            let cmd = '';
-            if (type === 'basic') cmd = '!test';
-            else if (type === 'all') cmd = '!test all on ' + (query || 'amapiano 2025');
-            else if (type.startsWith('dl')) cmd = 'test download' + type.replace('dl', '');
-            document.getElementById('testStatus').innerHTML = '<span class="spinner"></span>Running: ' + cmd + '...';
-            document.getElementById('testResults').innerHTML = '';
-            document.getElementById('testSummary').style.display = 'none';
-            await sendAdminCmd(cmd);
-            document.getElementById('testStatus').textContent = 'Test sent! Results will appear in your WhatsApp DM.';
-            showResult('testSummary', 'Test command sent: ' + cmd + '\n\nResults will be sent to your WhatsApp DM by the bot.\nCheck your WhatsApp for detailed results.', true);
-        }
-
-        // ============================================================
-        //  NEW: API TESTER
-        // ============================================================
-        async function testApi(endpoint) {
-            try {
-                const res = await fetch(endpoint);
-                const text = await res.text();
-                let pretty = text;
-                try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch {}
-                showResult('apiTestResult', 'GET ' + endpoint + ' -> ' + res.status + '\n\n' + pretty, res.ok);
-            } catch (e) {
-                showResult('apiTestResult', 'Error: ' + e.message, false);
-            }
-        }
-
-        // ============================================================
-        //  HELPERS
-        // ============================================================
-        function showResult(id, text, ok) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.style.display = 'block';
-            el.textContent = text;
-            el.className = 'result-box ' + (ok ? 'success' : 'error');
-        }
-
-        function logAction(type, cmd) {
-            actionLog.unshift({ type, cmd, ts: new Date().toLocaleTimeString() });
-            if (actionLog.length > 50) actionLog.pop();
-        }
-
-        // ============================================================
-        //  INIT & POLLING
-        // ============================================================
-        loadStatus();
-        loadQR();
-        loadMessages();
-        loadBroadcasts();
-        setInterval(function() {
-            loadStatus();
-            loadQR();
-            loadMessages();
-            loadBroadcasts();
-        }, 3000);
-    </script>
+// Init
+fetchStatus();
+fetchQr();
+setInterval(fetchStatus, 5000);
+setInterval(fetchQr, 10000);
+</script>
 </body>
 </html>

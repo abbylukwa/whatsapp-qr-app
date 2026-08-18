@@ -2301,6 +2301,185 @@ app.post('/api/member-cmd', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+//  WEB UI: Test Download Endpoint — SSE streaming with full traceback
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/test-download', async (req, res) => {
+  const method = parseInt(req.query.method) || 6;
+  const query = req.query.query || 'amapiano 2025';
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  const send = (type, msg, extra) => {
+    const data = JSON.stringify({ type, msg, ts: new Date().toISOString(), ...( extra || {}) });
+    res.write('data: ' + data + '\n\n');
+  };
+
+  const dlMethod = DOWNLOAD_METHODS[method];
+  if (!dlMethod) { send('error', 'Invalid method: ' + method); res.end(); return; }
+
+  send('info', '═══ Download Test: ' + dlMethod.name + ' (Method ' + method + ') ═══');
+  send('info', 'Query: "' + query + '"');
+  send('info', 'RAM: ' + getRamMB() + 'MB / ' + MAX_RAM_MB + 'MB');
+  send('info', 'Bot connected: ' + connectionStatus);
+
+  let step = 0;
+  const t = async (name, fn) => {
+    step++;
+    send('step', '[Step ' + step + '] ' + name + '...');
+    const start = Date.now();
+    try {
+      if (!isRamSafe()) throw new Error('RAM too high: ' + getRamMB() + 'MB');
+      const r = await fn();
+      const elapsed = Date.now() - start;
+      const detail = typeof r === 'string' ? r : JSON.stringify(r).substring(0, 300);
+      send('pass', '[PASS] ' + name + ' (' + elapsed + 'ms): ' + detail);
+      return r;
+    } catch (e) {
+      const elapsed = Date.now() - start;
+      send('fail', '[FAIL] ' + name + ' (' + elapsed + 'ms): ' + e.message);
+      if (e.stack) send('trace', 'Stack trace:\n' + e.stack.substring(0, 800));
+      return null;
+    }
+  };
+
+  try {
+    // Step 1: YouTube Search
+    const videos = await t('YouTube Search: "' + query + '"', async () => {
+      const v = await ytSearch(query);
+      if (!v.length) throw new Error('No results found for: ' + query);
+      return v.length + ' results. Top: ' + (v[0]?.title?.substring(0, 80) || 'none') + ' | URL: ' + (v[0]?.url || 'none');
+    });
+
+    // Step 2: Get video URL
+    let videoUrl = null;
+    await t('Get Video URL', async () => {
+      const v = await ytSearch(query);
+      if (!v.length) throw new Error('No videos found');
+      videoUrl = v[0].url;
+      return 'URL: ' + videoUrl + ' | Duration: ' + (v[0].timestamp || 'unknown') + ' | Views: ' + (v[0].views || 'unknown');
+    });
+
+    if (!videoUrl) { send('error', 'Cannot proceed without video URL'); res.end(); return; }
+
+    // Step 3: Audio Download
+    let audioFile = null;
+    await t('Audio Download (' + dlMethod.name + ')', async () => {
+      send('info', 'Attempting audio download via ' + dlMethod.name + '...');
+      send('info', 'URL: ' + videoUrl);
+      const dl = await dlMethod.fn(videoUrl, 'audio', MAX_MEDIA_MB);
+      audioFile = dl.file;
+      const mb = (dl.size / 1024 / 1024).toFixed(2);
+      send('info', 'File: ' + dl.file + ' | Size: ' + mb + 'MB');
+      if (dl.size < 10000) throw new Error('File too small: ' + dl.size + ' bytes');
+      if (dl.size > MAX_MEDIA_MB * 1024 * 1024) throw new Error('File too large: ' + mb + 'MB > ' + MAX_MEDIA_MB + 'MB limit');
+      return mb + 'MB audio downloaded successfully';
+    });
+
+    // Step 4: Cleanup
+    await t('Cleanup temp file', async () => {
+      if (audioFile) { try { fs.unlinkSync(audioFile); return 'Deleted: ' + audioFile; } catch (e) { return 'Could not delete: ' + e.message; } }
+      return 'No file to clean';
+    });
+
+    // Step 5: RAM after
+    await t('RAM After Download', async () => {
+      const mb = getRamMB();
+      const pct = Math.round(mb / MAX_RAM_MB * 100);
+      return mb + 'MB / ' + MAX_RAM_MB + 'MB (' + pct + '%) - ' + (isRamSafe() ? 'SAFE' : 'HIGH');
+    });
+
+    send('done', '═══ Test Complete: ' + dlMethod.name + ' ═══');
+  } catch (e) {
+    send('error', 'Unhandled error: ' + e.message);
+    if (e.stack) send('trace', e.stack.substring(0, 800));
+  }
+
+  res.end();
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  WEB UI: Test AI Endpoint — SSE streaming with full traceback
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/test-ai', async (req, res) => {
+  const provider = req.query.provider || 'all';
+  const message = req.query.message || 'Say hello in 5 words';
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  const send = (type, msg, extra) => {
+    const data = JSON.stringify({ type, msg, ts: new Date().toISOString(), ...(extra || {}) });
+    res.write('data: ' + data + '\n\n');
+  };
+
+  send('info', '═══ AI Agent Test ═══');
+  send('info', 'Provider: ' + provider);
+  send('info', 'Message: "' + message + '"');
+  send('info', 'RAM: ' + getRamMB() + 'MB / ' + MAX_RAM_MB + 'MB');
+
+  const testProvider = async (key) => {
+    const cfg = AI_CONFIG[key];
+    if (!cfg) { send('fail', '[' + key + '] Not found in AI_CONFIG'); return; }
+    send('step', '─── Testing: ' + cfg.name + ' (' + key + ') ───');
+    send('info', 'Base URL: ' + (cfg.baseUrl || 'NOT SET'));
+    send('info', 'Model: ' + (cfg.model || 'NOT SET'));
+    send('info', 'API Key: ' + (cfg.apiKey ? cfg.apiKey.substring(0, 8) + '...' : 'NOT SET'));
+    const status = getAiConfigStatus(key);
+    send('info', 'Config status: ' + status);
+    if (status !== 'configured') {
+      send('fail', '[' + cfg.name + '] SKIP — ' + status + (status === 'no_key' ? ' (set ' + key.toUpperCase() + '_API_KEY env var)' : ''));
+      return;
+    }
+    const start = Date.now();
+    try {
+      send('info', 'Sending test message: "' + message + '"');
+      const reply = await callAi(key, [{ role: 'user', content: message }], 50);
+      const elapsed = Date.now() - start;
+      send('pass', '[PASS] ' + cfg.name + ' (' + elapsed + 'ms): ' + reply.substring(0, 200));
+    } catch (e) {
+      const elapsed = Date.now() - start;
+      send('fail', '[FAIL] ' + cfg.name + ' (' + elapsed + 'ms): ' + e.message);
+      if (e.stack) send('trace', 'Stack:\n' + e.stack.substring(0, 600));
+    }
+  };
+
+  try {
+    if (provider === 'all') {
+      send('info', 'Testing all ' + Object.keys(AI_CONFIG).length + ' AI providers...');
+      for (const key of Object.keys(AI_CONFIG)) {
+        await testProvider(key);
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } else {
+      await testProvider(provider);
+    }
+
+    // Summary
+    send('info', '─── Summary ───');
+    const available = getAvailableAis('both');
+    send('info', 'Configured providers: ' + (available.length ? available.join(', ') : 'NONE'));
+    send('info', 'Group reply AIs: ' + (getAisForPurpose('group_reply').join(', ') || 'none'));
+    send('info', 'Inbox chat AIs: ' + (getAisForPurpose('inbox_chat').join(', ') || 'none'));
+    send('info', 'RAM after: ' + getRamMB() + 'MB');
+    send('done', '═══ AI Test Complete ═══');
+  } catch (e) {
+    send('error', 'Unhandled error: ' + e.message);
+    if (e.stack) send('trace', e.stack.substring(0, 800));
+  }
+
+  res.end();
+});
+
 app.get('/api/status', (req, res) => {
   res.json({ connection: connectionStatus, adminOnline: isAdminOnline, qrAvailable: !!qrCodeData, ramMB: getRamMB(), queueSize: queueSize(), currentTask: currentTaskName, groups: knownGroups.size, targetGroups: Object.fromEntries(Object.entries(targetGroups).map(([k, v]) => [k, v ? 'set' : 'null'])), reconnectAttempts, uptime: Math.round((Date.now() - botStartTime) / 1000), version: VERSION, adminLidJid: ADMIN_LID_JID || null, groupDlMethod, groupDlName: getGroupDlName(), aiOnline: getAvailableAis('both').map(k => AI_CONFIG[k].name), translate: !!translator, memberCount: [...groupMembers.values()].reduce((s, m) => s + m.size, 0), adminCount: [...groupAdmins.values()].reduce((s, a) => s + a.size, 0), lidMapSize: lidToPhone.size });
 });

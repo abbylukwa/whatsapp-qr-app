@@ -317,76 +317,105 @@
     <!-- DOWNLOADS TAB -->
     <div id="tab-downloads" class="tab-content">
         <div class="container">
-            <div class="notice info">Test all 5 download methods + Smart cascade. Downloads are sent to the bot's WhatsApp inbox. Bot must be connected.</div>
-            <div class="grid-2">
-                <div class="panel">
-                    <div class="panel-header">Download Music / Video</div>
-                    <div class="panel-body">
-                        <div class="section-title">Song / Music Download</div>
-                        <div class="input-row">
-                            <label>Song</label>
-                            <input type="text" id="dlSongName" placeholder="e.g. Jah Prayzah 2025" />
+            <div class="notice info">Test all 5 download methods + Smart cascade with <strong>live traceback logs</strong>. Watch every step in real-time — search, URL fetch, download attempt, errors, stack traces.</div>
+
+            <!-- Live Download Tester -->
+            <div class="panel">
+                <div class="panel-header">🔴 Live Download Tester — Real-time Traceback
+                    <span id="dlTestStatus" style="font-size:11px;color:#8696a0;font-weight:400;">Idle</span>
+                </div>
+                <div class="panel-body">
+                    <div class="grid-2">
+                        <div>
+                            <div class="section-title">Test Query</div>
+                            <div class="input-row">
+                                <input type="text" id="dlTestQuery" placeholder="e.g. Jah Prayzah 2025" value="amapiano 2025" />
+                            </div>
+                            <div class="section-title">Select Method to Test</div>
+                            <div class="dl-method-grid" style="margin-bottom:12px;">
+                                <div class="dl-method-btn" id="tdlm1" onclick="selectTestMethod(1)">
+                                    <div class="method-num">1</div>
+                                    <div class="method-name">ytdl-core</div>
+                                    <div class="method-desc">Standard</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm2" onclick="selectTestMethod(2)">
+                                    <div class="method-num">2</div>
+                                    <div class="method-name">play-dl</div>
+                                    <div class="method-desc">Fallback</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm3" onclick="selectTestMethod(3)">
+                                    <div class="method-num">3</div>
+                                    <div class="method-name">Invidious</div>
+                                    <div class="method-desc">Privacy API</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm4" onclick="selectTestMethod(4)">
+                                    <div class="method-num">4</div>
+                                    <div class="method-name">Piped</div>
+                                    <div class="method-desc">Privacy API</div>
+                                </div>
+                                <div class="dl-method-btn" id="tdlm5" onclick="selectTestMethod(5)">
+                                    <div class="method-num">5</div>
+                                    <div class="method-name">Cobalt</div>
+                                    <div class="method-desc">Multi-platform</div>
+                                </div>
+                                <div class="dl-method-btn active" id="tdlm6" onclick="selectTestMethod(6)">
+                                    <div class="method-num">6</div>
+                                    <div class="method-name">Smart</div>
+                                    <div class="method-desc">Auto-cascade</div>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn" id="dlTestBtn" onclick="startDlTest()">▶ Run Download Test</button>
+                                <button class="btn btn-warn" onclick="testAllMethods()">Test All Methods</button>
+                                <button class="btn btn-danger btn-sm" onclick="clearDlLog()">Clear Log</button>
+                            </div>
+                            <hr class="divider">
+                            <div class="section-title">Quick Download (sends to WhatsApp)</div>
+                            <div class="input-row">
+                                <input type="text" id="dlSongName" placeholder="e.g. Jah Prayzah 2025" />
+                            </div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                                <button class="btn btn-sm" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value)">Download MP3</button>
+                                <button class="btn btn-outline btn-sm" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value + ' video')">Download MP4</button>
+                                <button class="btn btn-outline btn-sm" onclick="sendMemberCmd('song ' + document.getElementById('dlSongName').value)">song cmd</button>
+                            </div>
+                            <div class="input-row">
+                                <input type="text" id="adminDlQuery" placeholder="Admin: !download query" />
+                                <button class="btn btn-sm" onclick="sendAdminCmd('!download ' + document.getElementById('adminDlQuery').value)">!download</button>
+                            </div>
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn btn-sm" onclick="sendAdminCmd('!dlhistory')">!dlhistory</button>
+                                <button class="btn btn-sm btn-danger" onclick="sendAdminCmd('!dlclear')">!dlclear</button>
+                            </div>
+                            <div id="dlResult" class="result-box" style="display:none;"></div>
                         </div>
-                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
-                            <button class="btn" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value)">Download (MP3)</button>
-                            <button class="btn btn-outline" onclick="sendMemberCmd('download ' + document.getElementById('dlSongName').value + ' video')">Download (MP4)</button>
-                            <button class="btn btn-outline" onclick="sendMemberCmd('song ' + document.getElementById('dlSongName').value)">song command</button>
+                        <div>
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <div class="section-title" style="margin:0;">Live Log — Traceback</div>
+                                <div id="dlLogStats" style="font-size:11px;color:#8696a0;"></div>
+                            </div>
+                            <div id="dlLiveLog" style="background:#0b141a;border:1px solid #2a3942;border-radius:8px;padding:10px;height:480px;overflow-y:auto;font-family:monospace;font-size:12px;">
+                                <div style="color:#667781;">Click "Run Download Test" to start live logging...</div>
+                            </div>
                         </div>
-                        <hr class="divider">
-                        <div class="section-title">Admin Download (!download)</div>
-                        <div class="input-row">
-                            <label>Query</label>
-                            <input type="text" id="adminDlQuery" placeholder="e.g. amapiano mix 2025" />
-                        </div>
-                        <button class="btn" onclick="sendAdminCmd('!download ' + document.getElementById('adminDlQuery').value)">!download</button>
-                        <hr class="divider">
-                        <div class="section-title">Download History</div>
-                        <div style="display:flex;gap:8px;">
-                            <button class="btn btn-sm" onclick="sendAdminCmd('!dlhistory')">!dlhistory</button>
-                            <button class="btn btn-sm btn-danger" onclick="sendAdminCmd('!dlclear')">!dlclear</button>
-                        </div>
-                        <div id="dlResult" class="result-box" style="display:none;"></div>
                     </div>
                 </div>
+            </div>
 
-                <div class="panel">
-                    <div class="panel-header">Download Method Selector</div>
-                    <div class="panel-body">
-                        <div class="notice">Current method: <strong id="currentDlMethod">Loading...</strong></div>
-                        <div class="dl-method-grid">
-                            <div class="dl-method-btn" id="dlm1" onclick="setDlMethod(1)">
-                                <div class="method-num">1</div>
-                                <div class="method-name">ytdl-core</div>
-                                <div class="method-desc">Standard</div>
-                            </div>
-                            <div class="dl-method-btn" id="dlm2" onclick="setDlMethod(2)">
-                                <div class="method-num">2</div>
-                                <div class="method-name">play-dl</div>
-                                <div class="method-desc">Fallback</div>
-                            </div>
-                            <div class="dl-method-btn" id="dlm3" onclick="setDlMethod(3)">
-                                <div class="method-num">3</div>
-                                <div class="method-name">Invidious</div>
-                                <div class="method-desc">Privacy API</div>
-                            </div>
-                            <div class="dl-method-btn" id="dlm4" onclick="setDlMethod(4)">
-                                <div class="method-num">4</div>
-                                <div class="method-name">Piped</div>
-                                <div class="method-desc">Privacy API</div>
-                            </div>
-                            <div class="dl-method-btn" id="dlm5" onclick="setDlMethod(5)">
-                                <div class="method-num">5</div>
-                                <div class="method-name">Cobalt</div>
-                                <div class="method-desc">Multi-platform</div>
-                            </div>
-                            <div class="dl-method-btn" id="dlm6" onclick="setDlMethod(6)">
-                                <div class="method-num">6</div>
-                                <div class="method-name">Smart</div>
-                                <div class="method-desc">Auto-cascade</div>
-                            </div>
-                        </div>
-                        <div id="dlMethodResult" class="result-box" style="display:none;"></div>
+            <!-- Download Method Selector (for bot's active method) -->
+            <div class="panel">
+                <div class="panel-header">Bot Download Method (Active)</div>
+                <div class="panel-body">
+                    <div class="notice">Current active method: <strong id="currentDlMethod">Loading...</strong> — This is what the bot uses when members request downloads.</div>
+                    <div class="dl-method-grid">
+                        <div class="dl-method-btn" id="dlm1" onclick="setDlMethod(1)"><div class="method-num">1</div><div class="method-name">ytdl-core</div><div class="method-desc">Standard</div></div>
+                        <div class="dl-method-btn" id="dlm2" onclick="setDlMethod(2)"><div class="method-num">2</div><div class="method-name">play-dl</div><div class="method-desc">Fallback</div></div>
+                        <div class="dl-method-btn" id="dlm3" onclick="setDlMethod(3)"><div class="method-num">3</div><div class="method-name">Invidious</div><div class="method-desc">Privacy API</div></div>
+                        <div class="dl-method-btn" id="dlm4" onclick="setDlMethod(4)"><div class="method-num">4</div><div class="method-name">Piped</div><div class="method-desc">Privacy API</div></div>
+                        <div class="dl-method-btn" id="dlm5" onclick="setDlMethod(5)"><div class="method-num">5</div><div class="method-name">Cobalt</div><div class="method-desc">Multi-platform</div></div>
+                        <div class="dl-method-btn" id="dlm6" onclick="setDlMethod(6)"><div class="method-num">6</div><div class="method-name">Smart</div><div class="method-desc">Auto-cascade</div></div>
                     </div>
+                    <div id="dlMethodResult" class="result-box" style="display:none;"></div>
                 </div>
             </div>
         </div>
@@ -545,47 +574,94 @@
     <!-- AI SYSTEM TAB -->
     <div id="tab-ai" class="tab-content">
         <div class="container">
-            <div class="grid-2">
-                <div class="panel">
-                    <div class="panel-header">AI Provider Status</div>
-                    <div class="panel-body">
-                        <div class="notice">Check which AI providers are online and their latency.</div>
-                        <div style="display:flex;gap:8px;margin-bottom:16px;">
-                            <button class="btn" onclick="checkAiStatus()">!ai list</button>
-                            <button class="btn btn-outline" onclick="sendAdminCmd('!ai status')">Force Refresh</button>
+            <!-- Live AI Tester -->
+            <div class="panel">
+                <div class="panel-header">🤖 Live AI Agent Tester — Real-time Traceback
+                    <span id="aiTestStatus" style="font-size:11px;color:#8696a0;font-weight:400;">Idle</span>
+                </div>
+                <div class="panel-body">
+                    <div class="grid-2">
+                        <div>
+                            <div class="section-title">Test Message</div>
+                            <div class="input-row">
+                                <input type="text" id="aiTestMsg" placeholder="e.g. Say hello in 5 words" value="Say hello in 5 words" />
+                            </div>
+                            <div class="section-title">Select AI to Test</div>
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+                                <div class="ai-card" id="aisel-all" onclick="selectAiProvider('all')" style="cursor:pointer;border-color:#00a884;background:#00a88420;">
+                                    <div class="ai-name" style="color:#00a884;">🔄 All Providers</div>
+                                    <div class="ai-status" style="color:#8696a0;font-size:11px;">Test all at once</div>
+                                </div>
+                                <div class="ai-card" id="aisel-dadgpt" onclick="selectAiProvider('dadgpt')" style="cursor:pointer;">
+                                    <div class="ai-name">DadGPT</div>
+                                    <div class="ai-status unknown" id="aicard-dadgpt">Unknown</div>
+                                </div>
+                                <div class="ai-card" id="aisel-groq" onclick="selectAiProvider('groq')" style="cursor:pointer;">
+                                    <div class="ai-name">Groq</div>
+                                    <div class="ai-status unknown" id="aicard-groq">Unknown</div>
+                                </div>
+                                <div class="ai-card" id="aisel-zai" onclick="selectAiProvider('zai')" style="cursor:pointer;">
+                                    <div class="ai-name">Zai</div>
+                                    <div class="ai-status unknown" id="aicard-zai">Unknown</div>
+                                </div>
+                                <div class="ai-card" id="aisel-uncensored" onclick="selectAiProvider('uncensored')" style="cursor:pointer;">
+                                    <div class="ai-name">Uncensored AI</div>
+                                    <div class="ai-status unknown" id="aicard-uncensored">Unknown</div>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn" id="aiTestBtn" onclick="startAiTest()">▶ Run AI Test</button>
+                                <button class="btn btn-danger btn-sm" onclick="clearAiLog()">Clear Log</button>
+                            </div>
+                            <hr class="divider">
+                            <div class="section-title">AI Chat (sends to WhatsApp)</div>
+                            <div class="notice" style="margin-bottom:8px;">Test AI chat as a group member. Replies go to bot's WhatsApp inbox.</div>
+                            <div class="input-row">
+                                <select id="aiChatCmd">
+                                    <option value="ai">ai (start session)</option>
+                                    <option value="1">1 (select DadGPT)</option>
+                                    <option value="2">2 (select Groq)</option>
+                                    <option value="3">3 (select Zai)</option>
+                                    <option value="ai end">ai end (stop)</option>
+                                    <option value="ai switch">ai switch (change AI)</option>
+                                </select>
+                                <button class="btn btn-sm" onclick="sendMemberCmd(document.getElementById('aiChatCmd').value)">Send</button>
+                            </div>
+                            <div class="input-row">
+                                <input type="text" id="aiChatMsg" placeholder="Type a message to AI..." />
+                                <button class="btn btn-sm" onclick="sendMemberCmd(document.getElementById('aiChatMsg').value)">Send</button>
+                            </div>
+                            <div id="aiChatResult" class="result-box" style="display:none;"></div>
                         </div>
-                        <div id="aiStatusGrid" class="cmd-grid">
-                            <div class="ai-card"><div class="ai-name">DadGPT</div><div class="ai-status unknown">Unknown</div></div>
-                            <div class="ai-card"><div class="ai-name">Groq</div><div class="ai-status unknown">Unknown</div></div>
-                            <div class="ai-card"><div class="ai-name">Zai</div><div class="ai-status unknown">Unknown</div></div>
-                            <div class="ai-card"><div class="ai-name">Uncensored AI</div><div class="ai-status unknown">Unknown</div></div>
+                        <div>
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <div class="section-title" style="margin:0;">Live Log — Traceback</div>
+                                <div id="aiLogStats" style="font-size:11px;color:#8696a0;"></div>
+                            </div>
+                            <div id="aiLiveLog" style="background:#0b141a;border:1px solid #2a3942;border-radius:8px;padding:10px;height:480px;overflow-y:auto;font-family:monospace;font-size:12px;">
+                                <div style="color:#667781;">Click "Run AI Test" to start live logging...</div>
+                            </div>
                         </div>
-                        <div id="aiStatusResult" class="result-box" style="display:none;"></div>
                     </div>
                 </div>
+            </div>
 
-                <div class="panel">
-                    <div class="panel-header">AI Chat Test</div>
-                    <div class="panel-body">
-                        <div class="notice">Test AI chat as a group member. Replies go to bot's WhatsApp inbox.</div>
-                        <div class="input-row">
-                            <label>Command</label>
-                            <select id="aiChatCmd">
-                                <option value="ai">ai (start session)</option>
-                                <option value="1">1 (select DadGPT)</option>
-                                <option value="2">2 (select Groq)</option>
-                                <option value="3">3 (select Zai)</option>
-                                <option value="ai end">ai end (stop)</option>
-                                <option value="ai switch">ai switch (change AI)</option>
-                            </select>
-                            <button class="btn" onclick="sendMemberCmd(document.getElementById('aiChatCmd').value)">Send</button>
-                        </div>
-                        <div class="input-row">
-                            <input type="text" id="aiChatMsg" placeholder="Type a message to AI..." />
-                            <button class="btn" onclick="sendMemberCmd(document.getElementById('aiChatMsg').value)">Send</button>
-                        </div>
-                        <div id="aiChatResult" class="result-box" style="display:none;"></div>
+            <!-- AI Provider Status -->
+            <div class="panel">
+                <div class="panel-header">AI Provider Status (Quick Check)</div>
+                <div class="panel-body">
+                    <div class="notice">Quick status check via WhatsApp DM. For detailed traceback, use the Live AI Tester above.</div>
+                    <div style="display:flex;gap:8px;margin-bottom:16px;">
+                        <button class="btn" onclick="checkAiStatus()">!ai list (via WhatsApp)</button>
+                        <button class="btn btn-outline" onclick="startAiTest()">Live Test (above)</button>
                     </div>
+                    <div id="aiStatusGrid" class="cmd-grid">
+                        <div class="ai-card"><div class="ai-name">DadGPT</div><div class="ai-status unknown">Unknown</div></div>
+                        <div class="ai-card"><div class="ai-name">Groq</div><div class="ai-status unknown">Unknown</div></div>
+                        <div class="ai-card"><div class="ai-name">Zai</div><div class="ai-status unknown">Unknown</div></div>
+                        <div class="ai-card"><div class="ai-name">Uncensored AI</div><div class="ai-status unknown">Unknown</div></div>
+                    </div>
+                    <div id="aiStatusResult" class="result-box" style="display:none;"></div>
                 </div>
             </div>
         </div>
@@ -939,6 +1015,213 @@
             } catch (e) {
                 showResult('memberCmdResult', 'Network error: ' + e.message, false);
             }
+        }
+
+        // ============================================================
+        //  LIVE DOWNLOAD TESTER
+        // ============================================================
+        let selectedTestMethod = 6;
+        let dlTestRunning = false;
+        let dlTestEventSource = null;
+        let dlPassCount = 0, dlFailCount = 0;
+
+        function selectTestMethod(num) {
+            selectedTestMethod = num;
+            for (let i = 1; i <= 6; i++) {
+                const btn = document.getElementById('tdlm' + i);
+                if (btn) btn.className = 'dl-method-btn' + (i === num ? ' active' : '');
+            }
+        }
+
+        function appendDlLog(type, msg, ts) {
+            const log = document.getElementById('dlLiveLog');
+            if (!log) return;
+            const line = document.createElement('div');
+            const time = ts ? new Date(ts).toLocaleTimeString() : new Date().toLocaleTimeString();
+            let color = '#8696a0';
+            let prefix = '';
+            if (type === 'pass') { color = '#25d366'; prefix = '✅ '; dlPassCount++; }
+            else if (type === 'fail') { color = '#ea0038'; prefix = '❌ '; dlFailCount++; }
+            else if (type === 'error') { color = '#ff4444'; prefix = '🔴 '; }
+            else if (type === 'step') { color = '#00a884'; prefix = '▶ '; }
+            else if (type === 'info') { color = '#e9edef'; prefix = '   '; }
+            else if (type === 'trace') { color = '#ff9800'; prefix = '📋 '; }
+            else if (type === 'done') { color = '#25d366'; prefix = '🏁 '; }
+            line.style.cssText = 'color:' + color + ';padding:2px 0;border-bottom:1px solid #1a2530;white-space:pre-wrap;word-break:break-all;';
+            line.textContent = '[' + time + '] ' + prefix + msg;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+            document.getElementById('dlLogStats').textContent = '✅ ' + dlPassCount + '  ❌ ' + dlFailCount;
+        }
+
+        function clearDlLog() {
+            const log = document.getElementById('dlLiveLog');
+            if (log) log.innerHTML = '<div style="color:#667781;">Log cleared. Click "Run Download Test" to start.</div>';
+            dlPassCount = 0; dlFailCount = 0;
+            document.getElementById('dlLogStats').textContent = '';
+        }
+
+        async function startDlTest() {
+            if (dlTestRunning) { appendDlLog('warn', 'Test already running...'); return; }
+            const query = document.getElementById('dlTestQuery').value.trim() || 'amapiano 2025';
+            const method = selectedTestMethod;
+            clearDlLog();
+            dlTestRunning = true;
+            document.getElementById('dlTestStatus').textContent = 'Running...';
+            document.getElementById('dlTestBtn').disabled = true;
+            appendDlLog('info', '═══ Starting Download Test: Method ' + method + ' ═══');
+            appendDlLog('info', 'Query: "' + query + '"');
+            if (dlTestEventSource) { dlTestEventSource.close(); }
+            const url = '/api/test-download?method=' + method + '&query=' + encodeURIComponent(query);
+            dlTestEventSource = new EventSource(url);
+            dlTestEventSource.onmessage = function(e) {
+                try {
+                    const d = JSON.parse(e.data);
+                    appendDlLog(d.type, d.msg, d.ts);
+                    if (d.type === 'done' || d.type === 'error') {
+                        dlTestRunning = false;
+                        document.getElementById('dlTestStatus').textContent = d.type === 'done' ? '✅ Done' : '❌ Error';
+                        document.getElementById('dlTestBtn').disabled = false;
+                        dlTestEventSource.close();
+                    }
+                } catch(err) { appendDlLog('error', 'Parse error: ' + err.message); }
+            };
+            dlTestEventSource.onerror = function() {
+                appendDlLog('error', 'Connection closed or error.');
+                dlTestRunning = false;
+                document.getElementById('dlTestStatus').textContent = 'Disconnected';
+                document.getElementById('dlTestBtn').disabled = false;
+                dlTestEventSource.close();
+            };
+        }
+
+        async function testAllMethods() {
+            if (dlTestRunning) { appendDlLog('warn', 'Test already running...'); return; }
+            const query = document.getElementById('dlTestQuery').value.trim() || 'amapiano 2025';
+            clearDlLog();
+            appendDlLog('info', '═══ Testing ALL 6 Download Methods ═══');
+            appendDlLog('info', 'Query: "' + query + '"');
+            appendDlLog('info', 'This will test methods 1-6 sequentially...');
+            for (let m = 1; m <= 6; m++) {
+                selectTestMethod(m);
+                appendDlLog('step', '─── Method ' + m + ' ───');
+                await new Promise(resolve => {
+                    dlTestRunning = true;
+                    document.getElementById('dlTestStatus').textContent = 'Testing method ' + m + '/6...';
+                    const url = '/api/test-download?method=' + m + '&query=' + encodeURIComponent(query);
+                    const es = new EventSource(url);
+                    es.onmessage = function(e) {
+                        try {
+                            const d = JSON.parse(e.data);
+                            appendDlLog(d.type, '[M' + m + '] ' + d.msg, d.ts);
+                            if (d.type === 'done' || d.type === 'error') { es.close(); resolve(); }
+                        } catch(err) { appendDlLog('error', 'Parse error: ' + err.message); }
+                    };
+                    es.onerror = function() { es.close(); resolve(); };
+                });
+                dlTestRunning = false;
+                await new Promise(r => setTimeout(r, 1000));
+            }
+            dlTestRunning = false;
+            document.getElementById('dlTestStatus').textContent = '✅ All methods tested';
+            document.getElementById('dlTestBtn').disabled = false;
+            appendDlLog('done', '═══ All Methods Tested ═══ Pass: ' + dlPassCount + ' | Fail: ' + dlFailCount);
+        }
+
+        // ============================================================
+        //  LIVE AI TESTER
+        // ============================================================
+        let selectedAiProvider = 'all';
+        let aiTestRunning = false;
+        let aiTestEventSource = null;
+        let aiPassCount = 0, aiFailCount = 0;
+
+        function selectAiProvider(provider) {
+            selectedAiProvider = provider;
+            ['all','dadgpt','groq','zai','uncensored'].forEach(function(p) {
+                const el = document.getElementById('aisel-' + p);
+                if (!el) return;
+                if (p === provider) {
+                    el.style.borderColor = '#00a884';
+                    el.style.background = '#00a88420';
+                } else {
+                    el.style.borderColor = '';
+                    el.style.background = '';
+                }
+            });
+        }
+
+        function appendAiLog(type, msg, ts) {
+            const log = document.getElementById('aiLiveLog');
+            if (!log) return;
+            const line = document.createElement('div');
+            const time = ts ? new Date(ts).toLocaleTimeString() : new Date().toLocaleTimeString();
+            let color = '#8696a0';
+            let prefix = '';
+            if (type === 'pass') { color = '#25d366'; prefix = '✅ '; aiPassCount++; }
+            else if (type === 'fail') { color = '#ea0038'; prefix = '❌ '; aiFailCount++; }
+            else if (type === 'error') { color = '#ff4444'; prefix = '🔴 '; }
+            else if (type === 'step') { color = '#00a884'; prefix = '▶ '; }
+            else if (type === 'info') { color = '#e9edef'; prefix = '   '; }
+            else if (type === 'trace') { color = '#ff9800'; prefix = '📋 '; }
+            else if (type === 'done') { color = '#25d366'; prefix = '🏁 '; }
+            line.style.cssText = 'color:' + color + ';padding:2px 0;border-bottom:1px solid #1a2530;white-space:pre-wrap;word-break:break-all;';
+            line.textContent = '[' + time + '] ' + prefix + msg;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+            document.getElementById('aiLogStats').textContent = '✅ ' + aiPassCount + '  ❌ ' + aiFailCount;
+            // Update AI card status
+            const providers = ['dadgpt','groq','zai','uncensored'];
+            providers.forEach(function(p) {
+                const card = document.getElementById('aicard-' + p);
+                if (!card) return;
+                if (msg.includes('[PASS]') && msg.toLowerCase().includes(p)) {
+                    card.textContent = '✅ Online'; card.className = 'ai-status online';
+                } else if (msg.includes('[FAIL]') && msg.toLowerCase().includes(p)) {
+                    card.textContent = '❌ Offline'; card.className = 'ai-status offline';
+                }
+            });
+        }
+
+        function clearAiLog() {
+            const log = document.getElementById('aiLiveLog');
+            if (log) log.innerHTML = '<div style="color:#667781;">Log cleared. Click "Run AI Test" to start.</div>';
+            aiPassCount = 0; aiFailCount = 0;
+            document.getElementById('aiLogStats').textContent = '';
+        }
+
+        async function startAiTest() {
+            if (aiTestRunning) { appendAiLog('warn', 'Test already running...'); return; }
+            const message = document.getElementById('aiTestMsg').value.trim() || 'Say hello in 5 words';
+            const provider = selectedAiProvider;
+            clearAiLog();
+            aiTestRunning = true;
+            document.getElementById('aiTestStatus').textContent = 'Running...';
+            document.getElementById('aiTestBtn').disabled = true;
+            appendAiLog('info', '═══ Starting AI Test: ' + provider + ' ═══');
+            appendAiLog('info', 'Message: "' + message + '"');
+            if (aiTestEventSource) { aiTestEventSource.close(); }
+            const url = '/api/test-ai?provider=' + encodeURIComponent(provider) + '&message=' + encodeURIComponent(message);
+            aiTestEventSource = new EventSource(url);
+            aiTestEventSource.onmessage = function(e) {
+                try {
+                    const d = JSON.parse(e.data);
+                    appendAiLog(d.type, d.msg, d.ts);
+                    if (d.type === 'done' || d.type === 'error') {
+                        aiTestRunning = false;
+                        document.getElementById('aiTestStatus').textContent = d.type === 'done' ? '✅ Done' : '❌ Error';
+                        document.getElementById('aiTestBtn').disabled = false;
+                        aiTestEventSource.close();
+                    }
+                } catch(err) { appendAiLog('error', 'Parse error: ' + err.message); }
+            };
+            aiTestEventSource.onerror = function() {
+                appendAiLog('error', 'Connection closed or error.');
+                aiTestRunning = false;
+                document.getElementById('aiTestStatus').textContent = 'Disconnected';
+                document.getElementById('aiTestBtn').disabled = false;
+                aiTestEventSource.close();
+            };
         }
 
         // ============================================================

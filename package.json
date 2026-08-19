@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot",
-  "version": "18.0.0",
-  "description": "WhatsApp bot v18.0 — All Downloads Fixed | yt-dlp auto-install | Dynamic instances",
+  "version": "19.0.0",
+  "description": "WhatsApp bot v19.0 — DownloaderX: yt-dlp-exec universal, Facebook DL, all platforms",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,17 +10,18 @@
     "node": ">=18.x"
   },
   "dependencies": {
+    "@rodrigogs/xvideos": "^3.2.0",
     "@whiskeysockets/baileys": "6.7.24",
-    "express": "^4.21.0",
-    "node-cache": "^5.1.2",
-    "play-dl": "^1.9.7",
-    "qrcode": "^1.5.4",
-    "pino": "^9.5.0",
-    "ytdl-core": "^4.11.5",
-    "yt-search": "^2.12.1",
-    "google-translate-api": "^2.3.0",
     "axios": "^1.7.0",
     "cheerio": "^1.0.0",
-    "@rodrigogs/xvideos": "^3.2.0"
+    "express": "^4.21.0",
+    "google-translate-api": "^2.3.0",
+    "node-cache": "^5.1.2",
+    "pino": "^9.5.0",
+    "play-dl": "^1.9.7",
+    "qrcode": "^1.5.4",
+    "yt-dlp-exec": "^1.0.2",
+    "yt-search": "^2.12.1",
+    "ytdl-core": "^4.11.5"
   }
 }

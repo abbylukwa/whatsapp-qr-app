@@ -1,7 +1,8 @@
 // ════════════════════════════════════════════════════════════════════════════════
 //  WHATSAPP BOT v19.0
 //  Aion Labs AI Group Manager | NSFW xvideos | All Downloads
-//  v19: DownloaderX integration — yt-dlp-exec (universal), Facebook DL, all platforms fixed
+//  v19: DownloaderX — ALL downloads via yt-dlp-exec (YouTube/TikTok/IG/FB/TW + 1000 sites)
+//  v19: Live member check — bot always knows who is a group member
 //  v16 FIX: Admin detection — was reading r.jid (phone) instead of r.lid (actual LID)
 // ════════════════════════════════════════════════════════════════════════════════
 
@@ -21,66 +22,26 @@ const {
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const pino = require('pino');
-const ytdl = require('ytdl-core');
+// v19: ytdl-core REMOVED — using yt-dlp-exec (DownloaderX)
 const yts = require('yt-search');
-let playdl = null;
-try { playdl = require('play-dl'); console.log('[Init] play-dl v1.9.7 loaded'); } catch (e) { console.log('[Init] play-dl not available'); }
+// v19: play-dl REMOVED — using yt-dlp-exec (DownloaderX)
+
 let translator = null;
 try { translator = require('google-translate-api'); console.log('[Init] google-translate-api loaded'); } catch (e) { console.log('[Init] google-translate-api not available'); }
 let xvideosLib = null;
 try { xvideosLib = require('@rodrigogs/xvideos'); console.log('[Init] @rodrigogs/xvideos loaded'); } catch (e) { console.log('[Init] @rodrigogs/xvideos not available — NSFW search disabled'); }
 // v19: yt-dlp-exec — auto-downloads yt-dlp binary, handles YouTube/TikTok/IG/FB bot detection
 let ytdlpExec = null;
-try { ytdlpExec = require('yt-dlp-exec'); console.log('[Init] yt-dlp-exec loaded — yt-dlp binary auto-managed'); } catch (e) { console.log('[Init] yt-dlp-exec not available — using fallback dlYtDlp'); }
+try { ytdlpExec = require('yt-dlp-exec'); console.log('[Init] yt-dlp-exec loaded — yt-dlp binary auto-managed'); } catch (e) { console.log('[Init] yt-dlp-exec not available — install with: npm i yt-dlp-exec'); }
 
 
-// v18: yt-dlp auto-install (downloads binary if not found)
-let YTDLP_PATH = 'yt-dlp'; // default: system yt-dlp
-async function ensureYtDlp() {
-  const { execSync } = require('child_process');
-  const fs = require('fs');
-  // Check 1: system PATH
-  try { execSync('yt-dlp --version', { timeout: 5000 }); console.log('[Init] yt-dlp found in PATH'); return; } catch {}
-  // Check 2: project dir (put there by build.sh on Render)
-  const localPath = path.join(__dirname, 'yt-dlp');
-  if (fs.existsSync(localPath)) {
-    try { execSync('"' + localPath + '" --version', { timeout: 5000 }); YTDLP_PATH = localPath; console.log('[Init] yt-dlp found at ' + localPath); return; } catch {}
-  }
-  // Check 3: /tmp (runtime download)
-  const tmpPath = '/tmp/yt-dlp';
-  if (fs.existsSync(tmpPath)) {
-    try { execSync('"' + tmpPath + '" --version', { timeout: 5000 }); YTDLP_PATH = tmpPath; console.log('[Init] yt-dlp found at /tmp/yt-dlp'); return; } catch {}
-  }
-  // Not found — download it to project dir (persists across restarts on Render)
-  console.log('[Init] yt-dlp not found, downloading...');
-  try {
-    const https = require('https');
-    const url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
-    const file = fs.createWriteStream(localPath);
-    await new Promise((resolve, reject) => {
-      https.get(url, { timeout: 60000 }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          https.get(res.headers.location, { timeout: 60000 }, (res2) => res2.pipe(file)).on('error', reject);
-          return;
-        }
-        res.pipe(file);
-      }).on('error', reject);
-      file.on('finish', () => { file.close(); resolve(); });
-    });
-    fs.chmodSync(localPath, 0o755);
-    YTDLP_PATH = localPath;
-    console.log('[Init] yt-dlp downloaded to ' + localPath);
-  } catch (e) {
-    console.log('[Init] yt-dlp download failed: ' + e.message + ' — METHOD 7 will be unavailable');
-  }
-}
-ensureYtDlp(); // run at startup
+// v18: Removed ensureYtDlp — yt-dlp-exec auto-manages its binary (DownloaderX approach)
 
 
 // ═══════════════════════════════════════════════════════════════
 //  SECTION 2: CONFIGURATION
 // ═══════════════════════════════════════════════════════════════
-const VERSION = '17.0';
+const VERSION = '19.0';
 const ADMIN = '263777627210';
 const AUTH_FOLDER = 'auth_info';
 const PORT = process.env.PORT || 10000;
@@ -101,62 +62,9 @@ const GROUP_INVITES = {
 const GROUP_LABELS = { music: 'MUSIC', movies: 'MOVIES' };
 const BLOCKED_NUMBERS = ['64226434709'];
 
-// Invidious instances (v18: refreshed + dynamic fetch at startup)
-let INVIDIOUS_INSTANCES = [
-  'https://invidious.nerdvpn.de',
-  'https://invidious.fdn.fr',
-  'https://inv.nadeko.net',
-  'https://yt.drgnz.club',
-  'https://invidious.materialio.us',
-  'https://invidious.jing.rocks',
-  'https://iv.datura.network',
-  'https://invidious.protokolla.fi',
-  'https://invidious.privacyredirect.com',
-  'https://iv.ggtyler.dev'
-];
-// v18: Dynamically fetch fresh Invidious instances at startup
-async function refreshInvidiousInstances() {
-  try {
-    const data = await httpGet('https://api.invidious.io/instances.json', { timeout: 10000 });
-    if (!Array.isArray(data)) return;
-    const working = data
-      .filter(i => i[1]?.type === 'https' && i[1]?.api && !i[1]?.stats?.error)
-      .sort((a, b) => (b[1]?.stats?.usage?.users?.total || 0) - (a[1]?.stats?.usage?.users?.total || 0))
-      .slice(0, 15)
-      .map(i => 'https://' + i[1]?.uri);
-    if (working.length >= 3) { INVIDIOUS_INSTANCES = working; console.log('[Init] Invidious: ' + working.length + ' dynamic instances loaded'); }
-  } catch (e) { console.log('[Init] Invidious dynamic fetch failed, using hardcoded list'); }
-}
-setTimeout(() => refreshInvidiousInstances(), 5000);
+// v19: Invidious removed — yt-dlp-exec handles YouTube directly (DownloaderX)
 
-// Piped instances (v18: refreshed + dynamic fetch at startup)
-let PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.adminforge.de',
-  'https://pipedapi.r4fo.com',
-  'https://api.piped.projectsegfau.lt',
-  'https://pipedapi.in.projectsegfau.lt',
-  'https://piped-api.privacy.com.de',
-  'https://pipedapi.leptons.xyz',
-  'https://api.piped.yt'
-];
-// v18: Dynamically fetch fresh Piped instances at startup
-async function refreshPipedInstances() {
-  try {
-    const data = await httpGet('https://piped-instances.kavin.rocks/', { timeout: 10000 });
-    if (!Array.isArray(data)) return;
-    const working = data
-      .filter(i => i?.api_url && i?.status === 200 && i?.cdn_rotation === undefined)
-      .sort((a, b) => (b?.usage?.users || 0) - (a?.usage?.users || 0))
-      .slice(0, 15)
-      .map(i => i.api_url.replace(/\/$/, ''));
-    if (working.length >= 3) { PIPED_INSTANCES = working; console.log('[Init] Piped: ' + working.length + ' dynamic instances loaded'); }
-  } catch (e) { console.log('[Init] Piped dynamic fetch failed, using hardcoded list'); }
-}
-setTimeout(() => refreshPipedInstances(), 7000);
-
-// Cobalt instance for social media (Instagram, TikTok, Twitter)
-const COBALT_URL = process.env.COBALT_URL || 'https://api.cobalt.tools';
+// v19: Piped removed — yt-dlp-exec handles YouTube directly (DownloaderX)
 
 // ═══ AI CONFIGURATION — All AIs available in both groups + inbox ═══
 const AI_CONFIG = {
@@ -310,7 +218,7 @@ function saveAdminLid() {
 const msgRateLimiter = new Map();
 const MSG_RATE_PER_USER = 5, MSG_RATE_WINDOW = 30000;
 let schedTickInterval = null;
-let groupDlMethod = 6; // 1=ytdl, 2=play-dl, 3=Invidious, 4=Piped, 5=Cobalt, 6=Smart (default: cascade all)
+let groupDlMethod = 2; // 1=Universal, 2=Smart (default), 3=TikTok, 4=Instagram, 5=Social, 6=Facebook
 const aiSessions = new Map();
 const aiSelections = new Map();
 const nsfwSelections = new Map();
@@ -607,139 +515,6 @@ async function ytSearch(query) { try { const r = await yts(query); return r.vide
 //  SECTION 12: DOWNLOAD ENGINES (5 Methods + Smart Cascade)
 // ═══════════════════════════════════════════════════════════════
 
-// METHOD 1: ytdl-core (v15: fixed 410 with consent cookie + better headers)
-async function dlYtdl(url, type, maxMB) {
-  const ext = type === 'audio' ? 'opus' : 'mp4';
-  const tmpFile = path.join('/tmp', 'wabot_' + Date.now() + '.' + ext);
-  return new Promise((resolve, reject) => {
-    if (!isRamSafe()) return reject(new Error('RAM_ABORT'));
-    const opts = type === 'audio' ? { filter: 'audioonly', quality: 'highestaudio' } : { filter: 'videoandaudio', quality: 'lowest' };
-    const stream = ytdl(url, { ...opts, requestOptions: { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36', 'Cookie': 'CONSENT=YES+1; VISITOR_INFO1_LIVE=; YSC=', 'Accept-Language': 'en-US,en;q=0.9' } } });
-    const ws = fs.createWriteStream(tmpFile); let settled = false;
-    const done = (err, val) => { if (!settled) { settled = true; if (err) { try { fs.unlinkSync(tmpFile); } catch {} reject(err); } else resolve(val); } };
-    stream.pipe(ws);
-    stream.on('progress', (_, dl) => { if (dl > maxMB * 1024 * 1024) { stream.destroy(); ws.destroy(); done(new Error('SIZE_LIMIT')); } if (!isRamSafe()) { stream.destroy(); ws.destroy(); done(new Error('RAM_ABORT')); } });
-    ws.on('finish', () => { try { const s = fs.statSync(tmpFile); if (s.size > maxMB * 1024 * 1024) { done(new Error('SIZE_LIMIT')); return; } if (s.size < 10000) { done(new Error('FILE_TOO_SMALL')); return; } done({ file: tmpFile, size: s.size }); } catch (e) { done(e); } });
-    stream.on('error', e => done(e)); ws.on('error', e => done(e));
-    setTimeout(() => { if (!settled) { stream.destroy(); ws.destroy(); done(new Error('DL_TIMEOUT')); } }, DL_TIMEOUT);
-  });
-}
-
-// METHOD 2: play-dl (fallback)
-async function dlPlayDl(url, type, maxMB) {
-  if (!playdl) throw new Error('play-dl not available');
-  if (!isRamSafe()) throw new Error('RAM_ABORT');
-  const ext = type === 'audio' ? 'webm' : 'mp4';
-  const tmpFile = path.join('/tmp', 'wabot_pd_' + Date.now() + '.' + ext);
-  let resolved = false;
-  try {
-    let stream;
-    if (type === 'audio') { stream = await playdl.stream(url, { quality: 0 }); if (!stream?.audio) throw new Error('No audio stream'); }
-    else { stream = await playdl.stream(url, { quality: 144 }); if (!stream) throw new Error('No video stream'); }
-    const srcStream = type === 'audio' ? stream.audio : stream;
-    const ws = fs.createWriteStream(tmpFile); let downloaded = 0;
-    const cleanup = () => { if (resolved) return; resolved = true; try { srcStream.destroy(); } catch {} try { ws.destroy(); } catch {} try { fs.unlinkSync(tmpFile); } catch {} };
-    return new Promise((resolve, reject) => {
-      srcStream.on('data', (chunk) => { downloaded += chunk.length; if (downloaded > maxMB * 1024 * 1024) { cleanup(); reject(new Error('SIZE_LIMIT')); } if (!isRamSafe()) { cleanup(); reject(new Error('RAM_ABORT')); } });
-      srcStream.pipe(ws);
-      ws.on('finish', () => { resolved = true; try { const s = fs.statSync(tmpFile); if (s.size > maxMB * 1024 * 1024 || s.size < 10000) { fs.unlinkSync(tmpFile); reject(s.size < 10000 ? new Error('FILE_TOO_SMALL') : new Error('SIZE_LIMIT')); return; } resolve({ file: tmpFile, size: s.size }); } catch (e) { reject(e); } });
-      srcStream.on('error', e => { cleanup(); reject(e); }); ws.on('error', e => { cleanup(); reject(e); });
-      setTimeout(() => { if (!resolved) { cleanup(); reject(new Error('DL_TIMEOUT')); } }, DL_TIMEOUT);
-    });
-  } catch (e) { try { fs.unlinkSync(tmpFile); } catch {} throw e; }
-}
-
-// METHOD 3: Invidious API (v15: uses PROXY endpoint so download goes through Invidious, not Google)
-async function dlInvidious(url, type, maxMB) {
-  const videoId = ytVideoId(url);
-  if (!videoId) throw new Error('Not a YouTube URL');
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      const data = await httpGet(instance + '/api/v1/videos/' + videoId, { timeout: 10000 });
-      if (!data || !data.adaptiveFormats) continue;
-      let itag = null, ext = 'm4a';
-      if (type === 'audio') {
-        const audioFormats = data.adaptiveFormats.filter(f => f.type?.startsWith('audio/')).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        if (audioFormats.length) { itag = audioFormats[0].itag; ext = audioFormats[0].container || 'm4a'; }
-      } else {
-        const vidFormats = data.formatStreams?.filter(f => f.type?.startsWith('video/')).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        if (vidFormats?.length) { itag = vidFormats[0].itag; ext = 'mp4'; }
-      }
-      if (!itag) continue;
-      // v15: Use Invidious proxy (download through Invidious server, NOT Google directly)
-      const proxyUrl = instance + '/latest_version?id=' + videoId + '&itag=' + itag + '&local=true';
-      console.log('[Invidious] Trying proxy: ' + instance + ' itag=' + itag);
-      const result = await httpGetBuffer(proxyUrl, DL_TIMEOUT);
-      if (result.size > maxMB * 1024 * 1024) throw new Error('SIZE_LIMIT');
-      if (result.size < 10000) throw new Error('FILE_TOO_SMALL');
-      const tmpFile = path.join('/tmp', 'wabot_inv_' + Date.now() + '.' + ext);
-      fs.writeFileSync(tmpFile, result.buffer);
-      return { file: tmpFile, size: result.size };
-    } catch (e) { console.log('[Invidious] ' + instance + ' failed: ' + e.message); continue; }
-  }
-  throw new Error('All Invidious instances failed');
-}
-
-// METHOD 4: Piped API (v15: prefers proxyUrl to avoid Google blocks)
-async function dlPiped(url, type, maxMB) {
-  const videoId = ytVideoId(url);
-  if (!videoId) throw new Error('Not a YouTube URL');
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      const data = await httpGet(instance + '/streams/' + videoId, { timeout: 10000 });
-      if (!data) continue;
-      let streamUrl = null, ext = 'm4a';
-      if (type === 'audio') {
-        const audioStreams = (data.audioStreams || []).filter(s => !s.videoOnly && (s.url || s.proxyUrl)).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        if (audioStreams.length) {
-          // v15: Prefer proxyUrl (routed through Piped proxy, not Google)
-          streamUrl = audioStreams[0].proxyUrl || audioStreams[0].url;
-          ext = 'm4a';
-        }
-      } else {
-        const vidStreams = (data.videoStreams || []).filter(s => !s.videoOnly && (s.url || s.proxyUrl)).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        if (vidStreams.length) {
-          streamUrl = vidStreams[0].proxyUrl || vidStreams[0].url;
-          ext = 'mp4';
-        }
-      }
-      if (!streamUrl) continue;
-      console.log('[Piped] Trying: ' + instance + ' proxy=' + (streamUrl.includes('piped') ? 'Y' : 'N'));
-      const result = await httpGetBuffer(streamUrl, DL_TIMEOUT);
-      if (result.size > maxMB * 1024 * 1024) throw new Error('SIZE_LIMIT');
-      if (result.size < 10000) throw new Error('FILE_TOO_SMALL');
-      const tmpFile = path.join('/tmp', 'wabot_piped_' + Date.now() + '.' + ext);
-      fs.writeFileSync(tmpFile, result.buffer);
-      return { file: tmpFile, size: result.size };
-    } catch (e) { console.log('[Piped] ' + instance + ' failed: ' + e.message); continue; }
-  }
-  throw new Error('All Piped instances failed');
-}
-
-// METHOD 5: Cobalt API (for Instagram, TikTok, Twitter, Reddit, SoundCloud)
-async function dlCobalt(url, maxMB) {
-  try {
-    const result = await httpPost(COBALT_URL + '/', {
-      url: url,
-      downloadMode: 'auto',
-      audioFormat: 'mp3',
-      filenameStyle: 'basic'
-    }, { 'Accept': 'application/json' });
-    if (result.status === 'error') throw new Error('Cobalt: ' + (result.error?.code || 'unknown error'));
-    const fileUrl = result.url;
-    if (!fileUrl) throw new Error('Cobalt: no file URL in response');
-    const dl = await httpGetBuffer(fileUrl, DL_TIMEOUT);
-    if (dl.size > maxMB * 1024 * 1024) throw new Error('SIZE_LIMIT');
-    const ext = (result.filename || '').split('.').pop() || 'mp4';
-    const tmpFile = path.join('/tmp', 'wabot_cobalt_' + Date.now() + '.' + ext);
-    fs.writeFileSync(tmpFile, dl.buffer);
-    return { file: tmpFile, size: dl.size };
-  } catch (e) {
-    console.log('[Cobalt] Failed: ' + e.message);
-    throw e;
-  }
-}
-
 // Universal URL downloader (for get <url> command)
 async function downloadFromUrl(url, maxMB, _depth) {
   _depth = _depth || 0; maxMB = maxMB || MAX_MEDIA_MB;
@@ -771,86 +546,6 @@ async function downloadFromUrl(url, maxMB, _depth) {
   });
 }
 
-// METHOD 7: yt-dlp — v19: uses yt-dlp-exec (auto-managed binary) with spawn fallback
-// yt-dlp-exec auto-downloads the yt-dlp binary and handles YouTube/TikTok/IG/FB bot detection
-async function dlYtDlp(url, type, maxMB) {
-  if (!isRamSafe()) throw new Error('RAM_ABORT');
-  const videoId = ytVideoId(url);
-  const ext = type === 'audio' ? 'mp3' : 'mp4';
-  const tmpFile = path.join('/tmp', 'wabot_ytdlp_' + Date.now() + '.' + ext);
-
-  // v19: Try yt-dlp-exec first (auto-managed binary, more reliable)
-  if (ytdlpExec) {
-    try {
-      const opts = {
-        output: tmpFile,
-        noPlaylist: true,
-        maxFilesize: (maxMB * 1024 * 1024).toString(),
-      };
-      if (type === 'audio') {
-        opts.extractAudio = true;
-        opts.audioFormat = 'mp3';
-        opts.audioQuality = '128K';
-      } else {
-        opts.format = 'worst[ext=mp4]/worstvideo[ext=mp4]+worstaudio/best[ext=mp4]';
-        opts.mergeOutputFormat = 'mp4';
-      }
-      console.log('[DL] yt-dlp-exec downloading: ' + url.substring(0, 60));
-      await ytdlpExec(url, opts);
-      if (fs.existsSync(tmpFile)) {
-        const s = fs.statSync(tmpFile);
-        if (s.size >= 10000 && s.size <= maxMB * 1024 * 1024) {
-          console.log('[DL] yt-dlp-exec OK: ' + (s.size/1024/1024).toFixed(1) + 'MB');
-          return { file: tmpFile, size: s.size };
-        }
-        try { fs.unlinkSync(tmpFile); } catch {}
-        if (s.size < 10000) throw new Error('FILE_TOO_SMALL');
-        throw new Error('SIZE_LIMIT');
-      }
-      throw new Error('No output file');
-    } catch (e) {
-      console.log('[DL] yt-dlp-exec failed: ' + e.message.substring(0, 80) + ', trying spawn fallback...');
-      try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
-    }
-  }
-
-  // Fallback: spawn yt-dlp binary (from v18 auto-install)
-  if (!videoId) throw new Error('Not a YouTube URL');
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const done = (err, val) => { if (!settled) { settled = true; if (err) { try { fs.unlinkSync(tmpFile); } catch {} reject(err); } else resolve(val); } };
-    const args = [
-      '--no-playlist', '--max-filesize', (maxMB * 1024 * 1024).toString(),
-      '-o', tmpFile,
-      '--ffmpeg-location', '/usr/bin/ffmpeg',
-    ];
-    if (type === 'audio') {
-      args.unshift('-x', '--audio-format', 'mp3', '--audio-quality', '128K');
-    } else {
-      args.unshift('-f', 'worst[ext=mp4]', '--merge-output-format', 'mp4');
-    }
-    args.push(url);
-    const child = require('child_process').spawn(YTDLP_PATH, args, { timeout: DL_TIMEOUT });
-    let stderr = '';
-    child.stderr.on('data', d => { stderr += d.toString(); });
-    child.on('close', code => {
-      if (settled) return;
-      if (code === 0) {
-        try {
-          const s = fs.statSync(tmpFile);
-          if (s.size < 10000) { done(new Error('FILE_TOO_SMALL')); return; }
-          done({ file: tmpFile, size: s.size });
-        } catch (e) { done(e); }
-      } else {
-        const msg = stderr.split('\n').filter(l => l.includes('ERROR')).pop()?.trim() || ('yt-dlp exit code ' + code);
-        done(new Error(msg));
-      }
-    });
-    child.on('error', e => done(e));
-    setTimeout(() => { if (!settled) { child.kill('SIGKILL'); done(new Error('DL_TIMEOUT')); } }, DL_TIMEOUT);
-  });
-}
-
 // METHOD 8: TikTok download via tikwm.com API (works from servers!)
 async function dlTikTok(url, maxMB) {
   // Normalize URL (tikwm needs the full URL or short URL)
@@ -878,7 +573,7 @@ async function dlTikTok(url, maxMB) {
   return { file: tmpFile, size: result.size };
 }
 
-// METHOD 9: Instagram/Reels download via multiple public APIs (v18: no Cobalt JWT needed)
+// METHOD 9: Instagram/Reels via reelsave+saveinsta+page scrape (v19)
 async function dlInstagram(url, maxMB) {
   if (!url.includes('instagram.com') && !url.includes('instagr.am')) throw new Error('Not an Instagram URL');
 
@@ -940,7 +635,7 @@ async function dlInstagram(url, maxMB) {
 }
 
 // METHOD 10: Universal social media downloader (auto-detects platform)
-// v18: No Cobalt dependency — uses platform-specific APIs
+// v19: Platform-specific APIs (no Cobalt — DownloaderX uses yt-dlp-exec)
 async function dlSocialMedia(url, maxMB) {
   const u = url.toLowerCase();
   if (u.includes('tiktok.com') || u.includes('vm.tiktok')) return await dlTikTok(url, maxMB);
@@ -969,10 +664,10 @@ async function dlSocialMedia(url, maxMB) {
   try { return await downloadFromUrl(url, maxMB); } catch (e) { throw new Error('Download failed: ' + e.message); }
 }
 
-// METHOD 11: Universal yt-dlp-exec downloader (from DownloaderX approach)
+// PRIMARY DOWNLOAD: yt-dlp-exec universal downloader (from DownloaderX)
 // Works for YouTube, TikTok, Instagram, Facebook, Twitter, Reddit, SoundCloud + 1000+ sites
-// This is the v19 PRIMARY method — yt-dlp handles bot detection for all platforms
-async function dlYtDlpExec(url, type, maxMB) {
+// yt-dlp-exec auto-downloads and manages the yt-dlp binary — no manual install needed
+async function dlUniversal(url, type, maxMB) {
   if (!ytdlpExec) throw new Error('yt-dlp-exec not available');
   if (!isRamSafe()) throw new Error('RAM_ABORT');
   const ext = type === 'audio' ? 'mp3' : 'mp4';
@@ -1008,86 +703,66 @@ async function dlYtDlpExec(url, type, maxMB) {
 // METHOD 12: Facebook-specific download via yt-dlp-exec
 async function dlFacebook(url, maxMB) {
   if (!url.includes('facebook.com') && !url.includes('fb.watch') && !url.includes('fb.com')) throw new Error('Not a Facebook URL');
-  return await dlYtDlpExec(url, 'video', maxMB);
+  return await dlUniversal(url, 'video', maxMB);
 }
 
 function safeDeleteFile(f) { try { if (f) fs.unlinkSync(f); } catch {} }
 
-// ═══ SMART CASCADE v19: yt-dlp-exec (universal) → platform-specific → legacy fallbacks ═══
-// v19 from DownloaderX: yt-dlp-exec handles YouTube, TikTok, Instagram, Facebook + 1000+ sites
-// Falls back to platform-specific APIs, then legacy methods
+// ═══ SMART CASCADE v19 (DownloaderX): yt-dlp-exec → platform API fallback → direct URL ═══
+// yt-dlp-exec handles YouTube, TikTok, Instagram, Facebook, Twitter, Reddit + 1000+ sites
+// Falls back to lightweight platform-specific APIs, then direct URL download
 async function smartDownload(url, type, maxMB) {
-  const isYT = ytVideoId(url);
   const errors = [];
   const u = url.toLowerCase();
 
-  // v19: UNIVERSAL — try yt-dlp-exec FIRST for ALL platforms (handles bot detection)
-  // This single method covers YouTube, TikTok, Instagram, Facebook, Twitter, Reddit, etc.
-  try {
-    logRam('DL[yt-dlp-exec]');
-    const r = await dlYtDlpExec(url, type, maxMB);
-    console.log('[DL] yt-dlp-exec OK (universal): ' + (r.size/1024/1024).toFixed(1) + 'MB');
-    return r;
-  } catch (e) {
-    errors.push('yt-dlp-exec: ' + e.message.substring(0, 80));
-    console.log('[DL] yt-dlp-exec fail: ' + e.message.substring(0, 60));
+  // STEP 1: yt-dlp-exec UNIVERSAL (DownloaderX primary — handles ALL platforms)
+  if (ytdlpExec) {
+    try {
+      logRam('DL[universal]');
+      const r = await dlUniversal(url, type, maxMB);
+      console.log('[DL] yt-dlp-exec OK: ' + (r.size/1024/1024).toFixed(1) + 'MB from ' + url.substring(0, 50));
+      return r;
+    } catch (e) {
+      errors.push('yt-dlp-exec: ' + e.message.substring(0, 80));
+      console.log('[DL] yt-dlp-exec fail: ' + e.message.substring(0, 60));
+    }
+  } else {
+    errors.push('yt-dlp-exec: not installed (npm i yt-dlp-exec)');
+    console.log('[DL] yt-dlp-exec not available, using fallbacks only');
   }
 
-  // Platform-specific fallbacks (lighter weight, no binary needed)
-  const u2 = u;
-
-  // TikTok: tikwm API (fast, no binary needed)
-  if (u2.includes('tiktok.com') || u2.includes('vm.tiktok')) {
+  // STEP 2: Platform-specific API fallbacks (lightweight, no binary needed)
+  // TikTok: tikwm API (fast, no watermark)
+  if (u.includes('tiktok.com') || u.includes('vm.tiktok')) {
     try { logRam('DL[tikwm]'); const r = await dlTikTok(url, maxMB); return r; } catch (e) { errors.push('tikwm: ' + e.message); }
-    throw new Error('TikTok failed: ' + errors.join(' | '));
+    throw new Error('TikTok download failed: ' + errors.join(' | '));
   }
 
   // Instagram: reelsave + saveinsta + page scrape
-  if (u2.includes('instagram.com') || u2.includes('instagr.am')) {
+  if (u.includes('instagram.com') || u.includes('instagr.am')) {
     try { logRam('DL[ig]'); const r = await dlInstagram(url, maxMB); return r; } catch (e) { errors.push('instagram: ' + e.message); }
-    throw new Error('Instagram failed: ' + errors.join(' | '));
+    throw new Error('Instagram download failed: ' + errors.join(' | '));
   }
 
-  // Twitter/X: fixupX
-  if (u2.includes('twitter.com') || u2.includes('x.com')) {
-    try { return await dlSocialMedia(url, maxMB); } catch (e) { errors.push('twitter: ' + e.message); }
-    throw new Error('Twitter failed: ' + errors.join(' | '));
+  // Twitter/X: fixupX API
+  if (u.includes('twitter.com') || u.includes('x.com')) {
+    try { const r = await dlSocialMedia(url, maxMB); return r; } catch (e) { errors.push('twitter: ' + e.message); }
+    throw new Error('Twitter download failed: ' + errors.join(' | '));
   }
 
-  // YouTube-specific fallbacks (yt-dlp-exec already tried above, but try individual methods)
-  if (isYT) {
-    // Method 7: yt-dlp CLI (spawn fallback)
-    try { logRam('DL[yt-dlp]'); const r = await dlYtDlp(url, type, maxMB); console.log('[DL] yt-dlp spawn OK'); return r; } catch (e) { errors.push('yt-dlp: ' + e.message.substring(0, 80)); }
-    // Method 4: Piped (dynamically refreshed)
-    try { logRam('DL[piped]'); const r = await dlPiped(url, type, maxMB); return r; } catch (e) { errors.push('Piped: ' + e.message); }
-    // Method 3: Invidious (dynamically refreshed)
-    try { logRam('DL[invidious]'); const r = await dlInvidious(url, type, maxMB); return r; } catch (e) { errors.push('Invidious: ' + e.message); }
-    // Method 2: play-dl
-    if (playdl) { try { logRam('DL[playdl]'); const r = await dlPlayDl(url, type, maxMB); return r; } catch (e) { errors.push('play-dl: ' + e.message); } }
-    // Method 1: ytdl-core (last resort)
-    try { logRam('DL[ytdl]'); const r = await dlYtdl(url, type, maxMB); return r; } catch (e) { errors.push('ytdl: ' + e.message); }
-    throw new Error('All YouTube methods failed: ' + errors.join(' | '));
-  }
-
-  // Non-YouTube, non-social: try direct URL download
+  // STEP 3: Direct URL download (for any other URL)
   try { const r = await downloadFromUrl(url, maxMB); return r; } catch (e) { errors.push('direct: ' + e.message); }
-  throw new Error('All methods failed: ' + errors.join(' | '));
+  throw new Error('All download methods failed: ' + errors.join(' | '));
 }
 
-// Download method registry
+// Download method registry (v19 DownloaderX — simplified)
 const DOWNLOAD_METHODS = {
-  1: { name: 'ytdl-core', fn: (url, type, max) => dlYtdl(url, type, max), desc: 'Standard (ytdl-core)', youtube: true },
-  2: { name: 'play-dl', fn: (url, type, max) => dlPlayDl(url, type, max), desc: 'Fallback (play-dl)', youtube: true },
-  3: { name: 'Invidious', fn: (url, type, max) => dlInvidious(url, type, max), desc: 'Privacy API (Invidious)', youtube: true },
-  4: { name: 'Piped', fn: (url, type, max) => dlPiped(url, type, max), desc: 'Privacy API (Piped)', youtube: true },
-  5: { name: 'Cobalt', fn: (url, type, max) => dlCobalt(url, max), desc: 'Multi-platform (Cobalt)', youtube: false },
-  6: { name: 'Smart', fn: smartDownload, desc: 'v19: yt-dlp-exec→ALL platforms', youtube: true },
-  7: { name: 'yt-dlp', fn: (url, type, max) => dlYtDlp(url, type, max), desc: 'yt-dlp-exec + spawn fallback', youtube: true },
-  8: { name: 'TikTok', fn: (url, type, max) => dlTikTok(url, max), desc: 'TikTok via tikwm', youtube: false },
-  9: { name: 'Instagram', fn: (url, type, max) => dlInstagram(url, max), desc: 'Instagram via reelsave+saveinsta', youtube: false },
-  10: { name: 'Social', fn: (url, type, max) => dlSocialMedia(url, max), desc: 'Auto-detect: TT/IG/TW/FB', youtube: false },
-  11: { name: 'yt-dlp-exec', fn: (url, type, max) => dlYtDlpExec(url, type, max), desc: 'Universal (yt-dlp-exec) ALL sites', youtube: false },
-  12: { name: 'Facebook', fn: (url, type, max) => dlFacebook(url, max), desc: 'Facebook via yt-dlp-exec', youtube: false },
+  1: { name: 'Universal', fn: (url, type, max) => dlUniversal(url, type, max), desc: 'yt-dlp-exec (ALL sites)', youtube: false },
+  2: { name: 'Smart', fn: smartDownload, desc: 'Cascade: yt-dlp-exec→platform API→direct', youtube: false },
+ 3: { name: 'TikTok', fn: (url, type, max) => dlTikTok(url, max), desc: 'TikTok via tikwm (no watermark)', youtube: false },
+ 4: { name: 'Instagram', fn: (url, type, max) => dlInstagram(url, max), desc: 'Instagram via reelsave+saveinsta', youtube: false },
+  5: { name: 'Social', fn: (url, type, max) => dlSocialMedia(url, max), desc: 'Auto-detect: TT/IG/TW/FB', youtube: false },
+  6: { name: 'Facebook', fn: (url, type, max) => dlFacebook(url, max), desc: 'Facebook via yt-dlp-exec', youtube: false },
 };
 
 function getGroupDlFn() { return DOWNLOAD_METHODS[groupDlMethod]?.fn || smartDownload; }
@@ -1333,9 +1008,9 @@ async function fetchXnxxContent(query) {
 //  SECTION 17: GROUP MEMBER MANAGEMENT (Fixed for @lid)
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-// Check if a participant JID is a member of ANY target group
+// Check if a participant JID is a member of ANY target group (cached check)
 // Uses the FULL JID as stored from group metadata (handles both @lid and @s.whatsapp.net)
-// v12: Check if a participant is in any target group. Admin always member.
+// v19: Enhanced with live group metadata fallback when cache is empty
 function isGroupMember(participantJid) {
   if (!participantJid) return false;
   const adminPhone = ADMIN + '@s.whatsapp.net';
@@ -1343,7 +1018,7 @@ function isGroupMember(participantJid) {
   const bare = toBare(participantJid);
   const mapped = lidToPhone.get(bare);
   if (mapped && (mapped === adminPhone || toBare(mapped) === ADMIN)) return true;
-  // Check all group member sets
+  // Check all group member sets (from cached metadata)
   for (const [, members] of groupMembers.entries()) {
     if (members.has(participantJid)) return true;
     for (const m of members) { if (toBare(m) === bare) return true; }
@@ -1356,15 +1031,82 @@ function isGroupMember(participantJid) {
   return false;
 }
 
-function hasMemberBenefits(participantJid) {
+// v19: LIVE member check — fetches group metadata in real-time if cache misses
+// This fixes the bug where bot doesn't know if user is a member (cache not populated yet)
+// Caches the result for 60 seconds to avoid spamming groupMetadata calls
+const memberCheckCache = new Map(); // bareJid -> { isMember: bool, ts: timestamp }
+async function isGroupMemberLive(participantJid) {
+  if (!participantJid) return false;
+  const bare = toBare(participantJid);
+  // Check cache first (60s TTL)
+  const cached = memberCheckCache.get(bare);
+  if (cached && (Date.now() - cached.ts) < 60000) return cached.isMember;
+  // Admin is always a member
+  if (bare === ADMIN) { memberCheckCache.set(bare, { isMember: true, ts: Date.now() }); return true; }
+  const mapped = lidToPhone.get(bare);
+  if (mapped && toBare(mapped) === ADMIN) { memberCheckCache.set(bare, { isMember: true, ts: Date.now() }); return true; }
+  // If user left, they are NOT a member
+  if (memberLeftSet.has(bare) || memberLeftSet.has(participantJid)) { memberCheckCache.set(bare, { isMember: false, ts: Date.now() }); return false; }
+  // Try cached check first (fast)
+  if (isGroupMember(participantJid)) { memberCheckCache.set(bare, { isMember: true, ts: Date.now() }); return true; }
+  // v19: LIVE check — fetch group metadata RIGHT NOW to verify membership
+  // This is the key fix: if cache is empty (bot just started, or hasn't refreshed yet),
+  // we check the live group metadata to see if the user is actually a member
+  if (sock && connectionStatus === 'connected') {
+    for (const [key, groupJid] of Object.entries(targetGroups)) {
+      if (!groupJid) continue;
+      try {
+        const meta = await sock.groupMetadata(groupJid);
+        if (meta?.participants) {
+          for (const p of meta.participants) {
+            const pBare = toBare(p.id);
+            if (pBare === bare || p.id === participantJid) {
+              // FOUND — user IS a member of this group
+              // Also update the cache for future fast checks
+              groupMembers.set(groupJid, new Set(meta.participants.map(x => x.id)));
+              groupMetadataCache.set(groupJid, meta);
+              console.log('[Members] LIVE check: ' + bare + ' IS member of ' + key);
+              memberCheckCache.set(bare, { isMember: true, ts: Date.now() });
+              return true;
+            }
+            // Also check via lidToPhone mapping
+            const phoneJid = lidToPhone.get(pBare);
+            if (phoneJid && (toBare(phoneJid) === bare || phoneJid === participantJid)) {
+              groupMembers.set(groupJid, new Set(meta.participants.map(x => x.id)));
+              groupMetadataCache.set(groupJid, meta);
+              console.log('[Members] LIVE check (via LID map): ' + bare + ' IS member of ' + key);
+              memberCheckCache.set(bare, { isMember: true, ts: Date.now() });
+              return true;
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[Members] LIVE check error for ' + key + ': ' + e.message);
+      }
+    }
+  }
+  console.log('[Members] LIVE check: ' + bare + ' is NOT a member of any target group');
+  memberCheckCache.set(bare, { isMember: false, ts: Date.now() });
+  return false;
+}
+
+// v19: hasMemberBenefits now uses LIVE check when cache misses
+// This ensures the bot ALWAYS knows if a user is a group member
+async function hasMemberBenefits(participantJid) {
   if (!participantJid) return false;
   const bare = toBare(participantJid);
   if (bare === ADMIN) return true;
-  // Check lid map
+  // Check lid map for admin
   const mapped = lidToPhone.get(bare);
   if (mapped && toBare(mapped) === ADMIN) return true;
+  // If user left, they are NOT a member
   if (memberLeftSet.has(bare) || memberLeftSet.has(participantJid)) return false;
-  return isGroupMember(participantJid);
+  // Fast cached check first
+  if (isGroupMember(participantJid)) return true;
+  // v19 KEY FIX: If cache miss, do LIVE group metadata check
+  // This fixes the bug where bot says "not a member" when it just hasn't refreshed the cache yet
+  console.log('[Members] Cache miss for ' + bare + ' — doing LIVE check...');
+  return await isGroupMemberLive(participantJid);
 }
 
 function revokeMemberBenefits(jid) {
@@ -1821,7 +1563,7 @@ async function handleGroupDownload(text, sender, msg, replyJid, groupJid) {
     const num = parseInt(lower);
     if (num >= 1 && num <= pending.results.length) {
       const selected = pending.results[num - 1]; const wantsVideo = pending.wantsVideo;
-      let list = '*Pick download method for: *\n\n*' + selected.title + '*\n' + (selected.author || 'Unknown') + ' | ' + (selected.duration || '?') + '\n\n*1.* ytdl-core (standard)\n*2.* play-dl (fallback)\n*3.* Invidious (privacy API)\n*4.* Piped (privacy API)\n*5.* Cobalt (multi-platform)\n*6.* Smart (auto-cascade all)\n\nReply a number. File goes to your inbox.';
+      let list = '*Pick download method for: *\n\n*' + selected.title + '*\n' + (selected.author || 'Unknown') + ' | ' + (selected.duration || '?') + '\n\n*1.* Universal (yt-dlp-exec ALL)\n*2.* Smart (cascade)\n*3.* TikTok (tikwm)\n*4.* Instagram (reelsave)\n*5.* Social (auto-detect)\n*6.* Facebook (yt-dlp-exec)\n\nReply a number. File goes to your inbox.';
       pendingDownloads.set(bare, { state: 'method_select', selected: { title: selected.title, url: selected.url, author: selected.author, duration: selected.duration }, wantsVideo, timestamp: Date.now() });
       try { await sock.sendMessage(inboxJid, { text: list }); } catch {}
       return true;
@@ -2131,7 +1873,7 @@ async function startSock() {
         try {
           console.log('[WA] Sending bot online to admin DM: ' + ADMIN + '@s.whatsapp.net');
           await sock.sendMessage(ADMIN + '@s.whatsapp.net', {
-            text: 'Bot online! (v' + VERSION + ')\n\nAdmin LID: ' + lidStatus + '\n2 Groups: Music + Movies\nDL Method: ' + getGroupDlName() + '\n5 Download Methods: ytdl, play-dl, Invidious, Piped, Cobalt\n\nAI Online: ' + allAi + '\nAdmins: ' + adminTotal + '\nLid map: ' + lidToPhone.size + '\nTranslate: ' + (translator ? 'ON' : 'OFF') + '\nRAM: ' + getRamMB() + 'MB / ' + MAX_RAM_MB + 'MB'
+            text: 'Bot online! (v' + VERSION + ')\n\nAdmin LID: ' + lidStatus + '\n2 Groups: Music + Movies\nDL Method: ' + getGroupDlName() + '\nDownloads: yt-dlp-exec (Universal) + tikwm + reelsave (DownloaderX v19)\n\nAI Online: ' + allAi + '\nAdmins: ' + adminTotal + '\nLid map: ' + lidToPhone.size + '\nTranslate: ' + (translator ? 'ON' : 'OFF') + '\nRAM: ' + getRamMB() + 'MB / ' + MAX_RAM_MB + 'MB'
           });
           console.log('[WA] Bot online message SENT to admin DM!');
         } catch (e) {
@@ -2314,11 +2056,11 @@ async function startSock() {
             if (text === '!dlmethod' || text.startsWith('!dlmethod ')) {
               const arg = text.replace('!dlmethod', '').trim();
               if (!arg) {
-                await sock.sendMessage(replyJid, { text: '*Download Method: ' + getGroupDlName() + '*\n\n*1.* ytdl-core (standard)\n*2.* play-dl (fallback)\n*3.* Invidious (privacy API)\n*4.* Piped (privacy API)\n*5.* Cobalt (multi-platform)\n*6.* Smart (v19: yt-dlp-exec first)\n*7.* yt-dlp (yt-dlp-exec + spawn)\n*8.* TikTok (tikwm)\n*9.* Instagram (reelsave+saveinsta)\n*10.* Social (auto-detect)\n*11.* yt-dlp-exec (universal ALL)\n*12.* Facebook (yt-dlp-exec)\n\nUsage: !dlmethod <1-12>' });
+                await sock.sendMessage(replyJid, { text: '*Download Method: ' + getGroupDlName() + '*\n\n*1.* Universal (yt-dlp-exec ALL)\n*2.* Smart (cascade)\n*3.* TikTok (tikwm)\n*4.* Instagram (reelsave)\n*5.* Social (auto-detect)\n*6.* Smart (v19: yt-dlp-exec first)\n*7.* yt-dlp (yt-dlp-exec + spawn)\n*8.* TikTok (tikwm)\n*9.* Instagram (reelsave+saveinsta)\n*10.* Social (auto-detect)\n*11.* yt-dlp-exec (universal ALL)\n*12.* Facebook (yt-dlp-exec)\n\nUsage: !dlmethod <1-12>' });
               } else {
                 const num = parseInt(arg);
-                if (num >= 1 && num <= 12) { groupDlMethod = num; await sock.sendMessage(replyJid, { text: 'DL method: *' + getGroupDlName() + '*' }); }
-                else await sock.sendMessage(replyJid, { text: 'Use !dlmethod 1-12' });
+                if (num >= 1 && num <= 6) { groupDlMethod = num; await sock.sendMessage(replyJid, { text: 'DL method: *' + getGroupDlName() + '*' }); }
+                else await sock.sendMessage(replyJid, { text: 'Use !dlmethod 1-6' });
               } continue;
             }
 
@@ -2580,7 +2322,7 @@ async function startSock() {
               }); continue;
             }
             if (text) {
-              await sock.sendMessage(replyJid, { text: 'Got: "' + text.substring(0, 80) + '"\n\n*Admin Commands (DM only):*\n!status — Bot status\n!ram — RAM usage\n!queue — Task queue\n!groups — Group info\n!joingroups — Join target groups\n!scanlinks — Scan messages for group links\n!dlmethod <1-12> — Switch DL method\n!ai list — Check AI status\n!postgroup <music|movies> — Post content\n!postallgroups — Post to all groups\n!download <name> — Admin download\n!test all on <query> — Test everything\ntest download1-5 — Test each DL method\n!broadcast <msg> — Broadcast\n!reconnect — Force reconnect\n!interval <10-60> — Set post interval\n!morning — Send morning tutorial\n!weather — Send weather to groups\n!fetchhistory <group> — Fetch past messages\n!debug — Admin detection debug\n!dump — Raw participant data\n!resolveadmin — Force re-resolve admin LID\n!iamadmin — Register as admin (in group)\n!dlhistory — Download history\n!dlclear — Clear download history\n!stop <id> — Stop broadcast' });
+              await sock.sendMessage(replyJid, { text: 'Got: "' + text.substring(0, 80) + '"\n\n*Admin Commands (DM only):*\n!status — Bot status\n!ram — RAM usage\n!queue — Task queue\n!groups — Group info\n!joingroups — Join target groups\n!scanlinks — Scan messages for group links\n!dlmethod <1-6> — Switch DL method\n!ai list — Check AI status\n!postgroup <music|movies> — Post content\n!postallgroups — Post to all groups\n!download <name> — Admin download\n!test all on <query> — Test everything\ntest download1-5 — Test each DL method\n!broadcast <msg> — Broadcast\n!reconnect — Force reconnect\n!interval <10-60> — Set post interval\n!morning — Send morning tutorial\n!weather — Send weather to groups\n!fetchhistory <group> — Fetch past messages\n!debug — Admin detection debug\n!dump — Raw participant data\n!resolveadmin — Force re-resolve admin LID\n!iamadmin — Register as admin (in group)\n!dlhistory — Download history\n!dlclear — Clear download history\n!stop <id> — Stop broadcast' });
             }
           } catch (e) { console.error('[ADM] Error:', e.message); try { await sock.sendMessage(replyJid, { text: 'Error: ' + e.message }); } catch {} }
         }
@@ -2591,7 +2333,7 @@ async function startSock() {
         if (isGroup(sender) && !fromMe && text) {
           const gl = text.toLowerCase().trim();
           const isTgt = isTargetGroup(sender);
-          const isMem = hasMemberBenefits(participant); // Fixed: uses full JID
+          const isMem = await hasMemberBenefits(participant); // v19: async — uses LIVE check when cache misses
           const phoneJid = resolvePhoneJid(participant, msg);
           const inboxJid = phoneJid || (toBare(participant) + '@s.whatsapp.net');
 
@@ -2666,10 +2408,10 @@ async function startSock() {
             enqueueTask('url_dl_' + Date.now(), async () => {
               try {
                 await sock.sendMessage(inboxJid, { text: 'Downloading...' });
-                // Try Cobalt first for social media URLs, then direct download
+                // v19: Use smartDownload (yt-dlp-exec → platform API → direct URL)
                 let dl = null;
-                if (!ytVideoId(url)) { try { dl = await dlCobalt(url, MAX_MEDIA_MB); } catch {} }
-                if (!dl) { dl = await downloadFromUrl(url, MAX_MEDIA_MB); }
+                try { dl = await smartDownload(url, 'video', MAX_MEDIA_MB); } catch {}
+                if (!dl) { try { dl = await downloadFromUrl(url, MAX_MEDIA_MB); } catch {} }
                 const buffer = fs.readFileSync(dl.file); try { fs.unlinkSync(dl.file); } catch {}
                 const sizeMB = (buffer.length / 1024 / 1024).toFixed(1); const mt = dl.mimetype || 'application/octet-stream';
                 if (mt.startsWith('image')) await sock.sendMessage(inboxJid, { image: buffer, caption: 'Downloaded (' + sizeMB + 'MB)' });
@@ -3251,6 +2993,8 @@ setInterval(() => logRam('MON'), 300000);
 setInterval(() => refreshGroupMembers(), 30 * 60000);
 setInterval(() => { const now2 = Date.now(); for (const [k, times] of msgRateLimiter.entries()) { const filtered = times.filter(t => (now2 - t) < MSG_RATE_WINDOW); if (filtered.length === 0) msgRateLimiter.delete(k); else msgRateLimiter.set(k, filtered); } }, 300000);
 setInterval(cleanPendingDownloads, 60000);
+// v19: Clean member check cache every 5 minutes
+setInterval(() => { const now = Date.now(); for (const [k, v] of memberCheckCache.entries()) { if ((now - v.ts) > 300000) memberCheckCache.delete(k); } }, 300000);
 setInterval(cleanFallbacks, 60000);
 setInterval(() => { const now2 = Date.now(); for (const [k, v] of aiSelections.entries()) { if ((now2 - v.timestamp) > 600000) aiSelections.delete(k); } for (const [k, v] of nsfwSelections.entries()) { if ((now2 - v.timestamp) > 600000) nsfwSelections.delete(k); } }, 600000);
 setInterval(() => { const cutoff = Date.now() - 7 * 86400000; for (const [k, entries] of downloadHistory.entries()) { const recent = entries.filter(e => e.ts > cutoff); if (recent.length === 0) downloadHistory.delete(k); else downloadHistory.set(k, recent); } }, 3600000);

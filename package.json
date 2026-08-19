@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot",
-  "version": "17.0.0",
-  "description": "WhatsApp bot v17.0 — Aion Labs AI Group Manager | NSFW xvideos | All Downloads",
+  "version": "18.0.0",
+  "description": "WhatsApp bot v18.0 — All Downloads Fixed | yt-dlp auto-install | Dynamic instances",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

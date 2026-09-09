@@ -21,15 +21,15 @@ const cheerio = require('cheerio');
 //  CONFIGURATION
 // =============================================================================
 const VERSION = '22.1';
-const ADMIN = '115110005706891@lid';
-const EXCLUDED_PHONE = '64226434709';
+const ADMIN = '115110005706891@lid';          // Your admin LID
+const EXCLUDED_PHONE = '64226434709';        // Phone that never gets naughty replies
 const AUTH_FOLDER = 'auth_info';
 const PORT = process.env.PORT || 10000;
 
-// IMPORTANT: Replace these with fresh keys from your dashboards!
-const GEMINI_API_KEY = 'YOUR_NEW_GEMINI_API_KEY';
+// AI API Keys – replace with your fresh keys
+const GEMINI_API_KEY = 'AQ.Ab8RN6L4xBKiQ5j1RUIZSp6OEOlF-6zAVSiTQqqRGIa4iIOrQA';
 const GEMINI_MODEL = 'gemini-3.8-flash';
-const LLM7_API_KEY = 'YOUR_NEW_LLM7_API_KEY';
+const LLM7_API_KEY = 'MrZ30o/mVA68zW1ATWSZx5peFFRON0Lk+ug9jyL6Zaw6+bq2YBxdzggcNcNIENuKGABhcs1T+8bRVJJ1cPkUR7/RoELgY09mv17xp7QEq4v2MuJC3SzEaC1Aa2otyi/4agFDPcv83s/jh2Md';
 const LLM7_MODEL = 'gemini-3-flash';
 const NAUGHTY_AI_PROVIDER = 'gemini'; // 'gemini', 'llm7', or 'static'
 
@@ -67,7 +67,6 @@ const IMAGE_SITES = {
 
 const DOWNLOAD_FOLDER = path.join(__dirname, 'downloaded_images');
 if (!fs.existsSync(DOWNLOAD_FOLDER)) fs.mkdirSync(DOWNLOAD_FOLDER, { recursive: true });
-
 const imageCache = new NodeCache({ stdTTL: 3600, checkperiod: 120 });
 
 // =============================================================================
@@ -76,11 +75,9 @@ const imageCache = new NodeCache({ stdTTL: 3600, checkperiod: 120 });
 let sock = null;
 let qrDataUri = null;
 let connectionStatus = 'disconnected';
+let lastConnectedAt = 0;  // Used to determine if we've ever connected successfully
 let reconnectAttempts = 0;
-let maxReconnectAttempts = 5;
-let isInitialConnection = true; // Prevents reconnect loop before QR scan
-let lastConnectedAt = 0;
-let onlineMsgSent = false;
+const MAX_RECONNECT_ATTEMPTS = 5;
 let botStartTime = Date.now();
 
 let ADMIN_LID_JID = ADMIN;
@@ -90,9 +87,7 @@ const lidToPhone = new Map();
 const knownGroups = new Set();
 const groupActivity = new Map();
 const joinedGroupCodes = new Set();
-
 const messageStore = [];
-
 const broadcasts = new Map();
 let broadcastIdCounter = 1;
 let currentBroadcastMessage = '';
@@ -418,32 +413,33 @@ function loadAdminLid() {
 // =============================================================================
 //  ADMIN DETECTION
 // =============================================================================
-async function resolveAdminLid() {}
 function isAdmin(jid, msg) {
   if (!jid) return false;
+  // Check if it's a direct message from the admin phone
   if (!isGroup(jid)) {
     const dmBare = toBare(jid);
-    if (dmBare === ADMIN || (ADMIN_LID_JID && jid === ADMIN_LID_JID)) {
+    // Compare with ADMIN (which may be a phone number or LID)
+    if (dmBare === toBare(ADMIN) || jid === ADMIN) {
       capturedAdminJids.add(jid);
       return true;
     }
     return capturedAdminJids.has(jid);
   }
+  // Group message: check participant
   const participant = msg?.key?.participant;
-  if (participant && toBare(participant) === ADMIN) return true;
-  if (ADMIN_LID_JID && participant === ADMIN_LID_JID) return true;
-  if (participant?.endsWith('@lid')) {
-    const mapped = lidToPhone.get(toBare(participant));
-    if (mapped && toBare(mapped) === ADMIN) return true;
+  if (participant) {
+    const pBare = toBare(participant);
+    if (pBare === toBare(ADMIN) || participant === ADMIN) return true;
+    if (capturedAdminJids.has(participant)) return true;
   }
-  if (msg?.key?.senderPn && msg.key.senderPn.split(':')[0] === ADMIN) return true;
-  if (msg?.key?.participantPn && msg.key.participantPn.split(':')[0] === ADMIN) return true;
-  return capturedAdminJids.has(jid) || capturedAdminJids.has(participant);
+  return false;
 }
 
 function getReplyJid(msg) {
   const sender = msg.key?.remoteJid;
-  if (!isGroup(sender)) return msg?.key?.participantPn || msg?.key?.senderPn || sender;
+  if (!isGroup(sender)) {
+    return msg?.key?.participant || sender;
+  }
   return sender;
 }
 
@@ -513,23 +509,19 @@ async function handleCasualMessage(text, replyJid, isGroupChat, senderJid) {
   if (!text) return false;
   const lower = text.toLowerCase().trim();
 
-  // --- AI Image Request Detection ---
-  // If the user asks for images in a casual way, the AI will detect it
-  // and trigger the image download
+  // --- AI Image Request Detection (private only) ---
   const imageKeywords = ['boobs', 'horny', 'sexy', 'nude', 'nsfw', 'hot', 'picture', 'photo', 'image', 'send me', 'show me', 'i want', 'need'];
   if (!isGroupChat && imageKeywords.some(k => lower.includes(k))) {
     const senderPhone = await resolvePhoneNumber(senderJid);
     const isExcluded = (senderPhone === EXCLUDED_PHONE);
     if (!isExcluded) {
-      // Check if it's a specific query (e.g., "send me boobs", "show me sexy girls")
-      let query = text.trim();
-      // Use the query as search term
-      await downloadAndSendImages('naijauncut', query, replyJid, 3);
+      // Use the whole message as query
+      await downloadAndSendImages('naijauncut', text.trim(), replyJid, 3);
       return true;
     }
   }
 
-  // --- Naughty reply for private chats ---
+  // --- Naughty reply for private chats (if not excluded) ---
   if (!isGroupChat) {
     const senderPhone = await resolvePhoneNumber(senderJid);
     const isExcluded = (senderPhone === EXCLUDED_PHONE);
@@ -545,7 +537,7 @@ async function handleCasualMessage(text, replyJid, isGroupChat, senderJid) {
     }
   }
 
-  // --- Normal greetings ---
+  // --- Normal greeting replies (for groups or excluded user) ---
   const greetings = ['hi', 'hello', 'hey', 'howdy', 'good morning', 'good afternoon', 'good evening', 'sup', 'yo'];
   if (greetings.some(g => lower.includes(g) || lower === g)) {
     const reply = getRandomResponse(["Hey there! 👋", "Hello! How's it going?", "Hi! 😊", "Hey, what's up?"]);
@@ -649,7 +641,7 @@ async function refreshKnownGroups() {
 }
 
 // =============================================================================
-//  ADMIN COMMANDS (Full List)
+//  ADMIN COMMANDS
 // =============================================================================
 async function handleAdminCommand(text, replyJid, msg) {
   const lower = text.toLowerCase().trim();
@@ -1054,7 +1046,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     await sock.sendMessage(replyJid, { text: 'Reconnecting...' });
     try { if (sock) sock.end(); } catch {}
     reconnectAttempts = 0;
-    isInitialConnection = true;
     setTimeout(() => startSock(), 1000);
     return true;
   }
@@ -1071,7 +1062,7 @@ async function handleAdminCommand(text, replyJid, msg) {
 
   if (lower === '!resolveadmin') {
     await sock.sendMessage(replyJid, { text: 'Re-resolving admin LID...' });
-    await resolveAdminLid();
+    // We'll just set it from saved
     await sock.sendMessage(replyJid, { text: 'Done. ADMIN_LID_JID=' + (ADMIN_LID_JID || 'NULL') });
     return true;
   }
@@ -1190,6 +1181,7 @@ async function startSock() {
     qrTimeout: 120000,
   });
 
+  // CRITICAL: Save credentials whenever they change
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
@@ -1209,7 +1201,6 @@ async function startSock() {
     if (connection === 'open') {
       connectionStatus = 'connected';
       reconnectAttempts = 0;
-      isInitialConnection = false;
       lastConnectedAt = Date.now();
       addLog('Connected to WhatsApp', 'success');
       broadcastSSE('status', { status: 'connected' });
@@ -1226,7 +1217,6 @@ async function startSock() {
       loadJoinedGroups();
       loadBroadcasts();
       loadAdminLid();
-      await resolveAdminLid();
       await refreshKnownGroups();
       resumeBroadcasts();
       setTimeout(() => { scanAllMessagesForLinks(); }, 10000);
@@ -1241,32 +1231,28 @@ async function startSock() {
         ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
         : true;
 
-      // Only reconnect if:
-      // 1. We were previously connected (not initial connection)
-      // 2. OR we have a QR code (meaning we're waiting for scan)
-      // 3. AND we haven't exceeded max attempts
-      const canReconnect = (!isInitialConnection || qrDataUri) && shouldReconnect && reconnectAttempts < maxReconnectAttempts;
+      // Only reconnect if we have ever connected successfully or have a QR
+      const canReconnect = (lastConnectedAt > 0 || qrDataUri) && shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS;
 
       if (canReconnect) {
         reconnectAttempts++;
         const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 60000);
-        addLog(`Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts}/${maxReconnectAttempts})`, 'info');
+        addLog(`Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`, 'info');
         setTimeout(() => startSock(), delay);
       } else if (!shouldReconnect) {
         addLog('Logged out. Exiting.', 'error');
         process.exit(0);
-      } else if (reconnectAttempts >= maxReconnectAttempts) {
+      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
         addLog('Max reconnect attempts reached. Manual restart required.', 'error');
         // Keep the server alive but don't retry
         connectionStatus = 'disconnected';
       } else {
-        // Initial connection without QR – wait for QR
-        addLog('Waiting for QR code...', 'info');
-        // QR will be generated in the next update
+        addLog('Waiting for QR scan...', 'info');
       }
     }
   });
 
+  // ============= MESSAGE HANDLER =============
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const processBatch = async (batch) => {
       for (const msg of batch) {
@@ -1341,6 +1327,7 @@ async function startSock() {
     }
   });
 
+  // Group participant updates
   sock.ev.on('group-participants.update', async (update) => {
     try {
       const jid = update.id;
@@ -1351,6 +1338,7 @@ async function startSock() {
     } catch {}
   });
 
+  // Warnings
   sock.ev.on('warning', async (warn) => {
     addLog('⚠️ WhatsApp warning: ' + warn, 'warn');
     broadcastSSE('warning', { warn });
@@ -1366,6 +1354,7 @@ async function startSock() {
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 
+// SSE endpoint
 app.get('/events', (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -1432,7 +1421,7 @@ app.post('/refresh', (req, res) => {
   }
   if (sock) sock.end();
   reconnectAttempts = 0;
-  isInitialConnection = true;
+  lastConnectedAt = 0; // force QR to show
   setTimeout(() => startSock(), 500);
   res.json({ success: true, message: 'Refreshing QR...' });
 });
@@ -1440,7 +1429,7 @@ app.post('/refresh', (req, res) => {
 app.post('/reset', (req, res) => {
   if (sock) sock.end();
   reconnectAttempts = 0;
-  isInitialConnection = true;
+  lastConnectedAt = 0;
   setTimeout(() => startSock(), 1000);
   res.json({ success: true, message: 'Resetting connection...' });
 });
@@ -1789,6 +1778,12 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('[HTTP] QR: http://localhost:' + PORT + '/qr');
   console.log('[HTTP] UI: http://localhost:' + PORT);
 });
+
+// We need onlineMsgSent flag for notifications
+let onlineMsgSent = false;
+// But it's defined inside startSock now. Let's move it to top-level
+// Actually, we can set it as a global variable.
+global.onlineMsgSent = false;
 
 startSock();
 

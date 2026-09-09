@@ -1,8 +1,3 @@
-// ================================================================================
-//  WHATSAPP BOT v21.0 — High‑Throughput Stealth Group Joiner + Broadcaster
-//  Designed for 290+ groups, thousands of messages/sec, 3‑week backlog catch‑up
-// ================================================================================
-
 'use strict';
 
 const express = require('express');
@@ -19,21 +14,13 @@ const {
 const QRCode = require('qrcode');
 const pino = require('pino');
 
-// ================================================================================
-//  CONFIGURATION
-// ================================================================================
 const VERSION = '21.0';
-const ADMIN = '263777627210';          // ← CHANGE THIS
+const ADMIN = '263777627210';
 const AUTH_FOLDER = 'auth_info';
 const PORT = process.env.PORT || 10000;
+const MAX_CACHED_MESSAGES = 10000;
+const MESSAGE_PROCESS_BATCH = 50;
 
-// High‑throughput tuning
-const MAX_CACHED_MESSAGES = 10000;     // keep last 10k messages
-const MESSAGE_PROCESS_BATCH = 50;      // process 50 messages per batch
-const JOIN_CONCURRENCY = 5;            // max simultaneous group joins
-const JOIN_RETRY_DELAY = 5000;         // delay between join attempts
-
-// Human‑like behavior config
 const HUMAN_CONFIG = {
   minReplyDelay: 2,
   maxReplyDelay: 8,
@@ -47,7 +34,6 @@ const HUMAN_CONFIG = {
   useTypingIndicator: true,
 };
 
-// Greeting responses
 const GREETING_RESPONSES = [
   "Hey there! 👋",
   "Hello! How's it going?",
@@ -64,9 +50,6 @@ const HOW_ARE_YOU_RESPONSES = [
   "Couldn't be better!",
 ];
 
-// ================================================================================
-//  IN‑MEMORY STATE (NO DATABASE)
-// ================================================================================
 let sock = null;
 let qrCodeData = null;
 let connectionStatus = 'disconnected';
@@ -75,34 +58,27 @@ let lastConnectedAt = 0;
 let onlineMsgSent = false;
 let botStartTime = Date.now();
 
-// Admin LID
 let ADMIN_LID_JID = null;
 const capturedAdminJids = new Set();
 const lidToPhone = new Map();
 
-// Groups
 const knownGroups = new Set();
 const groupActivity = new Map();
 const joinedGroupCodes = new Set();
 
-// Message cache (bounded to MAX_CACHED_MESSAGES)
-const messageStore = []; // circular buffer – push, shift when over limit
+const messageStore = [];
 
-// Broadcast system (in‑memory)
 const broadcasts = new Map();
 let broadcastIdCounter = 1;
 let currentBroadcastMessage = '';
 
-// Rate limiting
 const msgRateLimiter = new Map();
 const MSG_RATE_PER_USER = 10;
 const MSG_RATE_WINDOW = 30000;
 
-// Keep‑alive
 let waKeepAlive = null;
 let lastKeepAlivePing = 0;
 
-// Join queue – for throttling joins
 let joinQueue = [];
 let isJoining = false;
 
@@ -110,9 +86,6 @@ const logger = pino({ level: 'silent' });
 const msgRetryCounterCache = new NodeCache();
 const groupMetadataCache = new NodeCache({ stdTTL: 300, useClones: false });
 
-// ================================================================================
-//  UTILITIES
-// ================================================================================
 function toBare(jid) {
   if (!jid) return '';
   return jid.split(':')[0]
@@ -139,7 +112,7 @@ async function simulateTyping(jid) {
     const duration = randInt(HUMAN_CONFIG.typingDurationMin, HUMAN_CONFIG.typingDurationMax);
     await sleep(duration);
     await sock.sendPresenceUpdate('paused', jid);
-  } catch (e) { /* ignore */ }
+  } catch (e) { }
 }
 
 function getRandomResponse(arr) {
@@ -150,13 +123,10 @@ function getRamMB() {
   try { return Math.round(process.memoryUsage().heapUsed / 1024 / 1024); } catch { return 0; }
 }
 
-// ================================================================================
-//  MESSAGE CACHE (circular buffer, bounded)
-// ================================================================================
 function addMessageToCache(msg) {
   messageStore.push(msg);
   if (messageStore.length > MAX_CACHED_MESSAGES) {
-    messageStore.shift(); // remove oldest
+    messageStore.shift();
   }
 }
 
@@ -164,9 +134,6 @@ function getCachedMessages() {
   return messageStore;
 }
 
-// ================================================================================
-//  EXTRACT INVITE LINKS
-// ================================================================================
 function extractInviteCodes(text) {
   if (!text) return [];
   const regex = /chat\.whatsapp\.com\/([A-Za-z0-9]{10,})/g;
@@ -178,14 +145,10 @@ function extractInviteCodes(text) {
   return codes;
 }
 
-// ================================================================================
-//  STEALTH GROUP JOINER (with concurrency control)
-// ================================================================================
 async function stealthJoin(code) {
   if (!sock || connectionStatus !== 'connected') return null;
   if (joinedGroupCodes.has(code)) return null;
 
-  // Add to queue if already joining
   if (isJoining) {
     return new Promise((resolve) => {
       joinQueue.push({ code, resolve });
@@ -200,17 +163,14 @@ async function stealthJoin(code) {
     knownGroups.add(gJid);
     groupActivity.set(gJid, Date.now());
     saveJoinedGroups();
-    console.log('[Join] Joined: ' + gJid + ' (code: ' + code + ')');
     return gJid;
   } catch (e) {
-    console.log('[Join] Failed ' + code + ': ' + e.message);
     if (e.message && (e.message.includes('already') || e.message.includes('400') || e.message.includes('403'))) {
       joinedGroupCodes.add(code);
     }
     return null;
   } finally {
     isJoining = false;
-    // Process next in queue
     if (joinQueue.length > 0) {
       const next = joinQueue.shift();
       const result = await stealthJoin(next.code);
@@ -219,15 +179,10 @@ async function stealthJoin(code) {
   }
 }
 
-// ================================================================================
-//  SCAN MESSAGES (efficient, non‑blocking)
-// ================================================================================
 async function scanAllMessagesForLinks() {
   if (!sock || connectionStatus !== 'connected') return 0;
   const messages = getCachedMessages();
-  console.log('[Scan] Scanning ' + messages.length + ' cached messages...');
   let found = 0;
-  // Process in batches to avoid blocking
   const batchSize = 200;
   for (let i = 0; i < messages.length; i += batchSize) {
     const batch = messages.slice(i, i + batchSize);
@@ -237,14 +192,11 @@ async function scanAllMessagesForLinks() {
       for (const code of codes) {
         const result = await stealthJoin(code);
         if (result) found++;
-        // small delay between joins
         await sleep(randInt(1000, 3000));
       }
     }
-    // Yield to event loop
     await sleep(0);
   }
-  console.log('[Scan] Found and joined ' + found + ' new groups. Total known: ' + knownGroups.size);
   return found;
 }
 
@@ -262,14 +214,10 @@ async function refreshKnownGroups() {
     }
     if (added > 0) {
       saveJoinedGroups();
-      console.log('[Groups] Refreshed: +' + added + ', total=' + knownGroups.size);
     }
-  } catch (e) { console.error('[Groups] Refresh error:', e.message); }
+  } catch (e) { }
 }
 
-// ================================================================================
-//  PERSISTENCE (minimal JSON files)
-// ================================================================================
 const BROADCASTS_FILE = 'broadcasts.json';
 const JOINED_GROUPS_FILE = 'joined_groups.json';
 const ADMIN_LID_FILE = 'admin_lid.json';
@@ -282,7 +230,7 @@ function saveJoinedGroups() {
       savedAt: new Date().toISOString()
     };
     fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify(data, null, 2));
-  } catch (e) { console.error('[Save] Groups error:', e.message); }
+  } catch (e) { }
 }
 
 function loadJoinedGroups() {
@@ -291,9 +239,8 @@ function loadJoinedGroups() {
       const data = JSON.parse(fs.readFileSync(JOINED_GROUPS_FILE, 'utf8'));
       if (data.groups) data.groups.forEach(g => knownGroups.add(g));
       if (data.codes) data.codes.forEach(c => joinedGroupCodes.add(c));
-      console.log('[Load] Loaded ' + knownGroups.size + ' groups, ' + joinedGroupCodes.size + ' codes');
     }
-  } catch (e) { console.error('[Load] Groups error:', e.message); }
+  } catch (e) { }
 }
 
 function saveBroadcasts() {
@@ -308,7 +255,7 @@ function saveBroadcasts() {
       customInterval: v.customInterval
     });
     fs.writeFileSync(BROADCASTS_FILE, JSON.stringify(d, null, 2));
-  } catch (e) { console.error('[BC] Save err:', e.message); }
+  } catch (e) { }
 }
 
 function loadBroadcasts() {
@@ -319,9 +266,8 @@ function loadBroadcasts() {
         broadcasts.set(String(id), { ...b, active: false, interval: null });
       });
       broadcastIdCounter = Math.max(broadcastIdCounter, ...[...broadcasts.keys()].map(Number)) + 1;
-      console.log('[BC] Loaded ' + broadcasts.size + ' broadcasts');
     }
-  } catch (e) { console.error('[BC] Load err:', e.message); }
+  } catch (e) { }
 }
 
 function saveAdminLid() {
@@ -332,7 +278,7 @@ function saveAdminLid() {
       lidToPhone: Object.fromEntries(lidToPhone)
     };
     fs.writeFileSync(ADMIN_LID_FILE, JSON.stringify(data, null, 2));
-  } catch (e) { console.error('[AdminLid] Save failed:', e.message); }
+  } catch (e) { }
 }
 
 function loadAdminLid() {
@@ -344,15 +290,11 @@ function loadAdminLid() {
         if (data.lidToPhone) {
           for (const [k, v] of Object.entries(data.lidToPhone)) lidToPhone.set(k, v);
         }
-        console.log('[AdminLid] Loaded: ' + ADMIN_LID_JID);
       }
     }
-  } catch (e) { console.error('[AdminLid] Load failed:', e.message); }
+  } catch (e) { }
 }
 
-// ================================================================================
-//  ADMIN DETECTION
-// ================================================================================
 async function resolveAdminLid() {
   try {
     const result = await sock.onWhatsApp(ADMIN + '@s.whatsapp.net');
@@ -366,7 +308,7 @@ async function resolveAdminLid() {
       }
       if (ADMIN_LID_JID) saveAdminLid();
     }
-  } catch (e) { console.error('[AdminLid] onWhatsApp error:', e.message); }
+  } catch (e) { }
 }
 
 function isAdmin(jid, msg) {
@@ -403,11 +345,8 @@ function getReplyJid(msg) {
   return sender;
 }
 
-// ================================================================================
-//  BROADCAST SYSTEM (in‑memory)
-// ================================================================================
 function getBcInterval(bc) {
-  return bc.customInterval || 6 * 3600000; // default 6 hours
+  return bc.customInterval || 6 * 3600000;
 }
 
 function startBc(id) {
@@ -419,7 +358,6 @@ function startBc(id) {
   sendBcMsg(id);
   bc.interval = setInterval(() => sendBcMsg(id), getBcInterval(bc));
   saveBroadcasts();
-  console.log('[BC] Started #' + id);
 }
 
 async function sendBcMsg(id) {
@@ -437,14 +375,12 @@ async function sendBcMsg(id) {
       await sleep(delay);
     } catch (e) {
       failed++;
-      console.error('[BC] Failed to ' + g + ': ' + e.message);
     }
   }
   bc.sentCount = (bc.sentCount || 0) + sent;
   bc.lastSent = new Date().toISOString();
   bc.lastSentCount = sent;
   saveBroadcasts();
-  console.log('[BC] #' + id + ' sent to ' + sent + '/' + targets.length + ' groups (' + failed + ' failed)');
 }
 
 function stopBc(id) {
@@ -454,7 +390,6 @@ function stopBc(id) {
   bc.active = false;
   bc.interval = null;
   saveBroadcasts();
-  console.log('[BC] Stopped #' + id);
 }
 
 function stopAllBc() {
@@ -466,14 +401,10 @@ function resumeBroadcasts() {
     if (bc.active) {
       if (bc.interval) clearInterval(bc.interval);
       bc.interval = setInterval(() => sendBcMsg(id), getBcInterval(bc));
-      console.log('[BC] Resumed #' + id);
     }
   }
 }
 
-// ================================================================================
-//  CASUAL MESSAGE HANDLER
-// ================================================================================
 async function handleCasualMessage(text, replyJid, msg) {
   if (!text) return false;
   const lower = text.toLowerCase().trim();
@@ -508,13 +439,9 @@ async function handleCasualMessage(text, replyJid, msg) {
   return false;
 }
 
-// ================================================================================
-//  ADMIN COMMANDS (includes new scan and fetch commands)
-// ================================================================================
 async function handleAdminCommand(text, replyJid, msg) {
   const lower = text.toLowerCase().trim();
 
-  // --- !editbc ---
   if (lower.startsWith('!editbc ')) {
     const newMsg = text.replace(/^!editbc\s+/i, '').trim();
     if (!newMsg) {
@@ -531,7 +458,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !broadcastmsg ---
   if (lower.startsWith('!broadcastmsg ')) {
     const msgText = text.replace(/^!broadcastmsg\s+/i, '').trim();
     if (!msgText) {
@@ -543,7 +469,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !status ---
   if (lower === '!status') {
     const upHrs = Math.floor((Date.now() - botStartTime) / 3600000);
     const upMins = Math.floor(((Date.now() - botStartTime) % 3600000) / 60000);
@@ -561,13 +486,11 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !ram ---
   if (lower === '!ram') {
     await sock.sendMessage(replyJid, { text: 'RAM: ' + getRamMB() + 'MB' });
     return true;
   }
 
-  // --- !groups ---
   if (lower === '!groups') {
     await refreshKnownGroups();
     let txt = '*Known Groups (' + knownGroups.size + ')*\n\n';
@@ -581,7 +504,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !refreshgroups ---
   if (lower === '!refreshgroups') {
     await sock.sendMessage(replyJid, { text: 'Refreshing group list...' });
     await refreshKnownGroups();
@@ -589,16 +511,13 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !scanlinks --- (full, non‑blocking scan of all cached messages)
   if (lower === '!scanlinks') {
     await sock.sendMessage(replyJid, { text: '🔄 Scanning all cached messages for invite links (this may take a while)...' });
-    // Run in background but send periodic updates?
     const found = await scanAllMessagesForLinks();
     await sock.sendMessage(replyJid, { text: '✅ Scan complete. Joined ' + found + ' new groups.\nTotal known: ' + knownGroups.size });
     return true;
   }
 
-  // --- !searchlinks --- (instant: returns all links from cache)
   if (lower === '!searchlinks') {
     const links = new Set();
     for (const m of getCachedMessages()) {
@@ -615,7 +534,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !searchnames --- (instant: returns group names from cache)
   if (lower === '!searchnames') {
     const names = [];
     for (const m of getCachedMessages()) {
@@ -635,11 +553,201 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !broadcast, !bconce, !bcimage, !stop, !stopall, !bclist, !bcclear, !bcresume, !bcinterval, !bcgroups, !bcreset ---
-  // (keep existing code – it's unchanged)
-  // ... insert the rest of broadcast commands from previous version ...
+  if (lower.startsWith('!broadcast ') || lower.startsWith('!bc ')) {
+    const bcMsg = text.replace(/^!(broadcast|bc)\s+/i, '').trim();
+    if (!bcMsg) {
+      await sock.sendMessage(replyJid, { text: 'Usage: !broadcast <message>' });
+      return true;
+    }
+    const id = String(broadcastIdCounter++);
+    broadcasts.set(id, {
+      message: bcMsg,
+      groups: [],
+      active: false,
+      interval: null,
+      sentCount: 0,
+      createdAt: new Date().toISOString(),
+      customInterval: 6 * 3600000
+    });
+    startBc(id);
+    await sock.sendMessage(replyJid, {
+      text: '*Broadcast #' + id + ' started!*\n\n' +
+        'Message: ' + bcMsg.substring(0, 100) + (bcMsg.length > 100 ? '...' : '') + '\n' +
+        'Targets: All ' + knownGroups.size + ' known groups\n' +
+        'Interval: Every 6 hours\n' +
+        'Stop with: !stop ' + id + '\n' +
+        'Edit with: !editbc <new message>'
+    });
+    return true;
+  }
 
-  // --- !joinnow ---
+  if (lower.startsWith('!bconce ')) {
+    const bcMsg = text.replace(/^!bconce\s+/i, '').trim();
+    if (!bcMsg) {
+      await sock.sendMessage(replyJid, { text: 'Usage: !bconce <message>' });
+      return true;
+    }
+    const targets = [...knownGroups];
+    if (!targets.length) {
+      await sock.sendMessage(replyJid, { text: 'No known groups. Use !refreshgroups first.' });
+      return true;
+    }
+    await sock.sendMessage(replyJid, { text: 'Sending one-time broadcast to ' + targets.length + ' groups...' });
+    let sent = 0, failed = 0;
+    for (const g of targets) {
+      try {
+        await simulateTyping(g);
+        await sock.sendMessage(g, { text: bcMsg });
+        sent++;
+        const delay = randInt(HUMAN_CONFIG.minBroadcastDelay * 1000, HUMAN_CONFIG.maxBroadcastDelay * 1000);
+        await sleep(delay);
+      } catch (e) { failed++; }
+    }
+    await sock.sendMessage(replyJid, { text: '*Broadcast complete!*\nSent: ' + sent + '/' + targets.length + '\nFailed: ' + failed });
+    return true;
+  }
+
+  if (lower.startsWith('!bcimage')) {
+    const caption = text.replace(/^!bcimage\s*/i, '').trim();
+    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const imgMsg = quoted?.imageMessage;
+    if (!imgMsg) {
+      await sock.sendMessage(replyJid, { text: 'Reply to an image with !bcimage [caption] to broadcast it.' });
+      return true;
+    }
+    const targets = [...knownGroups];
+    if (!targets.length) {
+      await sock.sendMessage(replyJid, { text: 'No known groups.' });
+      return true;
+    }
+    await sock.sendMessage(replyJid, { text: 'Broadcasting image to ' + targets.length + ' groups...' });
+    let sent = 0;
+    for (const g of targets) {
+      try {
+        await sock.sendMessage(g, { image: { url: imgMsg.url }, caption: caption || '' });
+        sent++;
+        await sleep(randInt(2000, 5000));
+      } catch (e) { }
+    }
+    await sock.sendMessage(replyJid, { text: 'Image broadcast done. Sent: ' + sent + '/' + targets.length });
+    return true;
+  }
+
+  if (lower.startsWith('!stop')) {
+    const id = text.slice(5).trim();
+    if (id && broadcasts.has(id)) {
+      stopBc(id);
+      await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' stopped.' });
+      return true;
+    }
+    const active = [...broadcasts.entries()].filter(([, b]) => b.active);
+    if (!active.length) {
+      await sock.sendMessage(replyJid, { text: 'No active broadcasts.' });
+    } else {
+      let txt = '*Active Broadcasts:*\n\n';
+      active.forEach(([i, b]) => {
+        txt += '#' + i + ': ' + b.message.substring(0, 60) + (b.message.length > 60 ? '...' : '') + '\n';
+        txt += ' Sent: ' + (b.sentCount || 0) + ' | Last: ' + (b.lastSent || 'never') + '\n\n';
+      });
+      txt += 'Stop with: !stop <id>';
+      await sock.sendMessage(replyJid, { text: txt });
+    }
+    return true;
+  }
+
+  if (lower === '!stopall') {
+    stopAllBc();
+    await sock.sendMessage(replyJid, { text: 'All broadcasts stopped.' });
+    return true;
+  }
+
+  if (lower === '!bclist') {
+    if (!broadcasts.size) {
+      await sock.sendMessage(replyJid, { text: 'No broadcasts created yet.' });
+      return true;
+    }
+    let txt = '*All Broadcasts (' + broadcasts.size + ')*\n\n';
+    for (const [id, b] of broadcasts.entries()) {
+      txt += '#' + id + ' [' + (b.active ? 'ACTIVE' : 'STOPPED') + ']\n';
+      txt += 'Msg: ' + b.message.substring(0, 60) + (b.message.length > 60 ? '...' : '') + '\n';
+      txt += 'Sent: ' + (b.sentCount || 0) + ' | Created: ' + (b.createdAt || 'unknown') + '\n\n';
+    }
+    await sock.sendMessage(replyJid, { text: txt });
+    return true;
+  }
+
+  if (lower === '!bcclear') {
+    let removed = 0;
+    for (const [id, b] of [...broadcasts.entries()]) {
+      if (!b.active) { broadcasts.delete(id); removed++; }
+    }
+    saveBroadcasts();
+    await sock.sendMessage(replyJid, { text: 'Cleared ' + removed + ' stopped broadcasts.' });
+    return true;
+  }
+
+  if (lower.startsWith('!bcresume ')) {
+    const id = text.slice(10).trim();
+    if (!broadcasts.has(id)) {
+      await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' not found.' });
+      return true;
+    }
+    startBc(id);
+    await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' resumed.' });
+    return true;
+  }
+
+  if (lower.startsWith('!bcinterval ')) {
+    const parts = text.slice(12).trim().split(' ');
+    const id = parts[0];
+    const hours = parseFloat(parts[1]);
+    if (!id || isNaN(hours) || hours < 0.1) {
+      await sock.sendMessage(replyJid, { text: 'Usage: !bcinterval <id> <hours>\nExample: !bcinterval 1 3' });
+      return true;
+    }
+    const bc = broadcasts.get(id);
+    if (!bc) {
+      await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' not found.' });
+      return true;
+    }
+    bc.customInterval = hours * 3600000;
+    if (bc.active) {
+      if (bc.interval) clearInterval(bc.interval);
+      bc.interval = setInterval(() => sendBcMsg(id), bc.customInterval);
+    }
+    saveBroadcasts();
+    await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' interval set to ' + hours + ' hours.' });
+    return true;
+  }
+
+  if (lower.startsWith('!bcgroups ')) {
+    const parts = text.slice(10).trim().split(' ');
+    const id = parts[0];
+    const groupList = parts.slice(1).join(' ').split(',').map(g => g.trim()).filter(Boolean);
+    const bc = broadcasts.get(id);
+    if (!bc) {
+      await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' not found.' });
+      return true;
+    }
+    bc.groups = groupList;
+    saveBroadcasts();
+    await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' now targets ' + groupList.length + ' specific groups.' });
+    return true;
+  }
+
+  if (lower.startsWith('!bcreset ')) {
+    const id = text.slice(9).trim();
+    const bc = broadcasts.get(id);
+    if (!bc) {
+      await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' not found.' });
+      return true;
+    }
+    bc.groups = [];
+    saveBroadcasts();
+    await sock.sendMessage(replyJid, { text: 'Broadcast #' + id + ' reset to all groups.' });
+    return true;
+  }
+
   if (lower.startsWith('!joinnow ')) {
     const input = text.slice(9).trim();
     const codes = extractInviteCodes(input);
@@ -662,7 +770,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !leavegroup ---
   if (lower.startsWith('!leavegroup ')) {
     const gJid = text.slice(12).trim();
     if (!gJid.endsWith('@g.us')) {
@@ -680,7 +787,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !reconnect ---
   if (lower === '!reconnect') {
     await sock.sendMessage(replyJid, { text: 'Reconnecting...' });
     try { if (sock) sock.end(); } catch {}
@@ -689,7 +795,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !iamadmin ---
   if (lower === '!iamadmin') {
     const part = msg.key?.participant || msg.key?.remoteJid;
     ADMIN_LID_JID = part;
@@ -700,7 +805,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !resolveadmin ---
   if (lower === '!resolveadmin') {
     await sock.sendMessage(replyJid, { text: 'Re-resolving admin LID...' });
     await resolveAdminLid();
@@ -708,7 +812,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !debug ---
   if (lower === '!debug') {
     let txt = '*Debug Info* (v' + VERSION + ')\n\n';
     txt += 'Admin Phone: ' + ADMIN + '\n';
@@ -725,7 +828,6 @@ async function handleAdminCommand(text, replyJid, msg) {
     return true;
   }
 
-  // --- !help ---
   if (lower === '!help' || lower === '!commands' || lower === '!menu') {
     const txt = '*Admin Commands* (v' + VERSION + ')\n\n' +
       '*Status & Info:*\n' +
@@ -768,9 +870,6 @@ async function handleAdminCommand(text, replyJid, msg) {
   return false;
 }
 
-// ================================================================================
-//  WHATSAPP CONNECTION (high‑throughput message processing)
-// ================================================================================
 function startWAKeepAlive() {
   if (waKeepAlive) clearInterval(waKeepAlive);
   waKeepAlive = setInterval(async () => {
@@ -783,14 +882,10 @@ function startWAKeepAlive() {
 }
 
 async function startSock() {
-  console.log('[WA] Starting v' + VERSION + '...');
-  connectionStatus = 'connecting';
-
   if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
   const { version } = await fetchLatestBaileysVersion();
-  console.log('[WA] Baileys v' + version.join('.'));
 
   sock = makeWASocket({
     version,
@@ -804,7 +899,6 @@ async function startSock() {
     msgRetryCounterCache,
     generateHighQualityLinkPreview: false,
     getMessage: async (key) => {
-      // We'll find message from our cache
       for (const m of getCachedMessages()) {
         if (m.key.id === key.id) return m.message;
       }
@@ -818,18 +912,16 @@ async function startSock() {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
       qrCodeData = qr;
-      console.log('[WA] QR generated');
     }
     if (connection === 'open') {
       connectionStatus = 'connected';
       reconnectAttempts = 0;
       lastConnectedAt = Date.now();
-      console.log('[WA] Connected!');
       if (!onlineMsgSent) {
         onlineMsgSent = true;
         try {
           await sock.sendMessage(ADMIN + '@s.whatsapp.net', { text: '🤖 Bot is online and ready.\nCommands: !help' });
-        } catch (e) { console.error('[WA] Online notification failed:', e.message); }
+        } catch (e) { }
       }
       startWAKeepAlive();
       loadJoinedGroups();
@@ -838,7 +930,6 @@ async function startSock() {
       await resolveAdminLid();
       await refreshKnownGroups();
       resumeBroadcasts();
-      // Initial scan after 10s
       setTimeout(() => { scanAllMessagesForLinks(); }, 10000);
     }
     if (connection === 'close') {
@@ -849,21 +940,16 @@ async function startSock() {
       if (shouldReconnect && reconnectAttempts < 10) {
         reconnectAttempts++;
         const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 60000);
-        console.log('[WA] Reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempts + ')');
         setTimeout(() => startSock(), delay);
       } else if (!shouldReconnect) {
-        console.log('[WA] Logged out. Exiting.');
         process.exit(0);
       } else {
-        console.log('[WA] Max reconnect attempts reached. Exiting.');
         process.exit(1);
       }
     }
   });
 
-  // ─── HIGH‑THROUGHPUT MESSAGE HANDLER ──────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages }) => {
-    // Process messages in batches using setImmediate to avoid blocking
     const processBatch = async (batch) => {
       for (const msg of batch) {
         if (msg.key.fromMe) continue;
@@ -878,34 +964,27 @@ async function startSock() {
           message?.videoMessage?.caption ||
           '';
 
-        // Cache the message (bounded)
         addMessageToCache(msg);
 
-        // Admin check
         const admin = isAdmin(sender, msg);
 
-        // Admin commands
         if (admin && text.startsWith('!')) {
           const replyJid = getReplyJid(msg);
           await handleAdminCommand(text, replyJid, msg);
           continue;
         }
 
-        // Casual messages (only in groups, non‑admin)
         if (text && isGroupChat && !admin) {
-          // Random read receipt
           if (Math.random() < HUMAN_CONFIG.readReceiptChance) {
             try { await sock.readMessages([msg.key]); } catch {}
           }
           const handled = await handleCasualMessage(text, sender, msg);
           if (handled) continue;
 
-          // Extract invite links
           const codes = extractInviteCodes(text);
           if (codes.length > 0) {
             for (const code of codes) {
               if (!joinedGroupCodes.has(code)) {
-                // Queue the join
                 await stealthJoin(code);
               }
             }
@@ -914,7 +993,6 @@ async function startSock() {
       }
     };
 
-    // Split messages into batches and process with setImmediate
     let index = 0;
     const batchSize = 50;
     while (index < messages.length) {
@@ -935,22 +1013,17 @@ async function startSock() {
       if (jid && !knownGroups.has(jid)) {
         knownGroups.add(jid);
         saveJoinedGroups();
-        console.log('[Group] Added: ' + jid);
       }
-    } catch (e) { console.error('[Group] Update error:', e.message); }
+    } catch (e) { }
   });
 
   sock.ev.on('warning', async (warn) => {
-    console.log('⚠️ WhatsApp Warning:', warn);
     try {
       await sock.sendMessage(ADMIN + '@s.whatsapp.net', { text: '⚠️ Warning: ' + warn });
-    } catch (e) { /* ignore */ }
+    } catch (e) { }
   });
 }
 
-// ================================================================================
-//  EXPRESS SERVER
-// ================================================================================
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -986,7 +1059,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('[HTTP] QR: http://localhost:' + PORT + '/qr');
 });
 
-// Load persisted data
 loadJoinedGroups();
 loadBroadcasts();
 loadAdminLid();
@@ -994,16 +1066,12 @@ loadAdminLid();
 startSock();
 
 process.on('SIGTERM', () => {
-  console.log('[Shutdown] SIGTERM');
   if (waKeepAlive) clearInterval(waKeepAlive);
   stopAllBc();
   server.close(() => process.exit(0));
 });
 process.on('SIGINT', () => {
-  console.log('[Shutdown] SIGINT');
   if (waKeepAlive) clearInterval(waKeepAlive);
   stopAllBc();
   server.close(() => process.exit(0));
 });
-
-console.log('🤖 WhatsApp Bot v' + VERSION + ' started');

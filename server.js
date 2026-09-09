@@ -18,24 +18,20 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 // =============================================================================
-//  CONFIGURATION (CHANGE THESE!)
+//  CONFIGURATION
 // =============================================================================
-const VERSION = '22.0';
-const ADMIN = '115110005706891@lid';          // Your admin LID
-const EXCLUDED_PHONE = '64226434709';        // The phone that never gets naughty replies
+const VERSION = '22.1';
+const ADMIN = '115110005706891@lid';
+const EXCLUDED_PHONE = '64226434709';
 const AUTH_FOLDER = 'auth_info';
 const PORT = process.env.PORT || 10000;
 
-// AI API keys (using your actual values)
-const GEMINI_API_KEY = 'AQ.Ab8RN6L4xBKiQ5j1RUIZSp6OEOlF-6zAVSiTQqqRGIa4iIOrQA';
+// IMPORTANT: Replace these with fresh keys from your dashboards!
+const GEMINI_API_KEY = 'YOUR_NEW_GEMINI_API_KEY';
 const GEMINI_MODEL = 'gemini-3.8-flash';
-
-// LLM7 (using your actual key)
-const LLM7_API_KEY = 'MrZ30o/mVA68zW1ATWSZx5peFFRON0Lk+ug9jyL6Zaw6+bq2YBxdzggcNcNIENuKGABhcs1T+8bRVJJ1cPkUR7/RoELgY09mv17xp7QEq4v2MuJC3SzEaC1Aa2otyi/4agFDPcv83s/jh2Md';
+const LLM7_API_KEY = 'YOUR_NEW_LLM7_API_KEY';
 const LLM7_MODEL = 'gemini-3-flash';
-
-// Which API to use for AI naughty replies: 'gemini' or 'llm7' or 'static'
-const NAUGHTY_AI_PROVIDER = 'gemini';
+const NAUGHTY_AI_PROVIDER = 'gemini'; // 'gemini', 'llm7', or 'static'
 
 // Static naughty messages (fallback)
 const NAUGHTY_MESSAGES = [
@@ -52,7 +48,7 @@ const NAUGHTY_MESSAGES = [
 ];
 
 // =============================================================================
-//  IMAGE SCRAPER CONFIG (NaijaUncut / DarkNaija)
+//  IMAGE SCRAPER CONFIG
 // =============================================================================
 const IMAGE_SITES = {
   naijauncut: {
@@ -81,6 +77,8 @@ let sock = null;
 let qrDataUri = null;
 let connectionStatus = 'disconnected';
 let reconnectAttempts = 0;
+let maxReconnectAttempts = 5;
+let isInitialConnection = true; // Prevents reconnect loop before QR scan
 let lastConnectedAt = 0;
 let onlineMsgSent = false;
 let botStartTime = Date.now();
@@ -212,7 +210,7 @@ async function resolvePhoneNumber(jid) {
 
 // ---------- AI naughty reply ----------
 async function getAINaughtyReply(userMessage) {
-  if (NAUGHTY_AI_PROVIDER === 'gemini' && GEMINI_API_KEY) {
+  if (NAUGHTY_AI_PROVIDER === 'gemini' && GEMINI_API_KEY && GEMINI_API_KEY !== 'YOUR_NEW_GEMINI_API_KEY') {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
       const response = await fetch(url, {
@@ -229,7 +227,7 @@ async function getAINaughtyReply(userMessage) {
       return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
     } catch (e) { console.error('Gemini error:', e.message); }
   }
-  if (NAUGHTY_AI_PROVIDER === 'llm7' && LLM7_API_KEY) {
+  if (NAUGHTY_AI_PROVIDER === 'llm7' && LLM7_API_KEY && LLM7_API_KEY !== 'YOUR_NEW_LLM7_API_KEY') {
     try {
       const response = await fetch('https://api.llm7.io/v1/chat/completions', {
         method: 'POST',
@@ -337,7 +335,7 @@ async function downloadAndSendImages(site, searchQuery, chatJid, maxImages = 10)
 
       await sock.sendMessage(chatJid, {
         image: { url: filePath },
-        caption: "I'm horny 😈"
+        caption: "😈 Here's what you asked for"
       });
       sent++;
       await sleep(2000);
@@ -515,6 +513,23 @@ async function handleCasualMessage(text, replyJid, isGroupChat, senderJid) {
   if (!text) return false;
   const lower = text.toLowerCase().trim();
 
+  // --- AI Image Request Detection ---
+  // If the user asks for images in a casual way, the AI will detect it
+  // and trigger the image download
+  const imageKeywords = ['boobs', 'horny', 'sexy', 'nude', 'nsfw', 'hot', 'picture', 'photo', 'image', 'send me', 'show me', 'i want', 'need'];
+  if (!isGroupChat && imageKeywords.some(k => lower.includes(k))) {
+    const senderPhone = await resolvePhoneNumber(senderJid);
+    const isExcluded = (senderPhone === EXCLUDED_PHONE);
+    if (!isExcluded) {
+      // Check if it's a specific query (e.g., "send me boobs", "show me sexy girls")
+      let query = text.trim();
+      // Use the query as search term
+      await downloadAndSendImages('naijauncut', query, replyJid, 3);
+      return true;
+    }
+  }
+
+  // --- Naughty reply for private chats ---
   if (!isGroupChat) {
     const senderPhone = await resolvePhoneNumber(senderJid);
     const isExcluded = (senderPhone === EXCLUDED_PHONE);
@@ -530,6 +545,7 @@ async function handleCasualMessage(text, replyJid, isGroupChat, senderJid) {
     }
   }
 
+  // --- Normal greetings ---
   const greetings = ['hi', 'hello', 'hey', 'howdy', 'good morning', 'good afternoon', 'good evening', 'sup', 'yo'];
   if (greetings.some(g => lower.includes(g) || lower === g)) {
     const reply = getRandomResponse(["Hey there! 👋", "Hello! How's it going?", "Hi! 😊", "Hey, what's up?"]);
@@ -633,10 +649,23 @@ async function refreshKnownGroups() {
 }
 
 // =============================================================================
-//  ADMIN COMMANDS
+//  ADMIN COMMANDS (Full List)
 // =============================================================================
 async function handleAdminCommand(text, replyJid, msg) {
   const lower = text.toLowerCase().trim();
+
+  // ----- TEST COMMAND -----
+  if (lower === '!test') {
+    await sock.sendMessage(replyJid, {
+      text: '✅ Bot is working!\n\n' +
+        'Connection: ' + connectionStatus + '\n' +
+        'Groups: ' + knownGroups.size + '\n' +
+        'Cached Messages: ' + messageStore.length + '\n' +
+        'RAM: ' + getRamMB() + 'MB\n' +
+        'Version: ' + VERSION
+    });
+    return true;
+  }
 
   // ----- Image download commands -----
   if (lower.startsWith('!horny')) {
@@ -1025,6 +1054,7 @@ async function handleAdminCommand(text, replyJid, msg) {
     await sock.sendMessage(replyJid, { text: 'Reconnecting...' });
     try { if (sock) sock.end(); } catch {}
     reconnectAttempts = 0;
+    isInitialConnection = true;
     setTimeout(() => startSock(), 1000);
     return true;
   }
@@ -1071,6 +1101,9 @@ async function handleAdminCommand(text, replyJid, msg) {
       '!refreshgroups — Refresh group list\n' +
       '!debug — Detailed debug info\n\n' +
 
+      '*Testing:*\n' +
+      '!test — Verify bot is working\n\n' +
+
       '*Group Joining & Fetching:*\n' +
       '!scanlinks — Scan ALL cached messages for invite links & join (slow)\n' +
       '!searchlinks — Show all invite links found in cached messages (instant)\n' +
@@ -1093,16 +1126,16 @@ async function handleAdminCommand(text, replyJid, msg) {
       '!editbc <new msg> — Edit active broadcast\n' +
       '!broadcastmsg <msg> — Set broadcast message without starting\n\n' +
 
-      '*Admin Setup:*\n' +
-      '!iamadmin — Register your LID\n' +
-      '!resolveadmin — Re-resolve admin LID\n' +
-      '!reconnect — Force reconnect\n\n' +
-
       '*Image Downloads:*\n' +
       '!horny <query> — Download images from NaijaUncut\n' +
       '!dark <query> — Download images from DarkNaija\n' +
       '!album <site> <query> — Download from specific site\n' +
-      '!sendmore — Instructions for more images';
+      '!sendmore — Instructions for more images\n\n' +
+
+      '*Admin Setup:*\n' +
+      '!iamadmin — Register your LID\n' +
+      '!resolveadmin — Re-resolve admin LID\n' +
+      '!reconnect — Force reconnect';
     await sock.sendMessage(replyJid, { text: txt });
     return true;
   }
@@ -1111,7 +1144,7 @@ async function handleAdminCommand(text, replyJid, msg) {
 }
 
 // =============================================================================
-//  WHATSAPP CONNECTION
+//  WHATSAPP CONNECTION (FIXED)
 // =============================================================================
 function startWAKeepAlive() {
   if (waKeepAlive) clearInterval(waKeepAlive);
@@ -1161,21 +1194,27 @@ async function startSock() {
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
+
     if (qr) {
       try {
         qrDataUri = await QRCode.toDataURL(qr);
         addLog('QR code generated', 'info');
         broadcastSSE('qr', { qr: qrDataUri });
         console.log('[WA] QR generated');
+        // Reset reconnect attempts when QR is generated
+        reconnectAttempts = 0;
       } catch (e) { addLog('QR generation failed: ' + e.message, 'error'); }
     }
+
     if (connection === 'open') {
       connectionStatus = 'connected';
       reconnectAttempts = 0;
+      isInitialConnection = false;
       lastConnectedAt = Date.now();
       addLog('Connected to WhatsApp', 'success');
       broadcastSSE('status', { status: 'connected' });
       console.log('[WA] ✅ Connected!');
+
       if (!onlineMsgSent) {
         onlineMsgSent = true;
         try {
@@ -1192,24 +1231,38 @@ async function startSock() {
       resumeBroadcasts();
       setTimeout(() => { scanAllMessagesForLinks(); }, 10000);
     }
+
     if (connection === 'close') {
       connectionStatus = 'disconnected';
       addLog('Disconnected from WhatsApp', 'error');
       broadcastSSE('status', { status: 'disconnected' });
+
       const shouldReconnect = (lastDisconnect?.error instanceof Boom)
         ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
         : true;
-      if (shouldReconnect && reconnectAttempts < 10) {
+
+      // Only reconnect if:
+      // 1. We were previously connected (not initial connection)
+      // 2. OR we have a QR code (meaning we're waiting for scan)
+      // 3. AND we haven't exceeded max attempts
+      const canReconnect = (!isInitialConnection || qrDataUri) && shouldReconnect && reconnectAttempts < maxReconnectAttempts;
+
+      if (canReconnect) {
         reconnectAttempts++;
         const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 60000);
-        addLog(`Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})`, 'info');
+        addLog(`Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts}/${maxReconnectAttempts})`, 'info');
         setTimeout(() => startSock(), delay);
       } else if (!shouldReconnect) {
         addLog('Logged out. Exiting.', 'error');
         process.exit(0);
+      } else if (reconnectAttempts >= maxReconnectAttempts) {
+        addLog('Max reconnect attempts reached. Manual restart required.', 'error');
+        // Keep the server alive but don't retry
+        connectionStatus = 'disconnected';
       } else {
-        addLog('Max reconnect attempts reached.', 'error');
-        process.exit(1);
+        // Initial connection without QR – wait for QR
+        addLog('Waiting for QR code...', 'info');
+        // QR will be generated in the next update
       }
     }
   });
@@ -1242,19 +1295,15 @@ async function startSock() {
 
         const admin = isAdmin(sender, msg);
 
+        // Admin commands
         if (admin && text.startsWith('!')) {
           const replyJid = getReplyJid(msg);
           await handleAdminCommand(text, replyJid, msg);
           continue;
         }
 
-        if (text && !isGroupChat) {
-          const lower = text.toLowerCase();
-          if (lower.includes('boobs') || lower.includes('horny') || lower.includes('sexy')) {
-            const query = text.trim();
-            await downloadAndSendImages('naijauncut', query, sender, 3);
-            continue;
-          }
+        // Casual messages (includes image request detection)
+        if (text && !isGroupChat && !admin) {
           const handled = await handleCasualMessage(text, sender, false, sender);
           if (handled) continue;
         }
@@ -1382,12 +1431,16 @@ app.post('/refresh', (req, res) => {
     return res.json({ success: false, message: 'Already connected' });
   }
   if (sock) sock.end();
+  reconnectAttempts = 0;
+  isInitialConnection = true;
   setTimeout(() => startSock(), 500);
   res.json({ success: true, message: 'Refreshing QR...' });
 });
 
 app.post('/reset', (req, res) => {
   if (sock) sock.end();
+  reconnectAttempts = 0;
+  isInitialConnection = true;
   setTimeout(() => startSock(), 1000);
   res.json({ success: true, message: 'Resetting connection...' });
 });
@@ -1401,7 +1454,7 @@ app.get('/qr', (req, res) => {
 });
 
 // =============================================================================
-//  MAIN PAGE – WhatsApp Web Style UI (Restored)
+//  MAIN PAGE – WhatsApp Web Style UI
 // =============================================================================
 app.get('/', (req, res) => {
   const qr = qrDataUri || '';

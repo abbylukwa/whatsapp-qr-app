@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-bot-full",
-  "version": "22.0.0",
+  "version": "22.1.0",
   "description": "Full WhatsApp bot with image scraping and AI naughty replies",
   "main": "server.js",
   "scripts": {

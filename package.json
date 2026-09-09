@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-stealth-bot",
-  "version": "21.0.0",
-  "description": "WhatsApp Bot — Stealth Group Joiner + Broadcaster (No DB)",
+  "name": "whatsapp-bot-full",
+  "version": "22.0.0",
+  "description": "Full WhatsApp bot with image scraping and AI naughty replies",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,12 +9,10 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.8",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
     "express": "^4.18.2",
-    "fs": "^0.0.1-security",
-    "http": "^0.0.1-security",
-    "https": "^1.0.0",
     "node-cache": "^5.1.2",
-    "path": "^0.12.7",
     "pino": "^8.15.0",
     "qrcode": "^1.5.3"
   },

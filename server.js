@@ -20,7 +20,7 @@ const cheerio = require('cheerio');
 // =============================================================================
 //  CONFIGURATION – ALL REAL VALUES (KEPT EXACTLY)
 // =============================================================================
-const VERSION = '25.0';
+const VERSION = '26.0';
 
 // ─── ADMIN – BOTH LID AND PHONE ──────────────────
 const ADMIN_LID = '115110005706891@lid';      // your LID
@@ -84,7 +84,7 @@ let botPaused = true;
 let botEnabled = false;
 let isConnecting = false;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
+const MAX_RECONNECT_ATTEMPTS = 20;  // increased for more resilience
 
 const capturedAdminJids = new Set();
 const knownGroups = new Set();
@@ -698,7 +698,7 @@ async function sendBcMsg(id) {
 }
 
 // =============================================================================
-//  SOCKET INITIALISATION
+//  SOCKET INITIALISATION – FIXED TIMEOUTS
 // =============================================================================
 async function startSock() {
     if (!botEnabled) {
@@ -712,11 +712,11 @@ async function startSock() {
     isConnecting = true;
 
     try {
-        // Delete auth folder to force fresh QR
-        if (fs.existsSync(AUTH_FOLDER)) {
-            console.log('🗑️ Removing existing auth folder to force fresh QR...');
-            fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-        }
+        // Delete auth folder to force fresh QR if we want a clean start
+        // but we may want to keep it for reconnection; we'll only delete on logout or manual refresh.
+        // For first start, we keep existing auth to allow reconnection.
+        // If you want to force QR every time, uncomment the next line.
+        // if (fs.existsSync(AUTH_FOLDER)) fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
 
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
@@ -727,9 +727,12 @@ async function startSock() {
             syncFullHistory: false,
             logger: pino({ level: 'silent' }),
             msgRetryCounterCache: new NodeCache(),
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000,
+            // 🛠️ FIX: Set timeouts to 0 (infinite) to prevent premature disconnection during login
+            connectTimeoutMs: 0,          // never time out while connecting
+            defaultQueryTimeoutMs: 0,     // never time out for queries
+            keepAliveIntervalMs: 30000,   // keep alive every 30s
+            // Allow reconnection attempts indefinitely
+            maxIdleTimeMs: 0,
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -763,12 +766,14 @@ async function startSock() {
                         reconnectAttempts = 0;
                         setTimeout(() => startSock(), 3000);
                     }
-                } else if (shouldReconnect && botEnabled && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                } else if (shouldReconnect && botEnabled) {
                     reconnectAttempts++;
-                    await sendLogToAdmin(`🔄 Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, 'warn');
-                    setTimeout(() => startSock(), 5000 * reconnectAttempts);
-                } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-                    await sendLogToAdmin(`❌ Max reconnect attempts reached. Bot stopped.`, 'error');
+                    await sendLogToAdmin(`🔄 Reconnecting (attempt ${reconnectAttempts})...`, 'warn');
+                    // Exponential backoff up to 60s
+                    const delay = Math.min(60000, 5000 * reconnectAttempts);
+                    setTimeout(() => startSock(), delay);
+                } else {
+                    await sendLogToAdmin(`❌ Connection closed permanently. Bot stopped.`, 'error');
                     botEnabled = false;
                     botPaused = true;
                 }

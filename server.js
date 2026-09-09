@@ -10,6 +10,7 @@ const {
     makeWASocket,
     DisconnectReason,
     useMultiFileAuthState,
+    Browsers,
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -19,7 +20,7 @@ const cheerio = require('cheerio');
 // =============================================================================
 //  CONFIGURATION – ALL REAL VALUES (KEPT EXACTLY)
 // =============================================================================
-const VERSION = '23.0';
+const VERSION = '24.0';
 
 // ─── ADMIN – BOTH LID AND PHONE ──────────────────
 const ADMIN_LID = '115110005706891@lid';      // your LID
@@ -34,7 +35,7 @@ const GEMINI_API_KEY = 'AQ.Ab8RN6L4xBKiQ5j1RUIZSp6OEOlF-6zAVSiTQqqRGIa4iIOrQA';
 const GEMINI_MODEL = 'gemini-3.8-flash';
 const LLM7_API_KEY = 'MrZ30o/mVA68zW1ATWSZx5peFFRON0Lk+ug9jyL6Zaw6+bq2YBxdzggcNcNIENuKGABhcs1T+8bRVJJ1cPkUR7/RoELgY09mv17xp7QEq4v2MuJC3SzEaC1Aa2otyi/4agFDPcv83s/jh2Md';
 const LLM7_MODEL = 'gemini-3-flash';
-const NAUGHTY_AI_PROVIDER = 'gemini'; // 'gemini' or 'llm7'
+const NAUGHTY_AI_PROVIDER = 'gemini';
 
 // Static naughty messages (fallback)
 const NAUGHTY_MESSAGES = [
@@ -79,17 +80,19 @@ let sock = null;
 let qrDataUri = null;
 let connectionStatus = 'disconnected';
 let botStartTime = Date.now();
-let botPaused = true;          // paused until !start
-let botEnabled = false;        // only true after !start
+let botPaused = true;
+let botEnabled = false;
+let isConnecting = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 const capturedAdminJids = new Set();
 const knownGroups = new Set();
-const groupActivity = new Map();
 const joinedGroupCodes = new Set();
 
 // ─── User preferences & memory ──────────────────
 const USER_PREFS_FILE = path.join(__dirname, 'user_prefs.json');
-let userPrefs = {}; // phone -> { gender, likes, history: [], lastMsg, lastImageSent }
+let userPrefs = {};
 
 function loadUserPrefs() {
     try {
@@ -136,16 +139,25 @@ function saveBroadcasts() {
 }
 loadBroadcasts();
 
-// ─── Logs (only for admin) ──────────────────────
+// ─── Logs ──────────────────────────────────────
 const logs = [];
 function addLog(msg, type = 'info') {
     const entry = { time: new Date().toISOString(), msg, type };
     logs.push(entry);
-    if (logs.length > 200) logs.shift();
+    if (logs.length > 500) logs.shift();
     console.log(`[${type.toUpperCase()}] ${msg}`);
-    // Send to admin if connected and enabled
+}
+
+// ─── Send log to admin ─────────────────────────
+async function sendLogToAdmin(msg, type = 'info') {
+    addLog(msg, type);
     if (sock && connectionStatus === 'connected' && botEnabled) {
-        // We'll send important logs via the message handler; we'll handle separately.
+        try {
+            const adminJid = ADMIN_LID;
+            await sock.sendMessage(adminJid, { text: `[${type.toUpperCase()}] ${msg}` });
+        } catch (e) {
+            console.error('Failed to send log to admin:', e.message);
+        }
     }
 }
 
@@ -190,6 +202,7 @@ async function resolvePhoneNumber(jid) {
     if (jid.endsWith('@s.whatsapp.net')) return jid.split('@')[0];
     if (jid.endsWith('@lid')) {
         try {
+            if (!sock) return null;
             const result = await sock.onWhatsApp(jid);
             if (Array.isArray(result) && result.length > 0 && result[0].exists) {
                 const phoneJid = result[0].jid;
@@ -220,38 +233,66 @@ function getReplyJid(msg) {
 }
 
 // =============================================================================
-//  MESSAGE QUEUE (Rate limiting)
+//  MESSAGE QUEUE (Rate limiting – handles 5k+ messages/hour)
 // =============================================================================
 const messageQueue = [];
 let isProcessingQueue = false;
-const MAX_MESSAGES_PER_SECOND = 5;
-const QUEUE_MAX_SIZE = 10000;
+const MAX_MESSAGES_PER_SECOND = 3;  // Conservative to avoid bans
+const QUEUE_MAX_SIZE = 20000;
+let totalMessagesSent = 0;
+let lastHourReset = Date.now();
+let messagesThisHour = 0;
+const MAX_MESSAGES_PER_HOUR = 5000;
 
 async function processMessageQueue() {
     if (isProcessingQueue) return;
     isProcessingQueue = true;
     while (messageQueue.length > 0) {
+        // Rate limit: max 5000 messages per hour
+        const now = Date.now();
+        if (now - lastHourReset > 3600000) {
+            lastHourReset = now;
+            messagesThisHour = 0;
+        }
+        if (messagesThisHour >= MAX_MESSAGES_PER_HOUR) {
+            const waitTime = 3600000 - (now - lastHourReset) + 5000;
+            await sendLogToAdmin(`⏳ Rate limit reached (${MAX_MESSAGES_PER_HOUR}/hr). Pausing for ${Math.round(waitTime/60000)} min.`, 'warn');
+            await sleep(waitTime);
+            continue;
+        }
         if (messageQueue.length > QUEUE_MAX_SIZE) {
-            console.warn(`⚠️ Queue overflow (${messageQueue.length}). Pausing 10s...`);
+            await sendLogToAdmin(`⚠️ Queue overflow (${messageQueue.length}). Pausing 10s...`, 'warn');
             await sleep(10000);
         }
         const batch = messageQueue.splice(0, MAX_MESSAGES_PER_SECOND);
-        const promises = batch.map(({ jid, content }) =>
-            sock.sendMessage(jid, content).catch(e => console.error('Send error:', e.message))
-        );
+        const promises = batch.map(async ({ jid, content }) => {
+            try {
+                if (!sock || connectionStatus !== 'connected') {
+                    throw new Error('Socket not connected');
+                }
+                await sock.sendMessage(jid, content);
+                messagesThisHour++;
+                totalMessagesSent++;
+            } catch (e) {
+                await sendLogToAdmin(`❌ Send error to ${jid}: ${e.message}`, 'error');
+            }
+        });
         await Promise.all(promises);
         await sleep(1000);
     }
     isProcessingQueue = false;
 }
 async function sendMessageWithQueue(jid, content) {
-    if (!sock || connectionStatus !== 'connected') return;
+    if (!sock || connectionStatus !== 'connected') {
+        await sendLogToAdmin(`⚠️ Cannot send: socket not ready (status: ${connectionStatus})`, 'warn');
+        return;
+    }
     messageQueue.push({ jid, content });
     if (!isProcessingQueue) processMessageQueue().catch(() => {});
 }
 
 // =============================================================================
-//  IMAGE SCRAPING & SENDING (with admin log support)
+//  IMAGE SCRAPING & SENDING
 // =============================================================================
 async function scrapeImages(site, searchQuery, maxImages = 10) {
     const siteConfig = IMAGE_SITES[site];
@@ -286,9 +327,11 @@ async function downloadAndSendImages(site, searchQuery, chatJid, maxImages, admi
     try {
         const urls = await scrapeImages(site, searchQuery, maxImages || 5);
         if (urls.length === 0) {
+            const msg = `❌ No images for "${searchQuery}" on ${site}`;
             if (testing && adminJid) {
-                await sock.sendMessage(adminJid, { text: `❌ No images for "${searchQuery}" on ${site}` });
+                await sock.sendMessage(adminJid, { text: msg });
             }
+            await sendLogToAdmin(msg, 'warn');
             return;
         }
         let sent = 0;
@@ -316,9 +359,10 @@ async function downloadAndSendImages(site, searchQuery, chatJid, maxImages, admi
         if (testing && adminJid) {
             await sock.sendMessage(adminJid, { text: `✅ Sent ${sent} images from ${site} for query "${searchQuery}".` });
         }
+        await sendLogToAdmin(`📸 Sent ${sent} images to ${chatJid} for "${searchQuery}"`, 'info');
     } catch (error) {
         const errMsg = `❌ Image error: ${error.message}`;
-        addLog(errMsg, 'error');
+        await sendLogToAdmin(errMsg, 'error');
         if (testing && adminJid) {
             await sock.sendMessage(adminJid, { text: errMsg });
         }
@@ -326,7 +370,7 @@ async function downloadAndSendImages(site, searchQuery, chatJid, maxImages, admi
 }
 
 // =============================================================================
-//  AI NAUGHTY REPLY (with memory & preference extraction)
+//  AI NAUGHTY REPLY
 // =============================================================================
 async function getAINaughtyReply(userMessage, userPhone, history = []) {
     const systemPrompt = `You are a seductive, playful, and extremely naughty AI companion. Your job is to turn the user on and gradually discover their preferences (gender, what they like, etc.). 
@@ -344,8 +388,7 @@ If the user explicitly states their gender or what they like (e.g., "I'm gay", "
     let conversation = history.map(m => `${m.from === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
     conversation += `\nUser: ${userMessage}`;
 
-    // Try Gemini
-    if (NAUGHTY_AI_PROVIDER === 'gemini' && GEMINI_API_KEY && GEMINI_API_KEY !== 'YOUR_NEW_GEMINI_API_KEY') {
+    if (NAUGHTY_AI_PROVIDER === 'gemini' && GEMINI_API_KEY) {
         try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
             const response = await fetch(url, {
@@ -357,11 +400,10 @@ If the user explicitly states their gender or what they like (e.g., "I'm gay", "
             const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
             if (reply) return reply;
         } catch (e) {
-            addLog(`Gemini error: ${e.message}`, 'error');
+            await sendLogToAdmin(`Gemini error: ${e.message}`, 'error');
         }
     }
-    // Try LLM7
-    if (NAUGHTY_AI_PROVIDER === 'llm7' && LLM7_API_KEY && LLM7_API_KEY !== 'YOUR_NEW_LLM7_API_KEY') {
+    if (NAUGHTY_AI_PROVIDER === 'llm7' && LLM7_API_KEY) {
         try {
             const response = await fetch('https://api.llm7.io/v1/chat/completions', {
                 method: 'POST',
@@ -378,14 +420,86 @@ If the user explicitly states their gender or what they like (e.g., "I'm gay", "
             const reply = data?.choices?.[0]?.message?.content || null;
             if (reply) return reply;
         } catch (e) {
-            addLog(`LLM7 error: ${e.message}`, 'error');
+            await sendLogToAdmin(`LLM7 error: ${e.message}`, 'error');
         }
     }
-    return null; // AI failed
+    return null;
 }
 
 // =============================================================================
-//  ADMIN COMMANDS – Full control, testing, broadcasting
+//  AUTO-JOIN GROUPS
+// =============================================================================
+async function stealthJoin(code) {
+    if (!sock || connectionStatus !== 'connected') {
+        await sendLogToAdmin(`⚠️ Cannot join group: socket not ready`, 'warn');
+        return null;
+    }
+    if (joinedGroupCodes.has(code)) return null;
+    try {
+        await humanDelay(3, 10);
+        const gJid = await sock.groupAcceptInvite(code);
+        joinedGroupCodes.add(code);
+        knownGroups.add(gJid);
+        await sendLogToAdmin(`✅ Joined group: ${gJid} (code: ${code})`, 'info');
+        return gJid;
+    } catch (e) {
+        if (e.message && (e.message.includes('already') || e.message.includes('400') || e.message.includes('403'))) {
+            joinedGroupCodes.add(code);
+        } else {
+            await sendLogToAdmin(`❌ Failed to join ${code}: ${e.message}`, 'error');
+        }
+        return null;
+    }
+}
+
+async function scanAllMessagesForLinks() {
+    if (!sock || connectionStatus !== 'connected') return 0;
+    // Scan cached messages for invite links
+    const cachedMessages = getCachedMessages();
+    let found = 0;
+    for (const m of cachedMessages) {
+        const text = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
+        const codes = extractInviteCodes(text);
+        for (const code of codes) {
+            const result = await stealthJoin(code);
+            if (result) found++;
+            await sleep(randInt(1000, 3000));
+        }
+    }
+    return found;
+}
+
+// ─── Message cache for link scanning ──────────────
+const messageStore = [];
+function addMessageToCache(msg) {
+    messageStore.push(msg);
+    if (messageStore.length > 10000) messageStore.shift();
+}
+function getCachedMessages() {
+    return messageStore;
+}
+
+async function refreshKnownGroups() {
+    if (!sock || connectionStatus !== 'connected') return;
+    try {
+        const chats = await sock.groupFetchAllParticipating();
+        let added = 0;
+        for (const [jid] of Object.entries(chats)) {
+            if (!knownGroups.has(jid)) {
+                knownGroups.add(jid);
+                added++;
+            }
+        }
+        if (added > 0) {
+            await sendLogToAdmin(`🔄 Refreshed groups: found ${knownGroups.size} total (${added} new)`, 'info');
+        }
+    } catch (e) {
+        await sendLogToAdmin(`❌ Failed to refresh groups: ${e.message}`, 'error');
+    }
+}
+
+// =============================================================================
+//  ADMIN COMMANDS
 // =============================================================================
 async function handleAdminCommand(text, replyJid, msg) {
     const lower = text.toLowerCase().trim();
@@ -398,7 +512,8 @@ async function handleAdminCommand(text, replyJid, msg) {
         }
         botPaused = false;
         botEnabled = true;
-        await sendMessageWithQueue(replyJid, { text: '✅ Bot ACTIVATED. Connecting...' });
+        await sendLogToAdmin('🚀 Bot ACTIVATED by admin', 'info');
+        await sendMessageWithQueue(replyJid, { text: '✅ Bot ACTIVATED. Connecting to WhatsApp...' });
         startSock().catch(e => console.error(e));
         return true;
     }
@@ -415,11 +530,12 @@ async function handleAdminCommand(text, replyJid, msg) {
         }
         connectionStatus = 'disconnected';
         qrDataUri = null;
-        await sendMessageWithQueue(replyJid, { text: '🛑 Bot stopped.' });
+        await sendLogToAdmin('🛑 Bot STOPPED by admin', 'info');
+        await sendMessageWithQueue(replyJid, { text: '🛑 Bot stopped. Use !start to re-enable.' });
         return true;
     }
 
-    // --- Test image download commands (admin only) ---
+    // --- Test image download commands ---
     const testMatches = text.match(/^send me\s+(.+)/i);
     if (testMatches) {
         const query = testMatches[1].trim();
@@ -427,14 +543,12 @@ async function handleAdminCommand(text, replyJid, msg) {
             await sendMessageWithQueue(replyJid, { text: '❌ Query too short.' });
             return true;
         }
-        // Log to admin
         await sendMessageWithQueue(replyJid, { text: `🔍 Testing image download for: "${query}"` });
-        // Download from naijauncut (fallback to darknaija if fails)
         await downloadAndSendImages('naijauncut', query, replyJid, 5, ADMIN_LID, true);
         return true;
     }
 
-    // --- Broadcast commands (same as before) ---
+    // --- Broadcast commands ---
     if (lower.startsWith('!broadcast ')) {
         const bcMsg = text.replace(/^!broadcast\s+/i, '').trim();
         if (!bcMsg) {
@@ -451,12 +565,12 @@ async function handleAdminCommand(text, replyJid, msg) {
             createdAt: new Date().toISOString(),
             customInterval: 6 * 3600000
         });
-        // Start broadcast
         const bc = broadcasts.get(id);
         bc.active = true;
         bc.interval = setInterval(() => sendBcMsg(id), bc.customInterval);
-        await sendBcMsg(id); // send once immediately
+        await sendBcMsg(id);
         await sendMessageWithQueue(replyJid, { text: `✅ Broadcast #${id} started.` });
+        await sendLogToAdmin(`📢 Broadcast #${id} started: "${bcMsg.substring(0,50)}..."`, 'info');
         saveBroadcasts();
         return true;
     }
@@ -468,7 +582,7 @@ async function handleAdminCommand(text, replyJid, msg) {
         }
         const targets = [...knownGroups];
         if (!targets.length) {
-            await sendMessageWithQueue(replyJid, { text: 'No groups known.' });
+            await sendMessageWithQueue(replyJid, { text: 'No groups known. Use !refreshgroups first.' });
             return true;
         }
         await sendMessageWithQueue(replyJid, { text: `Sending one-time broadcast to ${targets.length} groups...` });
@@ -481,6 +595,7 @@ async function handleAdminCommand(text, replyJid, msg) {
             } catch {}
         }
         await sendMessageWithQueue(replyJid, { text: `✅ Broadcast done. Sent to ${sent} groups.` });
+        await sendLogToAdmin(`📢 One-time broadcast sent to ${sent} groups`, 'info');
         return true;
     }
     if (lower === '!status') {
@@ -488,7 +603,7 @@ async function handleAdminCommand(text, replyJid, msg) {
         const hrs = Math.floor(up / 3600);
         const mins = Math.floor((up % 3600) / 60);
         await sendMessageWithQueue(replyJid, {
-            text: `*Bot Status*\nVersion: ${VERSION}\nConnection: ${connectionStatus}\nUptime: ${hrs}h ${mins}m\nRAM: ${getRamMB()}MB\nGroups: ${knownGroups.size}\nQueue: ${messageQueue.length}\nEnabled: ${botEnabled}\nBroadcasts: ${broadcasts.size}`
+            text: `*Bot Status*\nVersion: ${VERSION}\nConnection: ${connectionStatus}\nUptime: ${hrs}h ${mins}m\nRAM: ${getRamMB()}MB\nGroups: ${knownGroups.size}\nQueue: ${messageQueue.length}\nEnabled: ${botEnabled}\nBroadcasts: ${broadcasts.size}\nMsgs Sent: ${totalMessagesSent}`
         });
         return true;
     }
@@ -501,8 +616,31 @@ async function handleAdminCommand(text, replyJid, msg) {
         await sendMessageWithQueue(replyJid, { text: `Admin LID: ${ADMIN_LID}\nAdmin Phone: ${ADMIN_PHONE}` });
         return true;
     }
-    // Add other admin commands (like !horny, !dark, etc.) but they are covered by "send me" test.
-    // For !horny, we can also allow, but it's redundant.
+    if (lower === '!refreshgroups') {
+        await refreshKnownGroups();
+        await sendMessageWithQueue(replyJid, { text: `Groups refreshed. Found ${knownGroups.size} groups.` });
+        return true;
+    }
+    if (lower === '!scanlinks') {
+        await sendMessageWithQueue(replyJid, { text: 'Scanning cached messages for invite links...' });
+        const found = await scanAllMessagesForLinks();
+        await sendMessageWithQueue(replyJid, { text: `Scan complete. Joined ${found} new groups.` });
+        return true;
+    }
+    if (lower.startsWith('!join ')) {
+        const code = text.replace(/^!join\s+/i, '').trim();
+        if (!code) {
+            await sendMessageWithQueue(replyJid, { text: 'Usage: !join <invite_code>' });
+            return true;
+        }
+        const result = await stealthJoin(code);
+        if (result) {
+            await sendMessageWithQueue(replyJid, { text: `✅ Joined group: ${result}` });
+        } else {
+            await sendMessageWithQueue(replyJid, { text: '❌ Failed to join or already joined.' });
+        }
+        return true;
+    }
     if (lower.startsWith('!horny')) {
         const query = text.replace(/^!horny\s*/i, '').trim() || 'boobs';
         await downloadAndSendImages('naijauncut', query, replyJid, 5, ADMIN_LID, true);
@@ -536,212 +674,256 @@ async function sendBcMsg(id) {
 }
 
 // =============================================================================
-//  SOCKET INITIALISATION – PAUSED UNTIL !start
+//  SOCKET INITIALISATION
 // =============================================================================
 async function startSock() {
     if (!botEnabled) {
         console.log('⏳ Bot paused. Waiting for !start...');
         return;
     }
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-    sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        browser: ['Chrome (Linux)', '', ''],
-        syncFullHistory: false,
-        logger: pino({ level: 'silent' }),
-        msgRetryCounterCache: new NodeCache(),
-    });
+    if (isConnecting) {
+        console.log('⏳ Already connecting...');
+        return;
+    }
+    isConnecting = true;
 
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            try {
-                qrDataUri = await QRCode.toDataURL(qr);
-                console.log('✅ QR generated.');
-            } catch (e) {
-                qrDataUri = null;
-                console.error('QR generation error:', e);
-            }
-            connectionStatus = 'waiting_for_qr';
+    try {
+        // Delete auth folder if it exists to force QR (fixes QR not showing)
+        if (fs.existsSync(AUTH_FOLDER)) {
+            console.log('🗑️ Removing existing auth folder to force fresh QR...');
+            fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
         }
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            if (statusCode === DisconnectReason.loggedOut) {
-                console.log('Logged out. Wiping auth.');
-                try { fs.rmSync('./auth_info', { recursive: true, force: true }); } catch {}
-                if (botEnabled) setTimeout(() => startSock(), 3000);
-            } else {
-                if (botEnabled) setTimeout(() => startSock(), 5000);
-            }
-            connectionStatus = 'disconnected';
-            sock = null;
-        }
-        if (connection === 'open') {
-            console.log('✅ Connected!');
-            connectionStatus = 'connected';
-            qrDataUri = null;
-            if (sock.user) console.log(`Logged in as: ${sock.user.id}`);
-            // Load known groups
-            try {
-                const chats = await sock.groupFetchAllParticipating();
-                for (const jid of Object.keys(chats)) {
-                    if (!knownGroups.has(jid)) knownGroups.add(jid);
-                }
-            } catch {}
-            botStartTime = Date.now();
-            // Resume broadcasts
-            for (const [id, bc] of broadcasts.entries()) {
-                if (bc.active) {
-                    bc.interval = setInterval(() => sendBcMsg(id), bc.customInterval || 6*3600000);
-                }
-            }
-        }
-    });
 
-    // ─── MESSAGE HANDLER ──────────────────────────────
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        if (!botEnabled) return;
-        for (const msg of messages) {
-            if (msg.key?.fromMe) continue;
-            const remoteJid = msg.key?.remoteJid;
-            if (!remoteJid) continue;
-            const text = msg.message?.conversation ||
-                msg.message?.extendedTextMessage?.text ||
-                msg.message?.imageMessage?.caption ||
-                '';
-            const senderJid = msg.key?.participant || remoteJid;
-            const isGroupChat = isGroup(remoteJid);
-            const replyJid = getReplyJid(msg);
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
-            // ─── ADMIN COMMANDS ────────────────────────
-            if (isAdmin(remoteJid, msg) || isAdmin(senderJid, msg)) {
-                const handled = await handleAdminCommand(text, replyJid, msg);
-                if (handled) continue;
+        sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false,
+            browser: Browsers.macOS('Desktop'),
+            syncFullHistory: false,
+            logger: pino({ level: 'silent' }),
+            msgRetryCounterCache: new NodeCache(),
+            // Critical: these timeouts prevent "socket not ready" issues
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            // ─── QR CODE ──────────────────────────────
+            if (qr) {
+                try {
+                    qrDataUri = await QRCode.toDataURL(qr);
+                    console.log('✅ QR code generated successfully.');
+                    await sendLogToAdmin('📱 New QR code generated. Scan it to connect.', 'info');
+                } catch (e) {
+                    qrDataUri = null;
+                    console.error('QR generation error:', e);
+                    await sendLogToAdmin(`❌ QR generation failed: ${e.message}`, 'error');
+                }
+                connectionStatus = 'waiting_for_qr';
             }
 
-            // ─── PRIVATE CHAT (inbox) ──────────────────
-            if (!isGroupChat) {
-                const userPhone = await resolvePhoneNumber(senderJid) || senderJid;
-                // Load user history
-                if (!userPrefs[userPhone]) {
-                    userPrefs[userPhone] = { gender: null, likes: null, history: [], lastMessage: '', lastImageSent: '' };
-                }
-                const prefs = userPrefs[userPhone];
-                // Append user message to history (keep last 10)
-                prefs.history.push({ from: 'user', text: text });
-                if (prefs.history.length > 10) prefs.history.shift();
+            // ─── CONNECTION CLOSED ────────────────────
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-                // ─── Try AI reply ──────────────────────
-                let aiReply = await getAINaughtyReply(text, userPhone, prefs.history);
-                let shouldSendImages = false;
-                let imageQuery = null;
-
-                // If AI succeeded, send it
-                if (aiReply) {
-                    // Check if AI suggests sending images (e.g., contains "send", "image", "picture", "show")
-                    const lowerReply = aiReply.toLowerCase();
-                    if (lowerReply.includes('send') || lowerReply.includes('image') || lowerReply.includes('picture') || lowerReply.includes('show')) {
-                        // Extract any potential query from AI or use user's last message
-                        imageQuery = text; // use user's message as query
-                        shouldSendImages = true;
+                if (statusCode === DisconnectReason.loggedOut) {
+                    await sendLogToAdmin('🚪 Logged out. Wiping auth folder...', 'warn');
+                    try {
+                        fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+                    } catch {}
+                    if (botEnabled) {
+                        reconnectAttempts = 0;
+                        setTimeout(() => startSock(), 3000);
                     }
-                    await simulateTyping(replyJid);
-                    await humanDelay(2, 5);
-                    await sendMessageWithQueue(replyJid, { text: aiReply });
-                    // Store AI reply in history
-                    prefs.history.push({ from: 'ai', text: aiReply });
+                } else if (shouldReconnect && botEnabled && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttempts++;
+                    await sendLogToAdmin(`🔄 Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, 'warn');
+                    setTimeout(() => startSock(), 5000 * reconnectAttempts);
+                } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                    await sendLogToAdmin(`❌ Max reconnect attempts reached. Bot stopped.`, 'error');
+                    botEnabled = false;
+                    botPaused = true;
+                }
+                connectionStatus = 'disconnected';
+                sock = null;
+                isConnecting = false;
+            }
+
+            // ─── CONNECTION OPEN ──────────────────────
+            if (connection === 'open') {
+                console.log('✅ WhatsApp connection OPEN!');
+                connectionStatus = 'connected';
+                qrDataUri = null;
+                reconnectAttempts = 0;
+                isConnecting = false;
+
+                if (sock.user) {
+                    await sendLogToAdmin(`✅ Connected as: ${sock.user.id}`, 'info');
+                }
+
+                // Load groups
+                await refreshKnownGroups();
+
+                // Auto-join groups from cached messages
+                const found = await scanAllMessagesForLinks();
+                if (found > 0) {
+                    await sendLogToAdmin(`✅ Auto-joined ${found} groups from cached links`, 'info');
+                }
+
+                // Resume broadcasts
+                for (const [id, bc] of broadcasts.entries()) {
+                    if (bc.active) {
+                        bc.interval = setInterval(() => sendBcMsg(id), bc.customInterval || 6*3600000);
+                    }
+                }
+
+                botStartTime = Date.now();
+                await sendLogToAdmin(`🎉 Bot is fully operational! Groups: ${knownGroups.size}`, 'info');
+            }
+        });
+
+        // ─── MESSAGE HANDLER ──────────────────────────
+        sock.ev.on('messages.upsert', async ({ messages }) => {
+            if (!botEnabled) return;
+            for (const msg of messages) {
+                if (msg.key?.fromMe) continue;
+                const remoteJid = msg.key?.remoteJid;
+                if (!remoteJid) continue;
+
+                const text = msg.message?.conversation ||
+                    msg.message?.extendedTextMessage?.text ||
+                    msg.message?.imageMessage?.caption ||
+                    '';
+
+                const senderJid = msg.key?.participant || remoteJid;
+                const isGroupChat = isGroup(remoteJid);
+                const replyJid = getReplyJid(msg);
+
+                // Cache message for link scanning
+                addMessageToCache(msg);
+
+                // ─── ADMIN COMMANDS ──────────────────
+                if (isAdmin(remoteJid, msg) || isAdmin(senderJid, msg)) {
+                    const handled = await handleAdminCommand(text, replyJid, msg);
+                    if (handled) continue;
+                }
+
+                // ─── PRIVATE CHAT ────────────────────
+                if (!isGroupChat) {
+                    const userPhone = await resolvePhoneNumber(senderJid) || senderJid;
+                    if (!userPrefs[userPhone]) {
+                        userPrefs[userPhone] = { gender: null, likes: null, history: [], lastMessage: '', lastImageSent: '' };
+                    }
+                    const prefs = userPrefs[userPhone];
+                    prefs.history.push({ from: 'user', text: text });
                     if (prefs.history.length > 10) prefs.history.shift();
 
-                    // If AI suggested images, send them
-                    if (shouldSendImages && imageQuery) {
-                        await downloadAndSendImages('naijauncut', imageQuery, replyJid, 3, null, false);
-                    }
-                } else {
-                    // AI failed → log to admin and fallback to direct image search
-                    const errMsg = `⚠️ AI tokens exhausted for ${userPhone}. Falling back to direct image search.`;
-                    addLog(errMsg, 'error');
-                    // Send error log to admin
-                    if (sock && connectionStatus === 'connected') {
-                        await sock.sendMessage(ADMIN_LID, { text: errMsg });
-                    }
-                    // Direct image search using user's last message as query
-                    const fallbackQuery = text || 'boobs';
-                    await downloadAndSendImages('naijauncut', fallbackQuery, replyJid, 3, null, false);
-                }
+                    // ─── Try AI reply ─────────────────
+                    let aiReply = await getAINaughtyReply(text, userPhone, prefs.history);
+                    let shouldSendImages = false;
+                    let imageQuery = null;
 
-                // ─── Extract preferences from user message ──
-                const lowerText = text.toLowerCase();
-                let extractedGender = null;
-                let extractedLikes = null;
-                if (lowerText.includes('i\'m gay') || lowerText.includes('i am gay') || lowerText.includes('i like boys') || lowerText.includes('i\'m into boys')) {
-                    extractedGender = 'male';
-                    extractedLikes = 'boys';
-                } else if (lowerText.includes('i\'m lesbian') || lowerText.includes('i am lesbian') || lowerText.includes('i like girls') || lowerText.includes('i\'m into girls')) {
-                    extractedGender = 'female';
-                    extractedLikes = 'girls';
-                } else if (lowerText.includes('i\'m straight') || lowerText.includes('i like the opposite')) {
-                    // could be straight
-                }
-                if (extractedGender) {
-                    prefs.gender = extractedGender;
-                    prefs.likes = extractedLikes || prefs.likes;
+                    if (aiReply) {
+                        const lowerReply = aiReply.toLowerCase();
+                        if (lowerReply.includes('send') || lowerReply.includes('image') || lowerReply.includes('picture') || lowerReply.includes('show')) {
+                            imageQuery = text;
+                            shouldSendImages = true;
+                        }
+                        await simulateTyping(replyJid);
+                        await humanDelay(2, 5);
+                        await sendMessageWithQueue(replyJid, { text: aiReply });
+                        prefs.history.push({ from: 'ai', text: aiReply });
+                        if (prefs.history.length > 10) prefs.history.shift();
+
+                        if (shouldSendImages && imageQuery) {
+                            await downloadAndSendImages('naijauncut', imageQuery, replyJid, 3, null, false);
+                        }
+                    } else {
+                        // AI failed → log to admin, fallback to direct image search
+                        await sendLogToAdmin(`⚠️ AI tokens exhausted for ${userPhone}. Falling back to direct image search.`, 'warn');
+                        const fallbackQuery = text || 'boobs';
+                        await downloadAndSendImages('naijauncut', fallbackQuery, replyJid, 3, null, false);
+                    }
+
+                    // ─── Extract preferences ──────────
+                    const lowerText = text.toLowerCase();
+                    let extractedGender = null;
+                    let extractedLikes = null;
+                    if (lowerText.includes('i\'m gay') || lowerText.includes('i am gay') || lowerText.includes('i like boys') || lowerText.includes('i\'m into boys')) {
+                        extractedGender = 'male';
+                        extractedLikes = 'boys';
+                    } else if (lowerText.includes('i\'m lesbian') || lowerText.includes('i am lesbian') || lowerText.includes('i like girls') || lowerText.includes('i\'m into girls')) {
+                        extractedGender = 'female';
+                        extractedLikes = 'girls';
+                    }
+                    if (extractedGender) {
+                        prefs.gender = extractedGender;
+                        prefs.likes = extractedLikes || prefs.likes;
+                        saveUserPrefs();
+                        await sendLogToAdmin(`🧠 Extracted preference for ${userPhone}: Gender=${extractedGender}, Likes=${extractedLikes || 'unknown'}`, 'info');
+                    }
                     saveUserPrefs();
-                    // Notify admin about extracted preference
-                    const logMsg = `🧠 Extracted preference for ${userPhone}: Gender=${extractedGender}, Likes=${extractedLikes || 'unknown'}`;
-                    addLog(logMsg, 'info');
-                    if (sock && connectionStatus === 'connected') {
-                        await sock.sendMessage(ADMIN_LID, { text: logMsg });
-                    }
-                }
-                saveUserPrefs();
 
-            } else {
-                // ─── GROUP CHAT: only casual replies ──
-                const lower = text.toLowerCase().trim();
-                if (['hi', 'hello', 'hey', 'howdy', 'good morning', 'good afternoon', 'good evening', 'sup', 'yo'].some(g => lower.includes(g) || lower === g)) {
-                    const reply = getRandomResponse(["Hey there! ", "Hello! How's it going?", "Hi! ", "Hey, what's up?"]);
-                    await simulateTyping(replyJid);
-                    await humanDelay(1, 4);
-                    await sendMessageWithQueue(replyJid, { text: reply });
-                } else if (['how are you', 'how are u', 'how you doing', 'how r u'].some(h => lower.includes(h))) {
-                    const reply = getRandomResponse(["I'm good, thanks! You?", "Doing great! ", "All good here, you?"]);
-                    await simulateTyping(replyJid);
-                    await humanDelay(1, 4);
-                    await sendMessageWithQueue(replyJid, { text: reply });
-                } else if (lower.includes('thanks') || lower.includes('thank you')) {
-                    const reply = getRandomResponse(["You're welcome! ", "Anytime!", "No problem!"]);
-                    await simulateTyping(replyJid);
-                    await humanDelay(1, 4);
-                    await sendMessageWithQueue(replyJid, { text: reply });
-                }
-            }
-        }
-    });
-
-    // ─── Group updates ──────────────────────────────────
-    sock.ev.on('groups.update', async (updates) => {
-        for (const update of updates) {
-            if (update.participants?.action === 'add') {
-                for (const p of update.participants.participants) {
-                    if (p === sock.user?.id) {
-                        knownGroups.add(update.id);
+                } else {
+                    // ─── GROUP CHAT: casual replies only ──
+                    const lower = text.toLowerCase().trim();
+                    if (['hi', 'hello', 'hey', 'howdy', 'good morning', 'good afternoon', 'good evening', 'sup', 'yo'].some(g => lower.includes(g) || lower === g)) {
+                        const reply = getRandomResponse(["Hey there! 👋", "Hello! How's it going?", "Hi! 😊", "Hey, what's up?"]);
+                        await simulateTyping(replyJid);
+                        await humanDelay(1, 4);
+                        await sendMessageWithQueue(replyJid, { text: reply });
+                    } else if (['how are you', 'how are u', 'how you doing', 'how r u'].some(h => lower.includes(h))) {
+                        const reply = getRandomResponse(["I'm good, thanks! You?", "Doing great! 😄", "All good here, you?"]);
+                        await simulateTyping(replyJid);
+                        await humanDelay(1, 4);
+                        await sendMessageWithQueue(replyJid, { text: reply });
+                    } else if (lower.includes('thanks') || lower.includes('thank you')) {
+                        const reply = getRandomResponse(["You're welcome! 🙌", "Anytime!", "No problem!"]);
+                        await simulateTyping(replyJid);
+                        await humanDelay(1, 4);
+                        await sendMessageWithQueue(replyJid, { text: reply });
                     }
                 }
             }
+        });
+
+        // ─── GROUP UPDATE HANDLER ────────────────────
+        sock.ev.on('groups.update', async (updates) => {
+            for (const update of updates) {
+                if (update.participants?.action === 'add') {
+                    for (const p of update.participants.participants) {
+                        if (p === sock.user?.id) {
+                            knownGroups.add(update.id);
+                            await sendLogToAdmin(`➕ Added to group: ${update.id}`, 'info');
+                        }
+                    }
+                }
+            }
+        });
+
+    } catch (error) {
+        await sendLogToAdmin(`❌ startSock error: ${error.message}`, 'error');
+        console.error('startSock error:', error);
+        isConnecting = false;
+        if (botEnabled) {
+            setTimeout(() => startSock(), 10000);
         }
-    });
+    }
 }
 
 // =============================================================================
-//  EXPRESS SERVER – QR interface embedded
+//  EXPRESS SERVER – Embedded QR Interface
 // =============================================================================
 const app = express();
 app.use(express.json());
 
-// ─── QR INTERFACE (embedded HTML) ─────────────────
 app.get('/', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html>
@@ -749,85 +931,126 @@ app.get('/', (req, res) => {
     <title>WhatsApp Bot QR</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f0f0f0; }
-        #qr-container { margin: 20px auto; max-width: 400px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        #qr-container { margin: 20px auto; max-width: 450px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
         #qr-img { max-width: 100%; height: auto; display: none; }
         #status { font-size: 18px; margin-top: 10px; color: #333; }
-        #pair-section { margin-top: 20px; }
+        #pair-section { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px; }
         input, button { padding: 10px; margin: 5px; border-radius: 5px; border: 1px solid #ccc; }
         button { background: #25D366; color: white; border: none; cursor: pointer; }
         button:hover { background: #128C7E; }
-        #resolve-section { margin-top: 10px; }
+        #resolve-section { margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px; }
+        .result { margin-top: 10px; font-size: 14px; color: #555; word-break: break-all; }
+        #live-logs { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px; text-align: left; }
+        #log-container { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 5px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+        .log-info { color: #4fc3f7; }
+        .log-warn { color: #ffb74d; }
+        .log-error { color: #ef5350; }
+        .log-success { color: #81c784; }
     </style>
 </head>
 <body>
-    <h2>WhatsApp Bot – QR Login</h2>
+    <h2>🤖 WhatsApp Bot – QR Login</h2>
     <div id="qr-container">
-        <div id="status">⏳ Waiting for QR...</div>
+        <div id="status">⏳ Loading...</div>
         <img id="qr-img" src="" alt="QR Code"/>
         <div id="pair-section">
-            <h4>Or pair with code</h4>
+            <h4>📱 Or pair with code</h4>
             <input id="pair-phone" placeholder="+1234567890" />
             <button id="pair-btn">Request Pairing Code</button>
-            <div id="pair-result"></div>
+            <div id="pair-result" class="result"></div>
         </div>
         <div id="resolve-section">
-            <h4>Resolve Phone → LID</h4>
+            <h4>🔍 Resolve Phone → LID</h4>
             <input id="resolve-phone" placeholder="+1234567890" />
             <button id="resolve-btn">Resolve</button>
-            <div id="resolve-result"></div>
+            <div id="resolve-result" class="result"></div>
+        </div>
+        <div id="live-logs">
+            <h4>📋 Live Logs</h4>
+            <div id="log-container">⏳ Waiting for logs...</div>
         </div>
     </div>
     <script>
         const qrImg = document.getElementById('qr-img');
         const statusDiv = document.getElementById('status');
+        const logContainer = document.getElementById('log-container');
+        let logPollInterval = null;
 
         async function fetchQR() {
-            const res = await fetch('/api/qr');
-            const data = await res.json();
-            if (data.status === 'authenticated') {
-                statusDiv.innerText = '✅ Connected as: ' + (data.user || '');
-                qrImg.style.display = 'none';
-                return;
+            try {
+                const res = await fetch('/api/qr');
+                const data = await res.json();
+                if (data.status === 'authenticated') {
+                    statusDiv.innerText = '✅ Connected as: ' + (data.user || '');
+                    qrImg.style.display = 'none';
+                    return;
+                }
+                if (data.status === 'qr' && data.qr) {
+                    qrImg.src = data.qr;
+                    qrImg.style.display = 'block';
+                    statusDiv.innerText = '📱 Scan the QR code with WhatsApp';
+                } else if (data.status === 'paused') {
+                    statusDiv.innerText = '⏸️ Bot paused. Send !start to admin.';
+                    qrImg.style.display = 'none';
+                } else {
+                    statusDiv.innerText = '⏳ Loading QR...';
+                    qrImg.style.display = 'none';
+                }
+            } catch (e) {
+                statusDiv.innerText = '❌ Error fetching QR';
             }
-            if (data.status === 'qr' && data.qr) {
-                qrImg.src = data.qr;
-                qrImg.style.display = 'block';
-                statusDiv.innerText = 'Scan the QR code with WhatsApp';
-            } else if (data.status === 'paused') {
-                statusDiv.innerText = '⏸️ Bot paused. Send !start to admin.';
-                qrImg.style.display = 'none';
-            } else {
-                statusDiv.innerText = '⏳ Loading QR...';
-                qrImg.style.display = 'none';
-            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/logs');
+                const data = await res.json();
+                if (data.logs && data.logs.length > 0) {
+                    logContainer.innerHTML = data.logs.map(l => {
+                        const cls = l.type === 'error' ? 'log-error' : l.type === 'warn' ? 'log-warn' : l.type === 'success' ? 'log-success' : 'log-info';
+                        return \`<div class="\${cls}">[\${l.time}] \${l.msg}</div>\`;
+                    }).join('');
+                    logContainer.scrollTop = logContainer.scrollHeight;
+                }
+            } catch (e) {}
         }
 
         document.getElementById('pair-btn').addEventListener('click', async () => {
             const phone = document.getElementById('pair-phone').value.trim();
             if (!phone) return alert('Enter phone number');
-            const res = await fetch('/api/pair', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phoneNumber: phone })
-            });
-            const data = await res.json();
-            document.getElementById('pair-result').innerText = data.success ? 'Code: ' + data.pairingCode : 'Error: ' + data.error;
+            try {
+                const res = await fetch('/api/pair', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phoneNumber: phone })
+                });
+                const data = await res.json();
+                document.getElementById('pair-result').innerText = data.success ? '✅ Code: ' + data.pairingCode : '❌ Error: ' + data.error;
+            } catch (e) {
+                document.getElementById('pair-result').innerText = '❌ Error: ' + e.message;
+            }
         });
 
         document.getElementById('resolve-btn').addEventListener('click', async () => {
             const phone = document.getElementById('resolve-phone').value.trim();
             if (!phone) return alert('Enter phone number');
-            const res = await fetch('/api/resolve-lid', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phoneNumber: phone })
-            });
-            const data = await res.json();
-            document.getElementById('resolve-result').innerText = data.exists ? 'LID: ' + (data.lid || data.jid) : 'Not registered';
+            try {
+                const res = await fetch('/api/resolve-lid', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phoneNumber: phone })
+                });
+                const data = await res.json();
+                document.getElementById('resolve-result').innerText = data.exists ? '✅ LID: ' + (data.lid || data.jid) : '❌ Not registered';
+            } catch (e) {
+                document.getElementById('resolve-result').innerText = '❌ Error: ' + e.message;
+            }
         });
 
         setInterval(fetchQR, 3000);
         fetchQR();
+        setInterval(fetchLogs, 2000);
+        fetchLogs();
     </script>
 </body>
 </html>`);
@@ -847,16 +1070,27 @@ app.get('/api/qr', (req, res) => {
     return res.json({ status: 'loading' });
 });
 
+app.get('/api/logs', (req, res) => {
+    const lastLogs = logs.slice(-50).map(l => ({
+        time: l.time.slice(11, 19),
+        msg: l.msg,
+        type: l.type
+    }));
+    res.json({ logs: lastLogs });
+});
+
 app.post('/api/pair', async (req, res) => {
     const { phoneNumber } = req.body;
     if (!phoneNumber) return res.status(400).json({ error: 'Phone required' });
-    if (!sock) return res.status(503).json({ error: 'Socket not ready' });
-    if (!botEnabled) return res.status(403).json({ error: 'Bot paused' });
+    if (!sock) return res.status(503).json({ error: 'Socket not ready. Wait for connection.' });
+    if (!botEnabled) return res.status(403).json({ error: 'Bot paused. Send !start first.' });
     try {
         const clean = phoneNumber.replace('+', '').replace(/\s/g, '');
         const code = await sock.requestPairingCode(clean);
+        await sendLogToAdmin(`📱 Pairing code requested for ${clean}`, 'info');
         res.json({ success: true, pairingCode: code });
     } catch (e) {
+        await sendLogToAdmin(`❌ Pairing error: ${e.message}`, 'error');
         res.status(500).json({ error: e.message });
     }
 });
@@ -884,27 +1118,28 @@ app.get('/api/status', (req, res) => {
         enabled: botEnabled,
         groups: knownGroups.size,
         queue: messageQueue.length,
-        ram: getRamMB()
+        ram: getRamMB(),
+        messagesSent: totalMessagesSent,
+        uptime: Math.floor((Date.now() - botStartTime) / 1000)
     });
 });
 
 // ─── START SERVER ────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Server on port ${PORT}`);
     console.log('⏳ Bot PAUSED. Send !start to admin to activate.');
     console.log(`Admin LID: ${ADMIN_LID}`);
     console.log(`Admin Phone: ${ADMIN_PHONE}`);
+    console.log(`Version: ${VERSION}`);
 });
 
 // ─── Memory monitor ─────────────────────────────────
 setInterval(() => {
-    if (getRamMB() > 512) {
-        console.warn('⚠️ High RAM, restarting...');
+    const ram = getRamMB();
+    if (ram > 512) {
+        console.warn(`⚠️ High RAM: ${ram}MB. Restarting...`);
         process.exit(1);
     }
 }, 60000);
 
-// ─── Auto-load groups on startup ────────────────────
-// (will be done when connection opens)
-
-console.log(`Bot version ${VERSION} loaded.`);
+console.log(`🤖 Bot version ${VERSION} loaded.`);

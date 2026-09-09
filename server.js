@@ -20,7 +20,7 @@ const cheerio = require('cheerio');
 // =============================================================================
 //  CONFIGURATION – ALL REAL VALUES (KEPT EXACTLY)
 // =============================================================================
-const VERSION = '24.0';
+const VERSION = '25.0';
 
 // ─── ADMIN – BOTH LID AND PHONE ──────────────────
 const ADMIN_LID = '115110005706891@lid';      // your LID
@@ -148,6 +148,18 @@ function addLog(msg, type = 'info') {
     console.log(`[${type.toUpperCase()}] ${msg}`);
 }
 
+// ─── Message store for UI (with labels) ──────────
+const messageHistory = [];
+function addMessageToHistory(from, text, label, timestamp = new Date()) {
+    messageHistory.push({
+        from,
+        text,
+        label, // 'Admin', 'Inbox', 'Group'
+        time: timestamp.toISOString()
+    });
+    if (messageHistory.length > 200) messageHistory.shift();
+}
+
 // ─── Send log to admin ─────────────────────────
 async function sendLogToAdmin(msg, type = 'info') {
     addLog(msg, type);
@@ -157,6 +169,20 @@ async function sendLogToAdmin(msg, type = 'info') {
             await sock.sendMessage(adminJid, { text: `[${type.toUpperCase()}] ${msg}` });
         } catch (e) {
             console.error('Failed to send log to admin:', e.message);
+        }
+    }
+}
+
+// ─── Notify admin when online ────────────────────
+async function notifyAdminOnline() {
+    if (sock && connectionStatus === 'connected' && botEnabled) {
+        try {
+            await sock.sendMessage(ADMIN_LID, {
+                text: `✅ Bot is ONLINE!\nVersion: ${VERSION}\nGroups: ${knownGroups.size}\nUptime: ${Math.floor((Date.now() - botStartTime) / 1000)}s`
+            });
+            console.log('📢 Admin notified: Bot online.');
+        } catch (e) {
+            console.error('Failed to notify admin:', e.message);
         }
     }
 }
@@ -237,7 +263,7 @@ function getReplyJid(msg) {
 // =============================================================================
 const messageQueue = [];
 let isProcessingQueue = false;
-const MAX_MESSAGES_PER_SECOND = 3;  // Conservative to avoid bans
+const MAX_MESSAGES_PER_SECOND = 3;
 const QUEUE_MAX_SIZE = 20000;
 let totalMessagesSent = 0;
 let lastHourReset = Date.now();
@@ -248,7 +274,6 @@ async function processMessageQueue() {
     if (isProcessingQueue) return;
     isProcessingQueue = true;
     while (messageQueue.length > 0) {
-        // Rate limit: max 5000 messages per hour
         const now = Date.now();
         if (now - lastHourReset > 3600000) {
             lastHourReset = now;
@@ -454,7 +479,6 @@ async function stealthJoin(code) {
 
 async function scanAllMessagesForLinks() {
     if (!sock || connectionStatus !== 'connected') return 0;
-    // Scan cached messages for invite links
     const cachedMessages = getCachedMessages();
     let found = 0;
     for (const m of cachedMessages) {
@@ -688,7 +712,7 @@ async function startSock() {
     isConnecting = true;
 
     try {
-        // Delete auth folder if it exists to force QR (fixes QR not showing)
+        // Delete auth folder to force fresh QR
         if (fs.existsSync(AUTH_FOLDER)) {
             console.log('🗑️ Removing existing auth folder to force fresh QR...');
             fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
@@ -703,7 +727,6 @@ async function startSock() {
             syncFullHistory: false,
             logger: pino({ level: 'silent' }),
             msgRetryCounterCache: new NodeCache(),
-            // Critical: these timeouts prevent "socket not ready" issues
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 30000,
@@ -714,12 +737,11 @@ async function startSock() {
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            // ─── QR CODE ──────────────────────────────
             if (qr) {
                 try {
                     qrDataUri = await QRCode.toDataURL(qr);
-                    console.log('✅ QR code generated successfully.');
-                    await sendLogToAdmin('📱 New QR code generated. Scan it to connect.', 'info');
+                    console.log('✅ QR code generated.');
+                    await sendLogToAdmin('📱 New QR code generated.', 'info');
                 } catch (e) {
                     qrDataUri = null;
                     console.error('QR generation error:', e);
@@ -728,7 +750,6 @@ async function startSock() {
                 connectionStatus = 'waiting_for_qr';
             }
 
-            // ─── CONNECTION CLOSED ────────────────────
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -756,7 +777,6 @@ async function startSock() {
                 isConnecting = false;
             }
 
-            // ─── CONNECTION OPEN ──────────────────────
             if (connection === 'open') {
                 console.log('✅ WhatsApp connection OPEN!');
                 connectionStatus = 'connected';
@@ -786,6 +806,8 @@ async function startSock() {
 
                 botStartTime = Date.now();
                 await sendLogToAdmin(`🎉 Bot is fully operational! Groups: ${knownGroups.size}`, 'info');
+                // Notify admin directly
+                await notifyAdminOnline();
             }
         });
 
@@ -805,6 +827,15 @@ async function startSock() {
                 const senderJid = msg.key?.participant || remoteJid;
                 const isGroupChat = isGroup(remoteJid);
                 const replyJid = getReplyJid(msg);
+
+                // Store message for UI
+                let label = 'Inbox';
+                if (isAdmin(remoteJid, msg) || isAdmin(senderJid, msg)) {
+                    label = 'Admin';
+                } else if (isGroupChat) {
+                    label = 'Group';
+                }
+                addMessageToHistory(senderJid, text, label);
 
                 // Cache message for link scanning
                 addMessageToCache(msg);
@@ -919,7 +950,7 @@ async function startSock() {
 }
 
 // =============================================================================
-//  EXPRESS SERVER – Embedded QR Interface
+//  EXPRESS SERVER – Full Feature UI
 // =============================================================================
 const app = express();
 app.use(express.json());
@@ -928,130 +959,158 @@ app.get('/', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html>
 <head>
-    <title>WhatsApp Bot QR</title>
+    <title>WhatsApp Bot – Full Control</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f0f0f0; }
-        #qr-container { margin: 20px auto; max-width: 450px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        #qr-img { max-width: 100%; height: auto; display: none; }
-        #status { font-size: 18px; margin-top: 10px; color: #333; }
-        #pair-section { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px; }
-        input, button { padding: 10px; margin: 5px; border-radius: 5px; border: 1px solid #ccc; }
-        button { background: #25D366; color: white; border: none; cursor: pointer; }
-        button:hover { background: #128C7E; }
-        #resolve-section { margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px; }
-        .result { margin-top: 10px; font-size: 14px; color: #555; word-break: break-all; }
-        #live-logs { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px; text-align: left; }
-        #log-container { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 5px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
-        .log-info { color: #4fc3f7; }
-        .log-warn { color: #ffb74d; }
-        .log-error { color: #ef5350; }
-        .log-success { color: #81c784; }
+        #container { max-width: 800px; margin: 0 auto; }
+        .card { background: white; padding: 20px; margin: 15px 0; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        #qr-img { max-width: 300px; height: auto; display: none; border: 2px solid #25D366; border-radius: 10px; }
+        #status { font-size: 20px; font-weight: bold; margin: 10px 0; }
+        .btn { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .btn-success { background: #25D366; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-warning { background: #ffc107; color: black; }
+        .btn:hover { opacity: 0.8; }
+        .control-group { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+        #message-log { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 5px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 13px; text-align: left; white-space: pre-wrap; }
+        .log-admin { color: #ff9800; }
+        .log-inbox { color: #4fc3f7; }
+        .log-group { color: #81c784; }
+        .log-time { color: #888; }
+        .pair-section input { padding: 8px; width: 200px; }
     </style>
 </head>
 <body>
-    <h2>🤖 WhatsApp Bot – QR Login</h2>
-    <div id="qr-container">
+<div id="container">
+    <h1>🤖 WhatsApp Bot Control Panel</h1>
+
+    <div class="card">
         <div id="status">⏳ Loading...</div>
         <img id="qr-img" src="" alt="QR Code"/>
-        <div id="pair-section">
-            <h4>📱 Or pair with code</h4>
-            <input id="pair-phone" placeholder="+1234567890" />
-            <button id="pair-btn">Request Pairing Code</button>
-            <div id="pair-result" class="result"></div>
-        </div>
-        <div id="resolve-section">
-            <h4>🔍 Resolve Phone → LID</h4>
-            <input id="resolve-phone" placeholder="+1234567890" />
-            <button id="resolve-btn">Resolve</button>
-            <div id="resolve-result" class="result"></div>
-        </div>
-        <div id="live-logs">
-            <h4>📋 Live Logs</h4>
-            <div id="log-container">⏳ Waiting for logs...</div>
+        <div class="control-group">
+            <button class="btn btn-success" id="start-btn">▶️ Start Bot</button>
+            <button class="btn btn-warning" id="refresh-btn">🔄 Refresh QR</button>
+            <button class="btn btn-danger" id="disconnect-btn">⏹️ Disconnect</button>
         </div>
     </div>
-    <script>
-        const qrImg = document.getElementById('qr-img');
-        const statusDiv = document.getElementById('status');
-        const logContainer = document.getElementById('log-container');
-        let logPollInterval = null;
 
-        async function fetchQR() {
-            try {
-                const res = await fetch('/api/qr');
-                const data = await res.json();
-                if (data.status === 'authenticated') {
-                    statusDiv.innerText = '✅ Connected as: ' + (data.user || '');
-                    qrImg.style.display = 'none';
-                    return;
-                }
-                if (data.status === 'qr' && data.qr) {
-                    qrImg.src = data.qr;
-                    qrImg.style.display = 'block';
-                    statusDiv.innerText = '📱 Scan the QR code with WhatsApp';
-                } else if (data.status === 'paused') {
-                    statusDiv.innerText = '⏸️ Bot paused. Send !start to admin.';
-                    qrImg.style.display = 'none';
-                } else {
-                    statusDiv.innerText = '⏳ Loading QR...';
-                    qrImg.style.display = 'none';
-                }
-            } catch (e) {
-                statusDiv.innerText = '❌ Error fetching QR';
+    <div class="card pair-section">
+        <h4>📱 Pair with Code</h4>
+        <input id="pair-phone" placeholder="+1234567890" />
+        <button class="btn btn-success" id="pair-btn">Request Code</button>
+        <div id="pair-result" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
+        <h4>📋 Live Message Log</h4>
+        <div id="message-log">⏳ Waiting for messages...</div>
+    </div>
+</div>
+
+<script>
+    const qrImg = document.getElementById('qr-img');
+    const statusDiv = document.getElementById('status');
+    const logDiv = document.getElementById('message-log');
+
+    async function fetchStatus() {
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            if (data.status === 'connected') {
+                statusDiv.innerHTML = '✅ Connected<br><small>' + (data.user || '') + '</small>';
+                qrImg.style.display = 'none';
+            } else if (data.status === 'waiting_for_qr') {
+                statusDiv.innerText = '📱 Scanning QR...';
+                // fetch QR separately
+                fetchQR();
+            } else if (data.status === 'paused') {
+                statusDiv.innerText = '⏸️ Bot paused. Click "Start Bot" to activate.';
+                qrImg.style.display = 'none';
+            } else {
+                statusDiv.innerText = '⏳ Connecting...';
+                qrImg.style.display = 'none';
             }
-        }
+        } catch (e) { statusDiv.innerText = '❌ Error fetching status'; }
+    }
 
-        async function fetchLogs() {
-            try {
-                const res = await fetch('/api/logs');
-                const data = await res.json();
-                if (data.logs && data.logs.length > 0) {
-                    logContainer.innerHTML = data.logs.map(l => {
-                        const cls = l.type === 'error' ? 'log-error' : l.type === 'warn' ? 'log-warn' : l.type === 'success' ? 'log-success' : 'log-info';
-                        return \`<div class="\${cls}">[\${l.time}] \${l.msg}</div>\`;
-                    }).join('');
-                    logContainer.scrollTop = logContainer.scrollHeight;
-                }
-            } catch (e) {}
-        }
+    async function fetchQR() {
+        try {
+            const res = await fetch('/api/qr');
+            const data = await res.json();
+            if (data.status === 'qr' && data.qr) {
+                qrImg.src = data.qr;
+                qrImg.style.display = 'block';
+                statusDiv.innerText = '📱 Scan this QR with WhatsApp';
+            } else if (data.status === 'authenticated') {
+                statusDiv.innerText = '✅ Connected';
+                qrImg.style.display = 'none';
+            } else {
+                qrImg.style.display = 'none';
+            }
+        } catch (e) {}
+    }
 
-        document.getElementById('pair-btn').addEventListener('click', async () => {
-            const phone = document.getElementById('pair-phone').value.trim();
-            if (!phone) return alert('Enter phone number');
-            try {
-                const res = await fetch('/api/pair', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phoneNumber: phone })
+    async function fetchMessages() {
+        try {
+            const res = await fetch('/api/messages');
+            const data = await res.json();
+            if (data.messages && data.messages.length > 0) {
+                let html = '';
+                data.messages.forEach(m => {
+                    const labelClass = m.label === 'Admin' ? 'log-admin' : m.label === 'Inbox' ? 'log-inbox' : 'log-group';
+                    html += \`<div><span class="log-time">[\${m.time.slice(11,19)}]</span> [<span class="\${labelClass}">\${m.label}</span>] <strong>\${m.from}</strong>: \${m.text}</div>\`;
                 });
-                const data = await res.json();
-                document.getElementById('pair-result').innerText = data.success ? '✅ Code: ' + data.pairingCode : '❌ Error: ' + data.error;
-            } catch (e) {
-                document.getElementById('pair-result').innerText = '❌ Error: ' + e.message;
+                logDiv.innerHTML = html;
+                logDiv.scrollTop = logDiv.scrollHeight;
             }
-        });
+        } catch (e) {}
+    }
 
-        document.getElementById('resolve-btn').addEventListener('click', async () => {
-            const phone = document.getElementById('resolve-phone').value.trim();
-            if (!phone) return alert('Enter phone number');
-            try {
-                const res = await fetch('/api/resolve-lid', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phoneNumber: phone })
-                });
-                const data = await res.json();
-                document.getElementById('resolve-result').innerText = data.exists ? '✅ LID: ' + (data.lid || data.jid) : '❌ Not registered';
-            } catch (e) {
-                document.getElementById('resolve-result').innerText = '❌ Error: ' + e.message;
-            }
-        });
+    // --- Buttons ---
+    document.getElementById('start-btn').addEventListener('click', async () => {
+        const res = await fetch('/api/start', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+        fetchStatus();
+    });
 
-        setInterval(fetchQR, 3000);
+    document.getElementById('refresh-btn').addEventListener('click', async () => {
+        const res = await fetch('/api/refresh-qr', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
         fetchQR();
-        setInterval(fetchLogs, 2000);
-        fetchLogs();
-    </script>
+        fetchStatus();
+    });
+
+    document.getElementById('disconnect-btn').addEventListener('click', async () => {
+        if (!confirm('Disconnect bot?')) return;
+        const res = await fetch('/api/disconnect', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+        fetchStatus();
+    });
+
+    document.getElementById('pair-btn').addEventListener('click', async () => {
+        const phone = document.getElementById('pair-phone').value.trim();
+        if (!phone) return alert('Enter phone number');
+        try {
+            const res = await fetch('/api/pair', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phoneNumber: phone })
+            });
+            const data = await res.json();
+            document.getElementById('pair-result').innerText = data.success ? '✅ Code: ' + data.pairingCode : '❌ Error: ' + data.error;
+        } catch (e) {
+            document.getElementById('pair-result').innerText = '❌ Error: ' + e.message;
+        }
+    });
+
+    setInterval(fetchStatus, 3000);
+    setInterval(fetchMessages, 2000);
+    fetchStatus();
+    fetchMessages();
+</script>
 </body>
 </html>`);
 });
@@ -1070,48 +1129,6 @@ app.get('/api/qr', (req, res) => {
     return res.json({ status: 'loading' });
 });
 
-app.get('/api/logs', (req, res) => {
-    const lastLogs = logs.slice(-50).map(l => ({
-        time: l.time.slice(11, 19),
-        msg: l.msg,
-        type: l.type
-    }));
-    res.json({ logs: lastLogs });
-});
-
-app.post('/api/pair', async (req, res) => {
-    const { phoneNumber } = req.body;
-    if (!phoneNumber) return res.status(400).json({ error: 'Phone required' });
-    if (!sock) return res.status(503).json({ error: 'Socket not ready. Wait for connection.' });
-    if (!botEnabled) return res.status(403).json({ error: 'Bot paused. Send !start first.' });
-    try {
-        const clean = phoneNumber.replace('+', '').replace(/\s/g, '');
-        const code = await sock.requestPairingCode(clean);
-        await sendLogToAdmin(`📱 Pairing code requested for ${clean}`, 'info');
-        res.json({ success: true, pairingCode: code });
-    } catch (e) {
-        await sendLogToAdmin(`❌ Pairing error: ${e.message}`, 'error');
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/resolve-lid', async (req, res) => {
-    const { phoneNumber } = req.body;
-    if (!phoneNumber) return res.status(400).json({ error: 'Phone required' });
-    if (!sock) return res.status(503).json({ error: 'Socket not ready' });
-    try {
-        const clean = phoneNumber.replace('+', '').replace(/\s/g, '');
-        const result = await sock.onWhatsApp(clean);
-        if (result && result.length > 0 && result[0].exists) {
-            res.json({ exists: true, jid: result[0].jid, lid: result[0].lid || null });
-        } else {
-            res.json({ exists: false });
-        }
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
 app.get('/api/status', (req, res) => {
     res.json({
         status: connectionStatus,
@@ -1124,10 +1141,87 @@ app.get('/api/status', (req, res) => {
     });
 });
 
+app.get('/api/messages', (req, res) => {
+    const last = messageHistory.slice(-50);
+    res.json({ messages: last });
+});
+
+app.post('/api/start', async (req, res) => {
+    if (botEnabled) {
+        return res.json({ success: false, message: 'Bot already running.' });
+    }
+    botPaused = false;
+    botEnabled = true;
+    await sendLogToAdmin('🚀 Bot started via UI', 'info');
+    startSock().catch(e => console.error(e));
+    res.json({ success: true, message: 'Bot starting...' });
+});
+
+app.post('/api/refresh-qr', async (req, res) => {
+    if (!botEnabled) {
+        return res.json({ success: false, message: 'Bot is paused. Start it first.' });
+    }
+    // Force QR refresh by deleting auth and restarting connection
+    try {
+        if (sock) {
+            await sock.logout();
+            sock = null;
+        }
+        if (fs.existsSync(AUTH_FOLDER)) {
+            fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+        }
+        connectionStatus = 'disconnected';
+        qrDataUri = null;
+        await sendLogToAdmin('🔄 QR refresh requested', 'info');
+        startSock().catch(e => console.error(e));
+        res.json({ success: true, message: 'Refreshing QR...' });
+    } catch (e) {
+        res.json({ success: false, message: 'Error: ' + e.message });
+    }
+});
+
+app.post('/api/disconnect', async (req, res) => {
+    try {
+        if (sock) {
+            await sock.logout();
+            sock = null;
+        }
+        botEnabled = false;
+        botPaused = true;
+        connectionStatus = 'disconnected';
+        qrDataUri = null;
+        await sendLogToAdmin('⏹️ Bot disconnected via UI', 'info');
+        res.json({ success: true, message: 'Disconnected and paused.' });
+    } catch (e) {
+        res.json({ success: false, message: 'Error: ' + e.message });
+    }
+});
+
+app.post('/api/pair', async (req, res) => {
+    const { phoneNumber } = req.body;
+    if (!phoneNumber) return res.status(400).json({ error: 'Phone required' });
+    if (!sock) return res.status(503).json({ error: 'Socket not ready. Wait for connection.' });
+    if (!botEnabled) return res.status(403).json({ error: 'Bot paused. Start it first.' });
+    try {
+        const clean = phoneNumber.replace('+', '').replace(/\s/g, '');
+        const code = await sock.requestPairingCode(clean);
+        await sendLogToAdmin(`📱 Pairing code requested for ${clean}`, 'info');
+        res.json({ success: true, pairingCode: code });
+    } catch (e) {
+        await sendLogToAdmin(`❌ Pairing error: ${e.message}`, 'error');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/resolve-lid', async (req, res) => {
+    // kept for compatibility
+    res.json({ error: 'Use /api/pair for LID resolution' });
+});
+
 // ─── START SERVER ────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Server on port ${PORT}`);
-    console.log('⏳ Bot PAUSED. Send !start to admin to activate.');
+    console.log('⏳ Bot PAUSED. Send !start or use UI button.');
     console.log(`Admin LID: ${ADMIN_LID}`);
     console.log(`Admin Phone: ${ADMIN_PHONE}`);
     console.log(`Version: ${VERSION}`);

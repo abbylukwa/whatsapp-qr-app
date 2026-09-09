@@ -911,7 +911,6 @@ async function startSock() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
-      // Convert raw QR to data URI
       try {
         qrDataUri = await QRCode.toDataURL(qr);
         console.log('[QR] Generated data URI');
@@ -1031,55 +1030,180 @@ async function startSock() {
 }
 
 // ============================
-// EXPRESS SERVER
+// EXPRESS SERVER — WhatsApp Web Style
 // ============================
 const app = express();
 
-// Serve static files from 'public' folder (your original interface)
+// Serve static files (if you have a public folder)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// QR endpoint – if you want it separately
+// Main page — WhatsApp Web style QR
+app.get('/', (req, res) => {
+  const status = connectionStatus;
+  const qr = qrDataUri;
+
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Bot</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0b141a;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
+    }
+    .container {
+      background: #1a2c32;
+      border-radius: 20px;
+      padding: 40px 50px;
+      max-width: 480px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .header img {
+      width: 40px;
+      height: 40px;
+    }
+    .header h1 {
+      color: #fff;
+      font-weight: 300;
+      font-size: 28px;
+      letter-spacing: 0.5px;
+    }
+    .qr-box {
+      background: #fff;
+      padding: 20px;
+      border-radius: 16px;
+      margin: 20px 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 220px;
+    }
+    .qr-box img {
+      width: 200px;
+      height: 200px;
+      display: block;
+    }
+    .status {
+      color: #d1e0e6;
+      font-size: 16px;
+      margin: 12px 0 8px;
+    }
+    .status span {
+      font-weight: 600;
+      color: #25D366;
+    }
+    .sub {
+      color: #7a8f99;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .footer {
+      margin-top: 25px;
+      border-top: 1px solid #2d4a54;
+      padding-top: 20px;
+      color: #7a8f99;
+      font-size: 13px;
+    }
+    .footer a {
+      color: #25D366;
+      text-decoration: none;
+    }
+    .connected {
+      color: #25D366;
+      font-weight: 600;
+    }
+    .btn {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 8px 20px;
+      background: #25D366;
+      color: #fff;
+      border: none;
+      border-radius: 20px;
+      font-size: 14px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .btn:hover { background: #1ebe5c; }
+    .spinner {
+      display: none;
+      margin: 10px auto;
+      width: 30px;
+      height: 30px;
+      border: 3px solid #2d4a54;
+      border-top: 3px solid #25D366;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <!-- WhatsApp icon SVG -->
+      <svg viewBox="0 0 24 24" width="40" height="40" fill="#25D366">
+        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+      </svg>
+      <h1>WhatsApp Bot</h1>
+    </div>
+
+    <div class="qr-box">
+      ${qr ? `<img src="${qr}" alt="QR Code" />` : `<div class="spinner" style="display:block;"></div><div style="color:#7a8f99;">Loading QR...</div>`}
+    </div>
+
+    <div class="status">
+      Status: <span id="statusText">${status}</span>
+    </div>
+
+    ${status === 'connected' ? `<div class="status connected">✅ Device linked — bot is active</div>` : `<div class="sub">Scan the QR with your WhatsApp mobile app</div>`}
+
+    <div style="margin-top: 12px;">
+      <a href="/status" class="btn">Check Status</a>
+    </div>
+
+    <div class="footer">
+      v${VERSION} &mdash; <a href="https://github.com/abbylukwa/whatsapp-qr-app" target="_blank">GitHub</a>
+    </div>
+  </div>
+
+  <script>
+    // Auto-refresh every 5 seconds
+    setTimeout(() => { location.reload(); }, 5000);
+  </script>
+</body>
+</html>
+  `;
+  res.send(html);
+});
+
+// QR only endpoint
 app.get('/qr', (req, res) => {
   if (qrDataUri) {
-    res.send(`
-      <html><head><title>QR</title></head>
-      <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#0a0a0a;">
-        <div style="text-align:center;background:#1a1a1a;padding:40px;border-radius:20px;">
-          <h1 style="color:#fff;">Scan QR</h1>
-          <img src="${qrDataUri}" style="border-radius:10px;border:2px solid #25D366;background:white;padding:10px;" />
-          <p style="color:#888;">Open WhatsApp → Settings → Linked Devices</p>
-        </div>
-      </body>
-    `);
+    res.send(`<img src="${qrDataUri}" />`);
   } else {
-    res.send('<h1>Waiting for QR...</h1>');
+    res.send('Waiting for QR...');
   }
 });
 
-// Root: serve your static index.html if exists, else show QR or status
-app.get('/', (req, res) => {
-  // If you have a public/index.html, it will be served automatically.
-  // Otherwise, show a simple status.
-  if (qrDataUri) {
-    res.send(`
-      <html><head><title>WhatsApp Bot</title></head>
-      <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#0a0a0a;font-family:sans-serif;">
-        <div style="text-align:center;background:#1a1a1a;padding:40px;border-radius:20px;border:1px solid #333;">
-          <h1 style="color:#fff;">🤖 WhatsApp Bot</h1>
-          <p style="color:#888;">Status: ${connectionStatus}</p>
-          <div style="margin:20px 0;">
-            <img src="${qrDataUri}" style="border-radius:10px;border:2px solid #25D366;background:white;padding:10px;width:200px;height:200px;" />
-          </div>
-          <p style="color:#888;">Scan to link your device</p>
-        </div>
-      </body>
-    `);
-  } else {
-    res.send(`<h1>Status: ${connectionStatus}</h1><p>Waiting for QR...</p>`);
-  }
-});
-
-// Health check
+// Status API
 app.get('/status', (req, res) => {
   res.json({
     status: connectionStatus,
@@ -1091,7 +1215,7 @@ app.get('/status', (req, res) => {
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('[HTTP] Server running on port ' + PORT);
-  console.log('[HTTP] Open http://localhost:' + PORT + ' to see QR');
+  console.log('[HTTP] Open http://localhost:' + PORT);
 });
 
 loadJoinedGroups();

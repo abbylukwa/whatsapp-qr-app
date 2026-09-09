@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-echo "=== Build v22.0 ==="
+echo "=== Build v22.1 ==="
 if command -v yt-dlp &> /dev/null; then
   echo "yt-dlp already installed"
 else

@@ -51,7 +51,7 @@ const HOW_ARE_YOU_RESPONSES = [
 ];
 
 let sock = null;
-let qrCodeData = null;
+let qrDataUri = null;
 let connectionStatus = 'disconnected';
 let reconnectAttempts = 0;
 let lastConnectedAt = 0;
@@ -911,7 +911,13 @@ async function startSock() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
-      qrCodeData = qr;
+      // Convert raw QR to data URI
+      try {
+        qrDataUri = await QRCode.toDataURL(qr);
+        console.log('[QR] Generated data URI');
+      } catch (e) {
+        console.error('[QR] Failed to generate data URI:', e.message);
+      }
     }
     if (connection === 'open') {
       connectionStatus = 'connected';
@@ -1024,18 +1030,23 @@ async function startSock() {
   });
 }
 
+// ============================
+// EXPRESS SERVER
+// ============================
 const app = express();
-app.use(express.json());
+
+// Serve static files from 'public' folder (your original interface)
 app.use(express.static(path.join(__dirname, 'public')));
 
+// QR endpoint – if you want it separately
 app.get('/qr', (req, res) => {
-  if (qrCodeData) {
+  if (qrDataUri) {
     res.send(`
       <html><head><title>QR</title></head>
       <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#0a0a0a;">
         <div style="text-align:center;background:#1a1a1a;padding:40px;border-radius:20px;">
           <h1 style="color:#fff;">Scan QR</h1>
-          <img src="data:image/png;base64,${qrCodeData}" style="border-radius:10px;border:2px solid #25D366;background:white;padding:10px;" />
+          <img src="${qrDataUri}" style="border-radius:10px;border:2px solid #25D366;background:white;padding:10px;" />
           <p style="color:#888;">Open WhatsApp → Settings → Linked Devices</p>
         </div>
       </body>
@@ -1045,7 +1056,31 @@ app.get('/qr', (req, res) => {
   }
 });
 
+// Root: serve your static index.html if exists, else show QR or status
 app.get('/', (req, res) => {
+  // If you have a public/index.html, it will be served automatically.
+  // Otherwise, show a simple status.
+  if (qrDataUri) {
+    res.send(`
+      <html><head><title>WhatsApp Bot</title></head>
+      <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#0a0a0a;font-family:sans-serif;">
+        <div style="text-align:center;background:#1a1a1a;padding:40px;border-radius:20px;border:1px solid #333;">
+          <h1 style="color:#fff;">🤖 WhatsApp Bot</h1>
+          <p style="color:#888;">Status: ${connectionStatus}</p>
+          <div style="margin:20px 0;">
+            <img src="${qrDataUri}" style="border-radius:10px;border:2px solid #25D366;background:white;padding:10px;width:200px;height:200px;" />
+          </div>
+          <p style="color:#888;">Scan to link your device</p>
+        </div>
+      </body>
+    `);
+  } else {
+    res.send(`<h1>Status: ${connectionStatus}</h1><p>Waiting for QR...</p>`);
+  }
+});
+
+// Health check
+app.get('/status', (req, res) => {
   res.json({
     status: connectionStatus,
     uptime: Math.floor((Date.now() - botStartTime) / 1000),
@@ -1056,7 +1091,7 @@ app.get('/', (req, res) => {
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('[HTTP] Server running on port ' + PORT);
-  console.log('[HTTP] QR: http://localhost:' + PORT + '/qr');
+  console.log('[HTTP] Open http://localhost:' + PORT + ' to see QR');
 });
 
 loadJoinedGroups();

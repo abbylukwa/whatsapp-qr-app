@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot-fixed",
   "version": "23.0.0",
-  "description": "WhatsApp Broadcast Bot — DMs & Groups separately/jointly, 5K msg/min rate limit, advertisement support",
+  "description": "WhatsApp Broadcast Bot \u2014 DMs & Groups separately/jointly, 5K msg/min, ads, real Shona +18 slang",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

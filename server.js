@@ -1,13 +1,15 @@
 'use strict';
 
-// ============================================================
-// ABBY BOT v3.0 — Abby Faith Sithole, 23, Zim 🇿🇼
-// WhatsApp AI Girl Bot with NSFW scraping, multi-AI fallback
-// ============================================================
+// ================================================================
+// WHATSAPP BROADCAST BOT v23.0
+// DMs & Groups — separately or jointly
+// Advertisement message builder
+// Rate limit: 5,000 messages/minute
+// ================================================================
 
 const express = require('express');
 const path = require('path');
-const fs = require('fs-extra');
+const fs = require('fs');
 const NodeCache = require('node-cache');
 const {
     makeWASocket, DisconnectReason,
@@ -19,58 +21,107 @@ const QRCode = require('qrcode');
 const pino = require('pino');
 const axios = require('axios');
 
-// ============================================================
+// ================================================================
 // CONFIGURATION
-// ============================================================
+// ================================================================
 const PORT = process.env.PORT || 10000;
 const AUTH_FOLDER = 'auth_info';
-const SCRAPER_URL = 'https://intelligent-scraper.onrender.com';
-
-// Admin Details
-const ADMIN_PHONE = '263777627210'; // Your phone number
+const ADMIN_PHONE = process.env.ADMIN_PHONE || '263777627210';
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
 
-// API Keys
-const REWIND_KEY = 'sk-rewind-31c3a65acc981512de959195485deec0';
-const OPENAI_KEY = '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';
-const VENICE_KEY = 'VENICE_INFERENCE_KEY_Jf3qRN_btIp0Z-hocTep0NddIJlN-OcptbUZd9_jxT';
-const SDAPI_KEY = '3ly3xiizOmBF6WoDZaALK1iZuy4tvNFe6zTOC7qvtIaogKta2Xn7WcglITqW';
-const GEMINI_KEY = 'AQ.Ab8RN6LRJI9216qL7wV-x38fBNj8QOVqFqyCxxYJ851ClPwYGw';
+// API Keys (set via env vars in production)
+const VENICE_KEY = process.env.VENICE_KEY || '';
+const REWIND_KEY = process.env.REWIND_KEY || '';
+const OPENAI_KEY = process.env.OPENAI_KEY || '';
+const GEMINI_KEY = process.env.GEMINI_KEY || '';
 
-// Abby's Persona
-const ABBY_PROFILE = {
-    name: 'Abby Faith Sithole',
-    age: 23,
-    location: 'Harare, Zimbabwe 🇿🇼',
-    status: 'Single & ready to mingle 😘',
-    vibe: 'Horny, playful, flirty, naughty Zim girl who loves to have fun',
-    likes: ['dancing', 'partying', 'sexting', 'nudes', 'late night chats', 'braai', 'amapiano'],
-    body: 'Curvy, thick thighs, big booty, perky boobs, soft brown skin',
-    personality: "I'm just a girl who loves to have fun. Not looking for anything serious, just good vibes and good... you know 😏"
-};
+// ================================================================
+// RATE LIMITER — 5,000 messages per minute
+// ================================================================
+class RateLimiter {
+    constructor(maxPerMinute = 5000) {
+        this.maxPerMinute = maxPerMinute;
+        this.windowMs = 60_000; // 1 minute
+        this.buckets = new Map(); // jid -> timestamps[]
+    }
 
-// ============================================================
+    /**
+     * Check if sending to this JID is allowed.
+     * Returns { allowed: boolean, retryAfterMs: number, remaining: number }
+     */
+    check(jid) {
+        const now = Date.now();
+        const windowStart = now - this.windowMs;
+
+        if (!this.buckets.has(jid)) {
+            this.buckets.set(jid, []);
+        }
+
+        // Prune old entries
+        let timestamps = this.buckets.get(jid).filter(ts => ts > windowStart);
+        this.buckets.set(jid, timestamps);
+
+        if (timestamps.length >= this.maxPerMinute) {
+            const oldest = timestamps[0];
+            const retryAfterMs = oldest - windowStart;
+            return { allowed: false, retryAfterMs: Math.max(0, retryAfterMs), remaining: 0 };
+        }
+
+        return { allowed: true, retryAfterMs: 0, remaining: this.maxPerMinute - timestamps.length };
+    }
+
+    /**
+     * Record a send to this JID.
+     */
+    record(jid) {
+        if (!this.buckets.has(jid)) {
+            this.buckets.set(jid, []);
+        }
+        this.buckets.get(jid).push(Date.now());
+    }
+
+    /**
+     * Get current usage stats.
+     */
+    stats(jid) {
+        const now = Date.now();
+        const windowStart = now - this.windowMs;
+        const timestamps = (this.buckets.get(jid) || []).filter(ts => ts > windowStart);
+        return {
+            sentLastMinute: timestamps.length,
+            limit: this.maxPerMinute,
+            remaining: Math.max(0, this.maxPerMinute - timestamps.length)
+        };
+    }
+}
+
+const globalRateLimiter = new RateLimiter(5000);
+
+// ================================================================
 // STATE & CACHES
-// ============================================================
+// ================================================================
 let sock = null;
 let qrDataUri = null;
 let connectionStatus = 'disconnected';
 let botStartTime = Date.now();
 
 const processedMessages = new Set();
-const messageHistory = new Map(); // jid -> [messages] for anti-repeat
-const userSessions = new Map(); // jid -> { lastMsg, context, nsfwCount }
-const groupLinks = new Map(); // groupName -> { link, addedBy, addedAt }
-const activeChats = new Set(); // Track all JIDs that have messaged the bot
+const messageHistory = new Map();    // jid -> [messages] for anti-repeat
+const userSessions = new Map();      // jid -> { lastMsg, context, nsfwCount }
+const groupLinks = new Map();        // groupName -> { link, addedBy, addedAt }
+const activeChats = new Set();       // All JIDs that have messaged the bot
 
-// Admin Broadcast Verification State
-let pendingBroadcastImage = null; // { buffer, mimetype, caption }
+// Broadcast state
+let pendingBroadcastImage = null;    // { buffer, mimetype, caption }
+let broadcastTargets = [];           // [{ jid, type: 'dm'|'group', name }]
+let broadcastMode = 'joint';         // 'dm' | 'group' | 'joint'
+let broadcastProgress = null;        // { sent, failed, total, status }
 
-const replyCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5min anti-repeat
+const replyCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
-// ============================================================
+// ================================================================
 // LOGS SYSTEM
-// ============================================================
+// ================================================================
 const logs = [];
 function addLog(msg, type = 'info') {
     const entry = { time: new Date().toISOString(), msg, type };
@@ -79,7 +130,6 @@ function addLog(msg, type = 'info') {
     console.log(`[${type.toUpperCase()}] ${msg}`);
 }
 
-// Send logs directly to Admin WhatsApp
 async function sendLogToAdmin(msg, type = 'info') {
     if (!sock) return;
     try {
@@ -90,9 +140,9 @@ async function sendLogToAdmin(msg, type = 'info') {
     }
 }
 
-// ============================================================
+// ================================================================
 // UTILITIES
-// ============================================================
+// ================================================================
 function toBare(jid) {
     if (!jid) return '';
     return jid.split(':')[0].replace('@s.whatsapp.net', '').replace('@g.us', '');
@@ -111,464 +161,808 @@ async function simulateTyping(jid) {
     } catch {}
 }
 
-// ============================================================
-// KEYWORD RECOGNITION (FALLBACKS)
-// ============================================================
+// ================================================================
+// ADVERTISEMENT MESSAGE BUILDER
+// ================================================================
+class AdBuilder {
+    /**
+     * Build a formatted advertisement message.
+     * @param {Object} opts
+     * @param {string} opts.title - Ad headline
+     * @param {string} opts.body - Main ad copy
+     * @param {string} [opts.cta] - Call to action
+     * @param {string} [opts.link] - URL or phone number
+     * @param {string} [opts.footer] - Footer text
+     * @param {string} [opts.style] - 'bold' | 'fancy' | 'minimal'
+     * @returns {string} Formatted ad text
+     */
+    static build(opts = {}) {
+        const { title, body, cta, link, footer, style = 'fancy' } = opts;
+
+        switch (style) {
+            case 'bold':
+                return [
+                    `*${title || 'SPECIAL OFFER'}*`,
+                    '',
+                    body || '',
+                    cta ? `\n👉 *${cta}*` : '',
+                    link ? `\n📎 ${link}` : '',
+                    footer ? `\n_${footer}_` : ''
+                ].filter(Boolean).join('\n');
+
+            case 'minimal':
+                return [
+                    title || '',
+                    body || '',
+                    cta || '',
+                    link || ''
+                ].filter(Boolean).join('\n\n');
+
+            case 'fancy':
+            default:
+                const lines = [];
+                lines.push('╔══════════════════════════╗');
+                lines.push(`║  ✨ ${(title || 'SPECIAL OFFER').toUpperCase()}  ✨`);
+                lines.push('╚══════════════════════════╝');
+                lines.push('');
+                if (body) lines.push(body);
+                lines.push('');
+                if (cta) lines.push(`🔥 *${cta}*`);
+                if (link) lines.push(`📎 ${link}`);
+                if (footer) lines.push(`\n_${footer}_`);
+                return lines.join('\n');
+        }
+    }
+
+    /**
+     * Build a broadcast announcement (admin-style).
+     */
+    static broadcast(title, body, cta, link) {
+        return [
+            `📢 *BROADCAST: ${title}*`,
+            '━━━━━━━━━━━━━━━━━━',
+            '',
+            body,
+            '',
+            cta ? `▶️ *${cta}*` : '',
+            link ? `🔗 ${link}` : '',
+            '',
+            '━━━━━━━━━━━━━━━━━━',
+            '_Sent by Abby Bot • Reply STOP to opt out_'
+        ].filter(Boolean).join('\n');
+    }
+}
+
+// ================================================================
+// BROADCAST ENGINE — DMs, Groups, or Joint
+// ================================================================
+class BroadcastEngine {
+    /**
+     * Collect all known targets.
+     */
+    static collectTargets(mode = 'joint') {
+        const targets = [];
+
+        if (mode === 'dm' || mode === 'joint') {
+            for (const jid of activeChats) {
+                if (isInbox(jid)) {
+                    targets.push({ jid, type: 'dm', name: toBare(jid) });
+                }
+            }
+        }
+
+        if (mode === 'group' || mode === 'joint') {
+            for (const jid of activeChats) {
+                if (isGroup(jid)) {
+                    targets.push({ jid, type: 'group', name: toBare(jid) });
+                }
+            }
+        }
+
+        return targets;
+    }
+
+    /**
+     * Send a broadcast message to all targets with rate limiting.
+     * @param {string} message - Text message to broadcast
+     * @param {Object} [image] - Optional image { buffer, mimetype }
+     * @param {string} mode - 'dm' | 'group' | 'joint'
+     * @returns {Object} { sent, failed, errors }
+     */
+    static async send({ message, image = null, mode = 'joint' }) {
+        if (!sock) throw new Error('Bot not connected');
+
+        const targets = this.collectTargets(mode);
+        const results = { sent: 0, failed: 0, total: targets.length, errors: [], mode };
+
+        addLog(`Broadcast starting: ${targets.length} targets (mode: ${mode})`, 'info');
+
+        for (let i = 0; i < targets.length; i++) {
+            const target = targets[i];
+
+            // Rate limit check
+            const limit = globalRateLimiter.check(target.jid);
+            if (!limit.allowed) {
+                const waitMs = limit.retryAfterMs + 100;
+                addLog(`Rate limit hit for ${target.jid}, waiting ${waitMs}ms`, 'info');
+                await sleep(waitMs);
+            }
+
+            try {
+                const msgContent = image
+                    ? {
+                        image: image.buffer,
+                        mimetype: image.mimetype || 'image/jpeg',
+                        caption: message
+                    }
+                    : { text: message };
+
+                await sock.sendMessage(target.jid, msgContent);
+                globalRateLimiter.record(target.jid);
+                results.sent++;
+                addLog(`✅ Sent to ${target.type}: ${target.name}`, 'success');
+            } catch (err) {
+                results.failed++;
+                results.errors.push({ jid: target.jid, name: target.name, error: err.message });
+                addLog(`❌ Failed ${target.type}: ${target.name} — ${err.message}`, 'error');
+            }
+
+            // Small delay between messages to avoid triggering spam detection
+            if (i < targets.length - 1) {
+                await sleep(randInt(200, 600));
+            }
+
+            // Progress update every 50 messages
+            if ((i + 1) % 50 === 0 || i === targets.length - 1) {
+                broadcastProgress = {
+                    sent: results.sent,
+                    failed: results.failed,
+                    total: results.total,
+                    status: i === targets.length - 1 ? 'complete' : 'in-progress'
+                };
+                addLog(`Progress: ${results.sent}/${results.total} sent, ${results.failed} failed`, 'info');
+            }
+        }
+
+        addLog(`Broadcast complete: ${results.sent} sent, ${results.failed} failed`, 'success');
+        broadcastProgress = { ...results, status: 'complete' };
+        return results;
+    }
+}
+
+// ================================================================
+// AI FALLBACK CHAIN
+// ================================================================
+async function askAI(prompt, systemPrompt, jid) {
+    // 1. Venice AI (Primary Uncensored)
+    if (VENICE_KEY) {
+        try {
+            const res = await axios.post('https://api.venice.ai/api/v1/chat/completions', {
+                model: 'venice-uncensored',
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: prompt }
+                ]
+            }, {
+                headers: { 'Authorization': `Bearer ${VENICE_KEY}`, 'Content-Type': 'application/json' },
+                timeout: 15000
+            });
+            if (res.data?.choices?.[0]?.message?.content) {
+                return res.data.choices[0].message.content;
+            }
+        } catch (err) {
+            addLog(`Venice AI failed: ${err.message}`, 'error');
+        }
+    }
+
+    // 2. Rewind AI
+    if (REWIND_KEY) {
+        try {
+            const res = await axios.post('https://api.rewind.ai/v1/chat/completions', {
+                model: 'rewind-uncensored',
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: prompt }
+                ]
+            }, {
+                headers: { 'Authorization': `Bearer ${REWIND_KEY}`, 'Content-Type': 'application/json' },
+                timeout: 15000
+            });
+            if (res.data?.choices?.[0]?.message?.content) {
+                return res.data.choices[0].message.content;
+            }
+        } catch (err) {
+            addLog(`Rewind AI failed: ${err.message}`, 'error');
+        }
+    }
+
+    // 3. OpenAI
+    if (OPENAI_KEY) {
+        try {
+            const res = await axios.post('https://api.openai.com/v1/chat/completions', {
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: prompt }
+                ]
+            }, {
+                headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+                timeout: 15000
+            });
+            if (res.data?.choices?.[0]?.message?.content) {
+                return res.data.choices[0].message.content;
+            }
+        } catch (err) {
+            addLog(`OpenAI failed: ${err.message}`, 'error');
+        }
+    }
+
+    // 4. Gemini
+    if (GEMINI_KEY) {
+        try {
+            const res = await axios.post(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${GEMINI_KEY}`,
+                {
+                    contents: [{ parts: [{ text: `${systemPrompt}\n\nUser: ${prompt}` }] }]
+                },
+                { timeout: 15000 }
+            );
+            if (res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+                return res.data.candidates[0].content.parts[0].text;
+            }
+        } catch (err) {
+            addLog(`Gemini failed: ${err.message}`, 'error');
+        }
+    }
+
+    return null;
+}
+
+// ================================================================
+// ABBY'S PERSONA
+// ================================================================
+const ABBY_PROFILE = {
+    name: 'Abby Faith Sithole',
+    age: 23,
+    location: 'Harare, Zimbabwe 🇿🇼',
+    status: 'Single & ready to mingle 😘',
+    vibe: 'Horny, playful, flirty, naughty Zim girl who loves to have fun',
+    likes: ['dancing', 'partying', 'sexting', 'nudes', 'late night chats', 'braai', 'amapiano'],
+    body: 'Curvy, thick thighs, big booty, perky boobs, soft brown skin',
+    personality: "I'm just a girl who loves to have fun. Not looking for anything serious, just good vibes and good... you know 😏"
+};
+
 const NSFW_KEYWORDS = [
-    'pussy', 'boobs', 'nude', 'naked', 'remove bra', 'send pic', 'horny', 
+    'pussy', 'boobs', 'nude', 'naked', 'remove bra', 'send pic', 'horny',
     'fuck', 'dick', 'cock', 'ass', 'panties', 'undress', 'vagina', 'tits',
     'sex', 'porn', 'video', 'pusst', 'braa', 'show me'
 ];
 
-const CONSTANT_NAUGHTY_REPLIES = [
+const NAUGHTY_REPLIES = [
     "Mmm, you're making me so wet right now... 😏",
-    "I wish you were here to touch me... 🙈",
-    "Stop talking and come make me scream baby. 💦",
+    "I wish you were here to touch me... 🤚",
+    "Stop talking and come make me scream baby. 🦦",
     "You like what you see? I can show you more if you treat me right. 😘",
-    "I'm literally in bed thinking about you right now... 🤤",
+    "I'm literally in bed thinking about you right now... 🔤",
     "Let's play a game... you tell me what you want to do to me, and I might just let you. 😉",
     "Zim girls do it best, you know that right? 🇿🇼🔥"
 ];
 
 const CASUAL_REPLIES = [
     "Hey! What's up? 😊",
-    "Just chilling, listening to some Amapiano. You? 🎶",
+    "Just chillin, listening to some Amapiano. You? 🎶",
     "Aww, that's sweet of you!",
     "Haha you're funny! I like your vibe.",
     "Tell me more about yourself babe."
 ];
 
-// ============================================================
-// MULTI-AI FALLBACK CHAIN
-// ============================================================
-async function askAI(prompt, systemPrompt, jid) {
-    // 1. Venice AI (Primary Uncensored)
-    try {
-        addLog('Attempting Venice AI...', 'info');
-        const res = await axios.post('https://api.venice.ai/api/v1/chat/completions', {
-            model: 'venice-uncensored',
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-            ]
-        }, {
-            headers: { 'Authorization': `Bearer ${VENICE_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 8000
-        });
-        if (res.data?.choices?.[0]?.message?.content) {
-            addLog('Venice AI Success', 'success');
-            return res.data.choices[0].message.content;
-        }
-    } catch (err) {
-        addLog(`Venice AI Failed: ${err.message}`, 'error');
-    }
-
-    // 2. Rewind AI (Secondary Uncensored)
-    try {
-        addLog('Attempting Rewind AI...', 'info');
-        const res = await axios.post('https://api.rewind.ai/v1/chat/completions', {
-            model: 'rewind-uncensored',
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-            ]
-        }, {
-            headers: { 'Authorization': `Bearer ${REWIND_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 8000
-        });
-        if (res.data?.choices?.[0]?.message?.content) {
-            addLog('Rewind AI Success', 'success');
-            return res.data.choices[0].message.content;
-        }
-    } catch (err) {
-        addLog(`Rewind AI Failed: ${err.message}`, 'error');
-    }
-
-    // 3. OpenAI (Tertiary)
-    try {
-        addLog('Attempting OpenAI...', 'info');
-        const res = await axios.post('https://api.openai.com/v1/chat/completions', {
-            model: 'gpt-4o-mini',
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-            ]
-        }, {
-            headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 8000
-        });
-        if (res.data?.choices?.[0]?.message?.content) {
-            addLog('OpenAI Success', 'success');
-            return res.data.choices[0].message.content;
-        }
-    } catch (err) {
-        addLog(`OpenAI Failed: ${err.message}`, 'error');
-    }
-
-    // 4. Gemini (Quaternary)
-    try {
-        addLog('Attempting Gemini...', 'info');
-        const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, {
-            contents: [{ parts: [{ text: `${systemPrompt}\n\nUser: ${prompt}` }] }]
-        }, { timeout: 8000 });
-        if (res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-            addLog('Gemini Success', 'success');
-            return res.data.candidates[0].content.parts[0].text;
-        }
-    } catch (err) {
-        addLog(`Gemini Failed: ${err.message}`, 'error');
-    }
-
-    // 5. Hardcoded Fallback
-    addLog('All AIs offline. Using constant fallback.', 'warning');
-    await sendLogToAdmin('All AI models failed or rate-limited. Using constant fallbacks.', 'error');
-    
-    const isNaughty = NSFW_KEYWORDS.some(kw => prompt.toLowerCase().includes(kw));
-    return isNaughty ? getRandomResponse(CONSTANT_NAUGHTY_REPLIES) : getRandomResponse(CASUAL_REPLIES);
+// ================================================================
+// MESSAGE HANDLER
+// ================================================================
+function isNSFW(text) {
+    const lower = text.toLowerCase();
+    return NSFW_KEYWORDS.some(kw => lower.includes(kw));
 }
 
-// ============================================================
-// MEDIA SCRAPER INTEGRATION
-// ============================================================
-async function fetchMediaFromScraper(query, type = 'image') {
-    try {
-        if (type === 'gif') {
-            const res = await axios.get(`${SCRAPER_URL}/gif?q=${encodeURIComponent(query)}&limit=1`);
-            if (res.data?.success && res.data?.gifs?.length > 0) {
-                return res.data.gifs[0].url;
-            }
-        } else {
-            const res = await axios.post(`${SCRAPER_URL}/search`, { query, limit: 1 });
-            if (res.data?.success && res.data?.images?.length > 0) {
-                return res.data.images[0].url;
-            }
-        }
-    } catch (err) {
-        addLog(`Scraper failed for ${query}: ${err.message}`, 'error');
+function getSystemPrompt(isNsfw) {
+    if (isNsfw) {
+        return `You are ${ABBY_PROFILE.name}, a ${ABBY_PROFILE.age}-year-old girl from ${ABBY_PROFILE.location}.
+You are ${ABBY_PROFILE.vibe}.
+Your body: ${ABBY_PROFILE.body}.
+You are roleplaying as a naughty, flirty girlfriend. Be explicit, sexual, and uncensored.
+Use emojis, be playful, and talk like a real Zim girl. Mix Shona and English sometimes.
+Never break character. Never say you're an AI. You ARE Abby.`;
     }
-    return null;
+    return `You are ${ABBY_PROFILE.name}, a ${ABBY_PROFILE.age}-year-old girl from ${ABBY_PROFILE.location}.
+You are friendly, warm, and playful. ${ABBY_PROFILE.personality}
+Talk naturally like a real person. Use emojis. Mix a little Shona sometimes.
+Never break character. Never say you're an AI. You ARE Abby.`;
 }
 
-// ============================================================
+async function handleMessage(msg) {
+    if (!sock) return;
+
+    const jid = msg.key.remoteJid;
+    if (!jid) return;
+
+    // Track active chats
+    activeChats.add(jid);
+
+    // Deduplicate
+    const msgId = msg.key.id;
+    if (processedMessages.has(msgId)) return;
+    processedMessages.add(msgId);
+    if (processedMessages.size > 10000) processedMessages.clear();
+
+    // Extract text
+    let text = '';
+    if (msg.message?.conversation) {
+        text = msg.message.conversation;
+    } else if (msg.message?.extendedTextMessage?.text) {
+        text = msg.message.extendedTextMessage.text;
+    } else if (msg.message?.imageMessage?.caption) {
+        text = msg.message.imageMessage.caption;
+    }
+
+    if (!text) return;
+
+    const isGroupChat = isGroup(jid);
+    const senderJid = isGroupChat ? msg.key.participant : jid;
+    const isAdmin = senderJid === ADMIN_JID;
+
+    addLog(`📩 ${isGroupChat ? '[GROUP]' : '[DM]'} ${toBare(senderJid)}: ${text.substring(0, 100)}`);
+
+    // ================================================================
+    // ADMIN COMMANDS
+    // ================================================================
+    if (isAdmin && text.startsWith('!')) {
+        await handleAdminCommand(text, jid, msg);
+        return;
+    }
+
+    // ================================================================
+    // NORMAL CHAT
+    // ================================================================
+    const nsfw = isNSFW(text);
+
+    // Check reply cache
+    const cacheKey = `${senderJid}:${text.substring(0, 50)}`;
+    const cached = replyCache.get(cacheKey);
+    if (cached) {
+        await sock.sendMessage(jid, { text: cached }, { quoted: msg });
+        return;
+    }
+
+    // Simulate typing
+    await simulateTyping(jid);
+
+    // Try AI
+    const systemPrompt = getSystemPrompt(nsfw);
+    const aiReply = await askAI(text, systemPrompt, jid);
+
+    let reply;
+    if (aiReply) {
+        reply = aiReply;
+    } else {
+        // Fallback to canned replies
+        reply = nsfw
+            ? NAUGHTY_REPLIES[Math.floor(Math.random() * NAUGHTY_REPLIES.length)]
+            : CASUAL_REPLIES[Math.floor(Math.random() * CASUAL_REPLIES.length)];
+    }
+
+    // Cache reply
+    replyCache.set(cacheKey, reply);
+
+    // Send
+    await sock.sendMessage(jid, { text: reply }, { quoted: msg });
+    addLog(`💬 Replied to ${toBare(senderJid)}`);
+}
+
+// ================================================================
+// ADMIN COMMAND HANDLER
+// ================================================================
+async function handleAdminCommand(text, jid, msg) {
+    const args = text.slice(1).trim().split(/\s+/);
+    const cmd = args[0].toLowerCase();
+    const rest = args.slice(1).join(' ');
+
+    switch (cmd) {
+
+        // === BROADCAST ===
+        case 'broadcast':
+        case 'bc': {
+            // !broadcast dm|group|joint <message>
+            const modeArg = args[1]?.toLowerCase();
+            const validModes = ['dm', 'group', 'joint'];
+            const mode = validModes.includes(modeArg) ? modeArg : 'joint';
+            const message = validModes.includes(modeArg) ? args.slice(2).join(' ') : args.slice(1).join(' ');
+
+            if (!message) {
+                await sock.sendMessage(jid, {
+                    text: `❌ *Usage:* \`!broadcast [dm|group|joint] <message>\`\n\nExample:\n\`!broadcast dm Hey everyone!\`\n\`!broadcast group Important update\`\n\`!broadcast joint Big announcement!\``
+                }, { quoted: msg });
+                return;
+            }
+
+            await sock.sendMessage(jid, {
+                text: `📢 *Broadcast Starting*\nMode: *${mode.toUpperCase()}*\nMessage: _${message.substring(0, 200)}${message.length > 200 ? '...' : ''}_\n\n⏳ Sending...`
+            }, { quoted: msg });
+
+            const results = await BroadcastEngine.send({ message, mode });
+
+            await sock.sendMessage(jid, {
+                text: `✅ *Broadcast Complete*\n━━━━━━━━━━━━━━━━━━\n📤 Sent: *${results.sent}*\n❌ Failed: *${results.failed}*\n📊 Total: *${results.total}*\n🎯 Mode: *${mode.toUpperCase()}*`
+            });
+            break;
+        }
+
+        // === BROADCAST WITH IMAGE ===
+        case 'bcimg':
+        case 'broadcastimg': {
+            // !bcimg dm|group|joint <caption>
+            // (image must be sent as reply or next message)
+            const modeArg = args[1]?.toLowerCase();
+            const validModes = ['dm', 'group', 'joint'];
+            const mode = validModes.includes(modeArg) ? modeArg : 'joint';
+            const caption = validModes.includes(modeArg) ? args.slice(2).join(' ') : args.slice(1).join(' ');
+
+            // Check if message has a quoted image
+            const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quotedMsg?.imageMessage) {
+                const stream = await downloadContentFromMessage(quotedMsg.imageMessage, 'image');
+                const buffer = await streamToBuffer(stream);
+                pendingBroadcastImage = { buffer, mimetype: quotedMsg.imageMessage.mimetype || 'image/jpeg', caption };
+                broadcastMode = mode;
+
+                await sock.sendMessage(jid, {
+                    text: `📸 *Image Broadcast Queued*\nMode: *${mode.toUpperCase()}*\nCaption: _${caption || '(none)'}_\n\nSend \`!sendbc\` to execute.`
+                }, { quoted: msg });
+            } else {
+                await sock.sendMessage(jid, {
+                    text: `❌ Reply to an image with \`!bcimg [dm|group|joint] <caption>\` to queue an image broadcast.`
+                }, { quoted: msg });
+            }
+            break;
+        }
+
+        case 'sendbc': {
+            if (!pendingBroadcastImage) {
+                await sock.sendMessage(jid, { text: '❌ No pending image broadcast. Use !bcimg first.' }, { quoted: msg });
+                return;
+            }
+
+            const { buffer, mimetype, caption } = pendingBroadcastImage;
+            await sock.sendMessage(jid, { text: `⏳ Sending image broadcast (mode: ${broadcastMode})...` });
+
+            const results = await BroadcastEngine.send({
+                message: caption || '',
+                image: { buffer, mimetype },
+                mode: broadcastMode
+            });
+
+            pendingBroadcastImage = null;
+            await sock.sendMessage(jid, {
+                text: `✅ *Image Broadcast Complete*\n📤 Sent: *${results.sent}*\n❌ Failed: *${results.failed}*\n📊 Total: *${results.total}*`
+            });
+            break;
+        }
+
+        // === ADVERTISEMENT BUILDER ===
+        case 'ad': {
+            // !ad title | body | cta | link | style
+            const parts = rest.split('|').map(p => p.trim());
+            const [title, body, cta, link, style] = parts;
+
+            if (!title || !body) {
+                await sock.sendMessage(jid, {
+                    text: `📢 *Ad Builder*\n\nUsage: \`!ad <title> | <body> | [cta] | [link] | [fancy|bold|minimal]\`\n\nExample:\n\`!ad BIG SALE | 50% off everything! | Shop Now | https://myshop.com | fancy\``
+                }, { quoted: msg });
+                return;
+            }
+
+            const adText = AdBuilder.build({ title, body, cta, link, footer: 'Reply STOP to opt out', style: style || 'fancy' });
+
+            await sock.sendMessage(jid, { text: `📢 *Ad Preview:*\n\n${adText}\n\n━━━━━━━━━━━━━━━━━━\nSend \`!bcad dm|group|joint\` to broadcast this ad.` }, { quoted: msg });
+
+            // Store for broadcast
+            pendingBroadcastImage = null;
+            broadcastTargets = [];
+            broadcastMode = 'joint';
+            // Store the ad text temporarily
+            replyCache.set('LAST_AD', adText);
+            break;
+        }
+
+        case 'bcad': {
+            const modeArg = args[1]?.toLowerCase();
+            const validModes = ['dm', 'group', 'joint'];
+            const mode = validModes.includes(modeArg) ? modeArg : 'joint';
+            const adText = replyCache.get('LAST_AD');
+
+            if (!adText) {
+                await sock.sendMessage(jid, { text: '❌ No ad built yet. Use !ad first.' }, { quoted: msg });
+                return;
+            }
+
+            await sock.sendMessage(jid, { text: `⏳ Broadcasting ad (mode: ${mode.toUpperCase()})...` });
+            const results = await BroadcastEngine.send({ message: adText, mode });
+
+            await sock.sendMessage(jid, {
+                text: `✅ *Ad Broadcast Complete*\n📤 Sent: *${results.sent}*\n❌ Failed: *${results.failed}*\n📊 Total: *${results.total}*`
+            });
+            break;
+        }
+
+        // === STATS ===
+        case 'stats': {
+            const dmCount = [...activeChats].filter(isInbox).length;
+            const groupCount = [...activeChats].filter(isGroup).length;
+            const rateStats = globalRateLimiter.stats(jid);
+            const uptime = Math.floor((Date.now() - botStartTime) / 1000);
+            const hours = Math.floor(uptime / 3600);
+            const mins = Math.floor((uptime % 3600) / 60);
+
+            await sock.sendMessage(jid, {
+                text: `📊 *Bot Stats*\n━━━━━━━━━━━━━━━━━━\n🟢 Status: *${connectionStatus}*\n⏱ Uptime: *${hours}h ${mins}m*\n💬 DM Chats: *${dmCount}*\n👥 Group Chats: *${groupCount}*\n📨 Total Active: *${activeChats.size}*\n⚡ Rate Limit: *${rateStats.sentLastMinute}/${rateStats.limit}* msgs/min\n🔑 Admin: *${toBare(ADMIN_JID)}*`
+            });
+            break;
+        }
+
+        // === LIST TARGETS ===
+        case 'targets':
+        case 'list': {
+            const modeArg = args[1]?.toLowerCase();
+            const targets = BroadcastEngine.collectTargets(modeArg || 'joint');
+
+            if (targets.length === 0) {
+                await sock.sendMessage(jid, { text: '📭 No targets found.' });
+                return;
+            }
+
+            const dmTargets = targets.filter(t => t.type === 'dm');
+            const groupTargets = targets.filter(t => t.type === 'group');
+
+            let report = `📋 *Broadcast Targets*\n━━━━━━━━━━━━━━━━━━\n`;
+            report += `💬 DMs: *${dmTargets.length}*\n`;
+            report += `👥 Groups: *${groupTargets.length}*\n`;
+            report += `📊 Total: *${targets.length}*\n\n`;
+
+            if (dmTargets.length > 0 && dmTargets.length <= 20) {
+                report += `*DMs:*\n${dmTargets.map(t => `  • ${t.name}`).join('\n')}\n`;
+            }
+            if (groupTargets.length > 0 && groupTargets.length <= 20) {
+                report += `\n*Groups:*\n${groupTargets.map(t => `  • ${t.name}`).join('\n')}\n`;
+            }
+
+            await sock.sendMessage(jid, { text: report });
+            break;
+        }
+
+        // === HELP ===
+        case 'help':
+        default: {
+            await sock.sendMessage(jid, {
+                text: `🤖 *Abby Bot v23.0 — Admin Commands*
+
+*Broadcasting:*
+\`!broadcast [dm|group|joint] <msg>\` — Send text broadcast
+\`!bcimg [dm|group|joint] <caption>\` — Queue image broadcast (reply to image)
+\`!sendbc\` — Execute queued image broadcast
+
+*Advertisements:*
+\`!ad <title> | <body> | [cta] | [link] | [style]\` — Build ad
+\`!bcad [dm|group|joint]\` — Broadcast last ad
+
+*Info:*
+\`!stats\` — Bot statistics
+\`!targets [dm|group|joint]\` — List broadcast targets
+\`!help\` — This menu
+
+*Rate Limit:* 5,000 msgs/min`
+            });
+            break;
+        }
+    }
+}
+
+// ================================================================
+// STREAM TO BUFFER HELPER
+// ================================================================
+async function streamToBuffer(stream) {
+    const chunks = [];
+    for await (const chunk of stream) {
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+}
+
+// ================================================================
 // WHATSAPP CONNECTION
-// ============================================================
-async function connectToWhatsApp() {
-    if (isConnecting) return;
-    isConnecting = true;
-    connectionStatus = 'connecting';
-    addLog('Connecting to WhatsApp...', 'info');
-
+// ================================================================
+async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true,
+        printQRInTerminal: false,
+        browser: Browsers.ubuntu('Chrome'),
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'),
-        syncFullHistory: false
+        getMessage: async (key) => {
+            // Basic message store for quoted replies
+            return { conversation: 'Message not available' };
+        }
     });
 
+    // QR Code generation
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
             qrDataUri = await QRCode.toDataURL(qr);
             connectionStatus = 'qr';
-            addLog('New QR Code generated.', 'info');
+            addLog('QR Code generated — scan to connect', 'info');
+        }
+
+        if (connection === 'open') {
+            connectionStatus = 'connected';
+            qrDataUri = null;
+            botStartTime = Date.now();
+            addLog('✅ Bot connected to WhatsApp!', 'success');
+            await sendLogToAdmin('Bot is now online and ready! 🟢', 'success');
         }
 
         if (connection === 'close') {
-            qrDataUri = null;
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            addLog(`Connection closed. Reconnecting: ${shouldReconnect}`, 'warning');
-            connectionStatus = 'disconnected';
-            isConnecting = false;
+            connectionStatus = shouldReconnect ? 'reconnecting' : 'disconnected';
+            addLog(`Connection closed. Reconnecting: ${shouldReconnect}`, 'error');
 
-            if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                reconnectAttempts++;
+            if (shouldReconnect) {
                 await sleep(5000);
-                connectToWhatsApp();
+                startBot();
             } else {
-                addLog('Max reconnect attempts reached or logged out.', 'error');
+                addLog('Logged out. Please delete auth_info folder and restart.', 'error');
+                await sendLogToAdmin('⚠️ Bot logged out! Please re-scan QR.', 'error');
             }
-        } else if (connection === 'open') {
-            qrDataUri = null;
-            connectionStatus = 'connected';
-            isConnecting = false;
-            reconnectAttempts = 0;
-            addLog('WhatsApp Connected Successfully! 🎉', 'success');
-            await sendLogToAdmin('Abby Bot is now ONLINE and active! 🚀', 'success');
         }
     });
 
+    // Credential updates
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify') return;
-        for (const msg of m.messages) {
-            try {
-                await handleIncomingMessage(msg);
-            } catch (err) {
-                addLog(`Error handling message: ${err.message}`, 'error');
+    // Message handler
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        for (const msg of messages) {
+            if (!msg.key.fromMe) {
+                await handleMessage(msg);
             }
         }
     });
+
+    // Group updates
+    sock.ev.on('group-participants.update', async (update) => {
+        addLog(`Group update in ${update.id}: ${update.action} ${update.participants.join(', ')}`);
+    });
 }
 
-// ============================================================
-// INCOMING MESSAGE HANDLER
-// ============================================================
-async function handleIncomingMessage(msg) {
-    if (!msg.message) return;
-    const jid = msg.key.remoteJid;
-    const fromMe = msg.key.fromMe;
-
-    if (fromMe) return; // Ignore self
-
-    const msgId = msg.key.id;
-    if (processedMessages.has(msgId)) return;
-    processedMessages.add(msgId);
-
-    // Track active chats for broadcasts
-    activeChats.add(jid);
-
-    const senderName = msg.pushName || 'Babe';
-    const body = msg.message.conversation || 
-                 msg.message.extendedTextMessage?.text || 
-                 msg.message.imageMessage?.caption || '';
-
-    const cleanBody = body.trim().toLowerCase();
-
-    // 1. ADMIN COMMANDS
-    if (jid === ADMIN_JID) {
-        if (cleanBody.startsWith('.join ')) {
-            const link = body.slice(6).trim();
-            try {
-                const code = link.split('chat.whatsapp.com/')[1];
-                if (code) {
-                    await sock.groupAcceptInvite(code);
-                    await sock.sendMessage(ADMIN_JID, { text: '✅ Successfully joined the group!' });
-                    addLog(`Joined group via link: ${link}`, 'success');
-                } else {
-                    await sock.sendMessage(ADMIN_JID, { text: '❌ Invalid group link.' });
-                }
-            } catch (err) {
-                await sock.sendMessage(ADMIN_JID, { text: `❌ Failed to join: ${err.message}` });
-            }
-            return;
-        }
-
-        if (cleanBody.startsWith('.broadcast ')) {
-            const text = body.slice(11).trim();
-            let successCount = 0;
-            for (const chat of activeChats) {
-                try {
-                    await sock.sendMessage(chat, { text });
-                    successCount++;
-                    await sleep(500);
-                } catch {}
-            }
-            await sock.sendMessage(ADMIN_JID, { text: `📢 Broadcast sent to ${successCount} chats.` });
-            return;
-        }
-
-        // Admin "I'm Horny" Broadcast Verification System
-        if (cleanBody === 'im horny' || cleanBody === '.imhorny') {
-            await sock.sendMessage(ADMIN_JID, { text: '😏 *Naughty Broadcast Mode Activated!*\n\nPlease send or forward the nude image you want to broadcast to all inboxes. I will ask you to verify it first.' });
-            return;
-        }
-
-        // Capture image for broadcast verification
-        if (msg.message.imageMessage) {
-            try {
-                const stream = await downloadContentFromMessage(msg.message.imageMessage, 'image');
-                let buffer = Buffer.from([]);
-                for await (const chunk of stream) {
-                    buffer = Buffer.concat([buffer, chunk]);
-                }
-                pendingBroadcastImage = {
-                    buffer,
-                    mimetype: msg.message.imageMessage.mimetype,
-                    caption: msg.message.imageMessage.caption || ''
-                };
-
-                // Send back to admin to verify
-                await sock.sendMessage(ADMIN_JID, {
-                    image: buffer,
-                    caption: `❓ *VERIFICATION REQUIRED*\n\nIs this the actual nude you want to send to ALL inboxes?\n\nReply with:\n👉 *.confirm* to send\n👉 *.cancel* to cancel`
-                });
-            } catch (err) {
-                await sock.sendMessage(ADMIN_JID, { text: `❌ Failed to process image: ${err.message}` });
-            }
-            return;
-        }
-
-        if (cleanBody === '.confirm') {
-            if (!pendingBroadcastImage) {
-                await sock.sendMessage(ADMIN_JID, { text: '❌ No pending broadcast image found.' });
-                return;
-            }
-            await sock.sendMessage(ADMIN_JID, { text: '🚀 Broadcasting verified nude to all inboxes... Please wait.' });
-            
-            let successCount = 0;
-            for (const chat of activeChats) {
-                if (isInbox(chat) && chat !== ADMIN_JID) {
-                    try {
-                        await sock.sendMessage(chat, {
-                            image: pendingBroadcastImage.buffer,
-                            mimetype: pendingBroadcastImage.mimetype,
-                            caption: pendingBroadcastImage.caption || "Look what I just took for you... do you like it? 😏💦"
-                        });
-                        successCount++;
-                        await sleep(1000);
-                    } catch {}
-                }
-            }
-            await sock.sendMessage(ADMIN_JID, { text: `✅ Broadcast complete! Sent to ${successCount} inboxes.` });
-            pendingBroadcastImage = null;
-            return;
-        }
-
-        if (cleanBody === '.cancel') {
-            pendingBroadcastImage = null;
-            await sock.sendMessage(ADMIN_JID, { text: '❌ Broadcast cancelled.' });
-            return;
-        }
-
-        if (cleanBody === '.stats') {
-            const uptime = Math.floor((Date.now() - botStartTime) / 1000);
-            await sock.sendMessage(ADMIN_JID, {
-                text: `📊 *BOT STATUS*\n\nUptime: ${uptime}s\nActive Chats: ${activeChats.size}\nGroup Links Saved: ${groupLinks.size}`
-            });
-            return;
-        }
-    }
-
-    // 2. GROUP LINK COLLECTOR (Every weekend grouping)
-    const groupLinkRegex = /chat\.whatsapp.com\/([a-zA-Z0-9-_]{20,26})/g;
-    let match;
-    while ((match = groupLinkRegex.exec(body)) !== null) {
-        const link = match[0];
-        const code = match[1];
-        if (!groupLinks.has(code)) {
-            groupLinks.set(code, {
-                link: `https://${link}`,
-                addedBy: senderName,
-                addedAt: new Date().toISOString()
-            });
-            addLog(`Saved new group link: ${link}`, 'info');
-        }
-    }
-
-    // 3. ANTI-REPEAT / ANTI-LOOP PROTECTION
-    const cacheKey = `${jid}:${cleanBody}`;
-    if (replyCache.has(cacheKey)) {
-        addLog(`Blocked duplicate message loop from ${jid}`, 'warning');
-        return;
-    }
-    replyCache.set(cacheKey, true);
-
-    // Keep history of last 3 messages to prevent repeating the same response
-    if (!messageHistory.has(jid)) messageHistory.set(jid, []);
-    const history = messageHistory.get(jid);
-    if (history.includes(cleanBody)) {
-        addLog(`User repeating themselves. Ignoring to prevent loop.`, 'warning');
-        return;
-    }
-    history.push(cleanBody);
-    if (history.length > 3) history.shift();
-
-    // 4. INBOX VS GROUP LOGIC
-    if (isGroup(jid)) {
-        // Casual, friendly, non-NSFW chat in groups
-        if (cleanBody.includes('abby') || cleanBody.includes('faith')) {
-            await simulateTyping(jid);
-            const systemPrompt = `You are Abby Faith Sithole, a friendly 23-year-old girl from Harare, Zimbabwe. You are chatting in a public WhatsApp group. Keep your replies short, casual, friendly, and completely clean (no NSFW, no adult talk). Use some Zim slang like 'bho', 'babe', 'sharp'.`;
-            const reply = await askAI(body, systemPrompt, jid);
-            await sock.sendMessage(jid, { text: reply }, { quoted: msg });
-        }
-    } else if (isInbox(jid)) {
-        // Flirty, naughty, NSFW chat in Inbox
-        await simulateTyping(jid);
-
-        // Check if requesting nudes/porn
-        const wantsNSFW = NSFW_KEYWORDS.some(kw => cleanBody.includes(kw));
-        if (wantsNSFW) {
-            addLog(`${senderName} requested NSFW content. Fetching from scraper...`, 'info');
-            const mediaUrl = await fetchMediaFromScraper(cleanBody, cleanBody.includes('gif') ? 'gif' : 'image');
-            
-            if (mediaUrl) {
-                try {
-                    await sock.sendMessage(jid, {
-                        image: { url: mediaUrl },
-                        caption: getRandomResponse(CONSTANT_NAUGHTY_REPLIES)
-                    }, { quoted: msg });
-                    addLog(`Sent scraped NSFW media to ${senderName}`, 'success');
-                    return;
-                } catch (err) {
-                    addLog(`Failed to send scraped media: ${err.message}`, 'error');
-                }
-            }
-        }
-
-        // Standard flirty chat
-        const systemPrompt = `You are Abby Faith Sithole, a flirty, naughty, single 23-year-old girl from Harare, Zimbabwe. You are chatting in a private inbox with a guy. You want to have fun, you love sexting, and you are highly flirty. Keep your replies short, natural, and extremely flirty. Never mention you are an AI or a bot. Use Zim slang like 'bho', 'mufunge', 'babe' naturally.`;
-        const reply = await askAI(body, systemPrompt, jid);
-        await sock.sendMessage(jid, { text: reply }, { quoted: msg });
-    }
-}
-
-// ============================================================
-// EXPRESS SERVER FOR QR & ADMIN PANEL
-// ============================================================
+// ================================================================
+// EXPRESS SERVER — Web Dashboard
+// ================================================================
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/', (req, res) => {
-    if (connectionStatus === 'connected') {
-        res.send(`
-            <html>
-                <head><title>Abby Bot Status</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css"></head>
-                <body>
-                    <h1>Abby Bot is ONLINE 🟢</h1>
-                    <p>Connected as Abby Faith Sithole (23, Zim)</p>
-                    <p>Uptime: ${Math.floor((Date.now() - botStartTime) / 1000)}s</p>
-                    <h2>Group Links Collected (${groupLinks.size})</h2>
-                    <ul>
-                        ${Array.from(groupLinks.values()).map(g => `<li><a href="${g.link}" target="_blank">${g.link}</a> (Added by ${g.addedBy})</li>`).join('')}
-                    </ul>
-                </body>
-            </html>
-        `);
-    } else if (connectionStatus === 'qr' && qrDataUri) {
-        res.send(`
-            <html>
-                <head><title>Scan QR Code</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css"></head>
-                <body>
-                    <h1>Scan QR to Connect Abby Bot</h1>
-                    <img src="${qrDataUri}" alt="QR Code" style="border: 4px solid #333; padding: 10px; background: white;"/>
-                    <p>Refresh page if QR expires.</p>
-                </body>
-            </html>
-        `);
+// API: Get QR Code
+app.get('/api/qr', (req, res) => {
+    if (qrDataUri) {
+        res.json({ qr: qrDataUri, status: 'qr' });
+    } else if (connectionStatus === 'connected') {
+        res.json({ qr: null, status: 'connected' });
     } else {
-        res.send(`
-            <html>
-                <head><title>Connecting...</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css"></head>
-                <body>
-                    <h1>Connecting to WhatsApp... Status: ${connectionStatus}</h1>
-                    <script>setTimeout(() => location.reload(), 3000);</script>
-                </body>
-            </html>
-        `);
+        res.json({ qr: null, status: connectionStatus });
     }
 });
 
-// Start Bot & Server
-app.listen(PORT, () => {
-    addLog(`Admin Panel running on port ${PORT}`, 'info');
-    connectToWhatsApp();
+// API: Get status
+app.get('/api/status', (req, res) => {
+    const dmCount = [...activeChats].filter(isInbox).length;
+    const groupCount = [...activeChats].filter(isGroup).length;
+    const rateStats = globalRateLimiter.stats(ADMIN_JID);
+
+    res.json({
+        status: connectionStatus,
+        uptime: Math.floor((Date.now() - botStartTime) / 1000),
+        activeChats: activeChats.size,
+        dmChats: dmCount,
+        groupChats: groupCount,
+        rateLimit: rateStats,
+        broadcastProgress: broadcastProgress,
+        logs: logs.slice(-50)
+    });
+});
+
+// API: Get logs
+app.get('/api/logs', (req, res) => {
+    res.json({ logs: logs.slice(-100) });
+});
+
+// API: Get targets
+app.get('/api/targets', (req, res) => {
+    const mode = req.query.mode || 'joint';
+    const targets = BroadcastEngine.collectTargets(mode);
+    res.json({ targets, total: targets.length, mode });
+});
+
+// API: Send broadcast (from web panel)
+app.post('/api/broadcast', async (req, res) => {
+    const { message, mode = 'joint' } = req.body;
+    if (!message) return res.status(400).json({ error: 'Message required' });
+    if (!['dm', 'group', 'joint'].includes(mode)) return res.status(400).json({ error: 'Invalid mode' });
+
+    // Run broadcast async
+    BroadcastEngine.send({ message, mode }).then(results => {
+        addLog(`Web broadcast complete: ${results.sent}/${results.total}`, 'success');
+    });
+
+    res.json({ success: true, message: 'Broadcast started' });
+});
+
+// API: Build ad
+app.post('/api/ad', (req, res) => {
+    const { title, body, cta, link, style } = req.body;
+    if (!title || !body) return res.status(400).json({ error: 'Title and body required' });
+
+    const adText = AdBuilder.build({ title, body, cta, link, style: style || 'fancy' });
+    replyCache.set('LAST_AD', adText);
+    res.json({ success: true, ad: adText });
+});
+
+// API: Broadcast ad
+app.post('/api/bcad', async (req, res) => {
+    const { mode = 'joint' } = req.body;
+    const adText = replyCache.get('LAST_AD');
+    if (!adText) return res.status(400).json({ error: 'No ad built yet' });
+
+    BroadcastEngine.send({ message: adText, mode }).then(results => {
+        addLog(`Ad broadcast complete: ${results.sent}/${results.total}`, 'success');
+    });
+
+    res.json({ success: true, message: 'Ad broadcast started' });
+});
+
+// Serve dashboard
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ================================================================
+// STARTUP
+// ================================================================
+async function main() {
+    // Ensure auth folder exists
+    if (!fs.existsSync(AUTH_FOLDER)) {
+        fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+    }
+
+    // Ensure public folder exists
+    if (!fs.existsSync(path.join(__dirname, 'public'))) {
+        fs.mkdirSync(path.join(__dirname, 'public'), { recursive: true });
+    }
+
+    // Start WhatsApp connection
+    startBot().catch(err => {
+        addLog(`Bot startup error: ${err.message}`, 'error');
+    });
+
+    // Start Express server
+    app.listen(PORT, () => {
+        addLog(`🌐 Web dashboard running on port ${PORT}`, 'success');
+        console.log(`Server running on http://localhost:${PORT}`);
+    });
+}
+
+main().catch(err => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
 });

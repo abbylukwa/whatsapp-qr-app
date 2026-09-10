@@ -1,0 +1,9 @@
+# WhatsApp Bot Configuration
+PORT=10000
+ADMIN_PHONE=263777627210
+
+# AI API Keys (Optional fallbacks)
+VENICE_KEY=
+REWIND_KEY=
+OPENAI_KEY=
+GEMINI_KEY=

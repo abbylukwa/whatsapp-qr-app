@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot-fixed",
-  "version": "25.0.0",
-  "description": "WhatsApp Bot — GUI panel, live messages, LID admin detection, full test suite",
+  "version": "27.0.0",
+  "description": "WhatsApp Bot — phone-only admin, scraper bridge, humanized replies",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

@@ -1,14 +1,10 @@
 {
   "name": "whatsapp-bot-fixed",
-  "version": "24.0.0",
-  "description": "WhatsApp Broadcast Bot — GUI control panel, live messages with LID tracking, macOS browser",
+  "version": "25.0.0",
+  "description": "WhatsApp Bot — GUI panel, live messages, LID admin detection, full test suite",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18.0.0" },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.7.0",

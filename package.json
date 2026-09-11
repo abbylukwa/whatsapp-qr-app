@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-bot-fixed",
-  "version": "23.1.0",
-  "description": "WhatsApp Broadcast Bot — DMs & Groups separately/jointly, 5K msg/min, ads, real Shona +18 slang, admin GUI panel",
+  "version": "24.0.0",
+  "description": "WhatsApp Broadcast Bot — GUI control panel, live messages with LID tracking, macOS browser",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,9 +12,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.7.0",
-    "cheerio": "^1.0.0",
     "express": "^4.21.0",
-    "express-basic-auth": "^1.2.1",
     "node-cache": "^5.1.2",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4"

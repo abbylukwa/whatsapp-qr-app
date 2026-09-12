@@ -1,8 +1,7 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v36.3
-// 428 auto-recovery | AI test | Scraper test | Learn-from-admin
+// WHATSAPP BOT v36.4 — Minimal connection config (back to working)
 // ================================================================
 
 const express = require('express');
@@ -593,7 +592,7 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v36.3*
+const COMMAND_LIST = `🥖 *BreadBot v36.4*
 
 *Test*
 !aitest · !scraperstatus · !scrapersearch <q> · !scrapergif <q>
@@ -617,7 +616,7 @@ const COMMAND_LIST = `🥖 *BreadBot v36.3*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION (428 AUTO-RECOVERY)
+// CONNECTION — MINIMAL CONFIG (the one that worked in v24)
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -625,87 +624,75 @@ async function connectBot() {
   try {
     pushLog('info', 'bot', 'Initializing...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    pushLog('info', 'bot', `WA version ${version.join('.')} (latest: ${isLatest})`);
+    const { version } = await fetchLatestBaileysVersion();
+    pushLog('info', 'bot', `WA version ${version.join('.')}`);
 
     sock = makeWASocket({
       version,
       auth: state,
       printQRInTerminal: false,
       browser: Browsers.macOS('Desktop'),
-      logger: pino({ level: 'silent' }),
-      emitOwnEvents: true,
-      fireInitQueries: true,
-      markOnlineOnConnect: true,
-      syncFullHistory: true,
-      generateHighQualityLinkPreview: false,
-      getMessage: async () => undefined,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000,
-      retryRequestDelayMs: 250,
-      qrTimeout: 60000
+      logger: pino({ level: 'silent' })
     });
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
-      if (qr) { qrDataUri = await QRCode.toDataURL(qr); connectionStatus = 'qr'; pushLog('info', 'bot', 'QR generated'); }
+
+      if (qr) {
+        qrDataUri = await QRCode.toDataURL(qr);
+        connectionStatus = 'qr';
+        pushLog('info', 'bot', 'QR generated — scan now');
+      }
+
       if (connection === 'open') {
-        isConnecting = false; connectionStatus = 'connected'; reconnectAttempts = 0;
+        isConnecting = false;
+        connectionStatus = 'connected';
+        reconnectAttempts = 0;
         botStartTime = Date.now();
         botNumber = sock.user?.id?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
-        try { await sock.sendPresenceUpdate('available'); pushLog('info', 'bot', 'Presence set'); } catch (e) { pushLog('warn', 'bot', `Presence failed: ${e.message}`); }
-        await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n🕒 ${new Date().toLocaleString()}\n\nSend "!scraperstatus" to test scraper.`);
+        try { await sock.sendPresenceUpdate('available'); } catch (e) {}
+        try {
+          await sock.sendMessage(ADMIN_JID, { text: `✅ *BreadBot ONLINE*\n📱 ${botNumber}\n\nSend !commands` });
+        } catch (e) {}
       }
+
       if (connection === 'close') {
         isConnecting = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        const reason = lastDisconnect?.error?.message || '';
-        pushLog('warn', 'bot', `Disconnected (${code}) ${reason}`);
+        pushLog('warn', 'bot', `Disconnected (${code})`);
 
-        // ── 428 AUTO-RECOVERY: wipe session, force new QR ──
-        if (code === 428) {
-          pushLog('error', 'bot', '428 detected — clearing auth_info and generating new QR');
-          try { sock.end(undefined); } catch (e) {}
-          sock = null;
-          try { fs.rmSync(AUTH_FOLDER, { recursive: true, force: true }); } catch (e) {}
-          connectionStatus = 'qr';
-          reconnectAttempts = 0;
-          setTimeout(() => connectBot(), 3000);
+        if (code === DisconnectReason.loggedOut) {
+          connectionStatus = 'disconnected';
+          pushLog('error', 'bot', 'Logged out — rescan QR');
           return;
         }
 
-        const shouldReconnect = code !== DisconnectReason.loggedOut;
-        if (shouldReconnect && reconnectAttempts < MAX_RECONNECT) {
+        if (reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
           const delay = Math.min(5000 * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
           pushLog('warn', 'bot', `Retry in ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
-          setTimeout(() => { sock = null; connectBot(); }, delay);
+          setTimeout(() => { try { sock.end(undefined); } catch (e) {} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error', 'bot', code === DisconnectReason.loggedOut ? 'Logged out — rescan QR' : 'Max retries');
+          pushLog('error', 'bot', 'Max retries — click Clear Session on dashboard');
         }
       }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('messages.upsert', async (payload) => {
-      pushLog('info', 'raw', `messages.upsert: type=${payload.type} count=${payload.messages?.length || 0}`);
-      for (const msg of payload.messages || []) {
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+      pushLog('info', 'raw', `messages.upsert: ${messages?.length || 0}`);
+      for (const msg of messages || []) {
         try {
           if (msg.key?.fromMe) continue;
           await handleMessage(msg);
         } catch (e) {
-          pushLog('error', 'handler', `handleMessage failed: ${e.message}`);
+          pushLog('error', 'handler', `handleMessage: ${e.message}`);
         }
       }
-    });
-
-    sock.ev.on('lid-mapping.update', (update) => {
-      pushLog('info', 'lid', `LID mapping: ${JSON.stringify(update).slice(0, 200)}`);
     });
 
   } catch (err) {
@@ -1089,7 +1076,7 @@ app.post('/admin/disconnect', async (req, res) => { await disconnectBot(); res.j
 app.post('/admin/refresh-qr', (req, res) => { refreshQR(); res.json({ ok: true }); });
 app.post('/admin/clear-session', (req, res) => {
   try { fs.rmSync(AUTH_FOLDER, { recursive: true, force: true }); } catch (e) {}
-  res.json({ ok: true, msg: 'Session cleared' });
+  res.json({ ok: true, msg: 'Session cleared. Click Reconnect.' });
 });
 app.get('/admin/logs', (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -1137,9 +1124,9 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.3</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.4</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v36.3</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v36.4</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>

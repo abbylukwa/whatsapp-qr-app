@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "38.0.0",
+  "version": "38.1.0",
   "description": "WhatsApp bot — Baileys v7 with working LID resolution",
   "main": "server.js",
   "scripts": { "start": "node server.js" },

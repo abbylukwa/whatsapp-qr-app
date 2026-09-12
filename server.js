@@ -1,7 +1,7 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v38.0
+// WHATSAPP BOT v38.1
 // Baileys 7.0.0-rc.9 | Working LID resolution | Full feature set
 // ================================================================
 
@@ -10,10 +10,11 @@ const fs = require('fs');
 const path = require('path');
 const NodeCache = require('node-cache');
 
-// ── v7 is ESM-only. In CJS, import the default export first. ──
-const baileys = require('@whiskeysockets/baileys').default;
+// ── v7 ESM/CJS interop: named exports on module, default = makeWASocket ──
+const baileysModule = require('@whiskeysockets/baileys');
+const makeWASocket = baileysModule.default || baileysModule.makeWASocket;
+
 const {
-  makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
   Browsers,
@@ -21,7 +22,7 @@ const {
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
   proto
-} = baileys;
+} = baileysModule;
 
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -53,15 +54,15 @@ const USER_HISTORY_SIZE = 4;
 const PENDING_EXPIRY_MS = 60 * 60 * 1000;
 
 // ================================================================
-// LID → PHONE MAP (persistent, loaded from auth_info at startup)
+// LID → PHONE MAP (persistent)
 // ================================================================
 const LID_MAP_FILE = path.join(__dirname, 'lid_map_cache.json');
-let lidMap = new Map(); // lidUser (string) → phoneDigits (string)
+let lidMap = new Map();
 
 function loadLidMapFromDisk() {
   let count = 0;
 
-  // Source 1: our own cache file (survives redeploys)
+  // Source 1: our own cache file
   try {
     if (fs.existsSync(LID_MAP_FILE)) {
       const obj = JSON.parse(fs.readFileSync(LID_MAP_FILE, 'utf8'));
@@ -72,7 +73,7 @@ function loadLidMapFromDisk() {
     }
   } catch (e) { console.error('loadLidMap cache:', e.message); }
 
-  // Source 2: Baileys auth_info reverse files (lid-mapping-{lid}_reverse.json)
+  // Source 2: Baileys auth_info reverse files
   try {
     if (fs.existsSync(AUTH_FOLDER)) {
       const files = fs.readdirSync(AUTH_FOLDER);
@@ -107,14 +108,13 @@ function setLidMapping(lidUser, phone) {
   pushLog('info', 'lid', `Mapped ${lidUser} → ${p}`);
 }
 
-// Three-layer resolution: cache → altJid → signalRepository → (disk already in cache)
 async function resolveLidToPhone(lidUser, altJid) {
   if (!lidUser) return null;
 
-  // Layer 1: cache (includes disk-loaded mappings)
+  // Layer 1: cache
   if (lidMap.has(lidUser)) return lidMap.get(lidUser);
 
-  // Layer 2: alt JID from extractAddressingContext (v7 populates this on every message)
+  // Layer 2: alt JID from extractAddressingContext (v7 populates every message)
   if (altJid && typeof altJid === 'string' && !altJid.endsWith('@lid')) {
     const digits = altJid.split('@')[0].split(':')[0].replace(/\D/g, '');
     if (digits.length >= 10 && digits.length <= 14) {
@@ -123,7 +123,7 @@ async function resolveLidToPhone(lidUser, altJid) {
     }
   }
 
-  // Layer 3: Baileys v7 signal repository (REAL API — not dead code like v6)
+  // Layer 3: Baileys v7 signal repository (real API)
   try {
     if (sock?.signalRepository?.lidMapping?.getPNForLID) {
       const pn = await sock.signalRepository.lidMapping.getPNForLID(`${lidUser}@lid`);
@@ -326,7 +326,6 @@ function extractLid(msg, senderJid) {
 }
 
 function extractAltJid(msg) {
-  // v7: extractAddressingContext populates these on every inbound message
   const candidates = [
     msg.key?.participantAlt,
     msg.key?.remoteJidAlt,
@@ -346,9 +345,7 @@ function extractPhoneDirect(msg) {
   return (digits.length >= 10 && digits.length <= 14) ? digits : null;
 }
 
-// Async admin check that resolves LID → phone if possible
 async function isAdminSender(msg, senderJid) {
-  // 1. Direct phone in alt JID
   const directPhone = extractPhoneDirect(msg);
   if (directPhone === ADMIN_PHONE) {
     const lid = extractLid(msg, senderJid);
@@ -356,7 +353,6 @@ async function isAdminSender(msg, senderJid) {
     return true;
   }
 
-  // 2. Resolve LID → phone
   const lid = extractLid(msg, senderJid);
   if (lid) {
     const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt;
@@ -711,7 +707,7 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v38*
+const COMMAND_LIST = `🥖 *BreadBot v38.1*
 
 *Test*
 !whoami · !lidmap · !rawmsg · !aitest · !scraperstatus
@@ -811,8 +807,7 @@ async function connectBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // v7: lid-mapping.update event (fires when WA learns a new mapping)
-    // Note: may not fire on all accounts — we also scan auth_info files on startup.
+    // v7: lid-mapping.update event
     sock.ev.on('lid-mapping.update', (updates) => {
       try {
         if (Array.isArray(updates)) {
@@ -855,7 +850,7 @@ async function disconnectBot() { if (sock) { try { sock.end(undefined); } catch 
 function refreshQR() { qrDataUri = null; connectionStatus = 'disconnected'; disconnectBot(); setTimeout(connectBot, 1500); }
 
 // ================================================================
-// MESSAGE HANDLER (with normalizeMessageContent)
+// MESSAGE HANDLER (v7 normalizeMessageContent)
 // ================================================================
 async function handleMessage(msg) {
   if (!sock) return;
@@ -868,7 +863,7 @@ async function handleMessage(msg) {
   processedMessages.add(msgId);
   if (processedMessages.size > 10000) processedMessages.clear();
 
-  // ── OFFICIAL v7 NORMALIZER: unwraps ephemeral / viewOnce / edited / deviceSent ──
+  // ── OFFICIAL v7 NORMALIZER ──
   const normalized = normalizeMessageContent(msg.message);
   lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName, rawMessage: msg.message };
   lastNormalized = { ts: new Date().toISOString(), normalized };
@@ -905,7 +900,7 @@ async function handleMessage(msg) {
 
   if (!isGroup) activeDMs.add(chatJid);
 
-  // Try to resolve LID → phone for display
+  // Resolve LID → phone for display
   let displayPhone = directPhone;
   if (!displayPhone && lid) {
     const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt;
@@ -921,7 +916,7 @@ async function handleMessage(msg) {
   });
 
   if (!text && mediaType === 'text') {
-    pushLog('warn', 'msg', `Empty text after normalize — possible unusual wrapper`);
+    pushLog('warn', 'msg', `Empty text after normalize — unusual wrapper`);
     return;
   }
 
@@ -1016,7 +1011,7 @@ async function handleMessage(msg) {
       return;
     }
 
-    // ── Shona-infused AI reply ──
+    // Shona-infused AI reply
     const systemPrompt = `You are Abby Faith Sithole, 23, from Harare, Zimbabwe. Friendly, warm, playful. Reply in ${langName}. Sprinkle in LIGHT Shona naturally — words like "mhoro", "sei uri", "ndiri right", "sharp", "eish", "aiwa", "hezvoka", "zvakanaka", "ndoda", "uri bho", "zvinei", "ndizvo". Don't overdo it — at most one Shona word or short phrase per reply, sometimes zero. Casual WhatsApp tone. No technical terms, no code, no logs, no URLs. 1-2 sentences max. Never ask "how can I help you". Never offer assistance. Just respond naturally like a friend.`;
 
     const aiReply = await askRewind(text, systemPrompt);
@@ -1051,7 +1046,7 @@ async function handleAdminCommand(text, chatJid, msg) {
         try { resolved = await resolveLidToPhone(lid, altJid); } catch (e) {}
       }
       const admin = await isAdminSender(msg, chatJid);
-      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nDirect phone in alt: *${directPhone || '—'}*\nResolved phone: *${resolved || '—'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${admin ? 'YES ✅' : 'NO ❌'}*\nLID map size: *${lidMap.size}*`);
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nAlt JID: *${altJid || '—'}*\nDirect phone: *${directPhone || '—'}*\nResolved phone: *${resolved || '—'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${admin ? 'YES ✅' : 'NO ❌'}*\nLID map size: *${lidMap.size}*`);
       break;
     }
     case 'lidmap': {
@@ -1356,9 +1351,9 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v38</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v38.1</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v38</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LID map: <b id="lidMapSize">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v38.1</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LID map: <b id="lidMapSize">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>

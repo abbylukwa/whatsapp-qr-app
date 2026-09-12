@@ -1,8 +1,9 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v36.1
-// Fixed message delivery | AI test command | Learn-from-admin flow
+// WHATSAPP BOT v36.2
+// 428 fix: emitOwnEvents + fireInitQueries + reset session flow
+// Admin scraper test commands
 // ================================================================
 
 const express = require('express');
@@ -318,9 +319,6 @@ async function askRewind(prompt, systemPrompt) {
   }
 }
 
-// ================================================================
-// AI TEST (raw response, no filtering)
-// ================================================================
 async function testRewindRaw() {
   if (!REWIND_KEY) return { ok: false, error: 'REWIND_KEY missing' };
   const t0 = Date.now();
@@ -603,36 +601,36 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v36.1*
+const COMMAND_LIST = `🥖 *BreadBot v36.2*
 
 *Test*
-!aitest — test Rewind AI (raw response)
+!aitest — test Rewind AI
+!scraperstatus — test scraper connection
+!scrapersearch <query> — search scraper directly
+!scrapergif <query> — search scraper GIFs
 !test — bot status
-!testall — scraper + AI + WhatsApp
+!testall — full test suite
 !whoami — debug admin
 
 *Pending*
-!pending — list
-!teach <id> <query> · !teach <id> say <text> · !teach <id> skip
+!pending · !teach <id> <query> · !teach <id> say <text> · !teach <id> skip
 
 *Group joins*
-!join <link> · !joinall <links...>
-!queue · !clearsqueue · !groups · !leave <jid>
+!join <link> · !joinall <links...> · !queue · !clearsqueue · !groups · !leave <jid>
 
 *Scraper*
 !pic <query> · !nextpic · !gif <query> · !nextgif
 !bcastpic <caption> · !bcastpicdm · !bcastpicgroup · !bcastgif <caption>
 
 *Broadcast*
-!all <msg> · !bcgroup <msg> · !bcdm <msg>
-!allimg <url> | <caption>
+!all <msg> · !bcgroup <msg> · !bcdm <msg> · !allimg <url> | <caption>
 !ad <title> | <body> | [cta] | [link] | [style] · !bcad
 
 *Other*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION (FIXED)
+// CONNECTION (FIXED — 428 loop resolved)
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -650,12 +648,13 @@ async function connectBot() {
       browser: Browsers.macOS('Desktop'),
       logger: pino({ level: 'silent' }),
 
-      // ── FIXED connection options ──
-      markOnlineOnConnect: true,
-      syncFullHistory: true,
+      // ── 428 FIX: these were missing ──
       emitOwnEvents: true,
       fireInitQueries: true,
 
+      // ── Connection stability ──
+      markOnlineOnConnect: true,
+      syncFullHistory: true,
       generateHighQualityLinkPreview: false,
       getMessage: async () => undefined,
 
@@ -675,7 +674,7 @@ async function connectBot() {
         botNumber = sock.user?.id?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
         try { await sock.sendPresenceUpdate('available'); pushLog('info', 'bot', 'Presence set'); } catch (e) { pushLog('warn', 'bot', `Presence failed: ${e.message}`); }
-        await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n🕒 ${new Date().toLocaleString()}\n\nSend "!aitest" to verify AI.`);
+        await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n🕒 ${new Date().toLocaleString()}\n\nSend "!scraperstatus" to test scraper.`);
       }
       if (connection === 'close') {
         isConnecting = false;
@@ -698,7 +697,6 @@ async function connectBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ── RAW message event logger ──
     sock.ev.on('messages.upsert', async (payload) => {
       pushLog('info', 'raw', `messages.upsert: type=${payload.type} count=${payload.messages?.length || 0}`);
       for (const msg of payload.messages || []) {
@@ -711,7 +709,6 @@ async function connectBot() {
       }
     });
 
-    // ── LID mapping events ──
     sock.ev.on('lid-mapping.update', (update) => {
       pushLog('info', 'lid', `LID mapping: ${JSON.stringify(update).slice(0, 200)}`);
     });
@@ -865,6 +862,34 @@ async function handleAdminCommand(text, chatJid, msg) {
       } else {
         await reply(`❌ *AI FAILED*\n\nStatus: *${r.status || 'none'}*\nTime: *${r.ms}ms*\nError: *${r.error}*\nBody: *${r.body || '(no body)'}*`);
       }
+      break;
+    }
+    case 'scraperstatus': {
+      await reply('🔎 Testing scraper connection...');
+      const st = await scraperStatus();
+      if (st.ok) {
+        await reply(`✅ *Scraper WORKS*\n\nStatus: *${st.data.status || 'ok'}*\nUptime: *${Math.floor(st.data.uptime || 0)}s*\nTemp files: *${st.data.tempFiles || 0}*\nVersion: *${st.data.version || '—'}*`);
+      } else {
+        await reply(`❌ *Scraper FAILED*\n\nError: *${st.error}*\nURL: *${SCRAPER_URL}*`);
+      }
+      break;
+    }
+    case 'scrapersearch': {
+      const q = args.slice(1).join(' ');
+      if (!q) { await reply('❌ Usage: `!scrapersearch <query>`'); return; }
+      await reply(`🔎 Searching scraper for *${q}*...`);
+      const r = await scraperSearch(q);
+      if (!r.ok) { await reply(`❌ Failed: ${r.error}`); return; }
+      await reply(`✅ Found *${r.images.length}* images\nFirst: ${r.images[0] || 'none'}`);
+      break;
+    }
+    case 'scrapergif': {
+      const q = args.slice(1).join(' ');
+      if (!q) { await reply('❌ Usage: `!scrapergif <query>`'); return; }
+      await reply(`🔎 Searching scraper GIFs for *${q}*...`);
+      const r = await scraperGif(q);
+      if (!r.ok) { await reply(`❌ Failed: ${r.error}`); return; }
+      await reply(`✅ Found *${r.gifs.length}* GIFs\nFirst: ${r.gifs[0] || 'none'}`);
       break;
     }
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
@@ -1087,6 +1112,22 @@ app.get('/admin/aitest', async (req, res) => {
   const r = await testRewindRaw();
   res.json(r);
 });
+app.get('/admin/scraperstatus', async (req, res) => {
+  const r = await scraperStatus();
+  res.json(r);
+});
+app.get('/admin/scrapersearch', async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.status(400).json({ error: 'q required' });
+  const r = await scraperSearch(q);
+  res.json(r);
+});
+app.get('/admin/scrapergif', async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.status(400).json({ error: 'q required' });
+  const r = await scraperGif(q);
+  res.json(r);
+});
 app.get('/admin/pending', (req, res) => res.json({ pending: [...pendingRequests.values()] }));
 app.post('/admin/pending/:id/resolve', async (req, res) => {
   const { id } = req.params;
@@ -1111,11 +1152,11 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.1</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.2</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v36.1</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v36.2</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
-<div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="testAI()">🧪 Test AI</button></div><pre id="aiResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap"></pre></div>
+<div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
 <div class="card"><h2>Scraper Usage</h2><div class="stat-row"><span>Searches (ok/fail)</span><span class="stat-val" id="scSearch">—</span></div><div class="stat-row"><span>GIFs (ok/fail)</span><span class="stat-val" id="scGif">—</span></div><div class="stat-row"><span>Last search</span><span class="stat-val" id="scLastSearch">—</span></div><div class="stat-row"><span>Last GIF</span><span class="stat-val" id="scLastGif">—</span></div></div>
 <div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Failed</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div><div class="stat-row"><span>Pending (new/done)</span><span class="stat-val" id="dayPending">—</span></div></div>
@@ -1129,7 +1170,8 @@ async function api(p,m='GET',body){const opts={method:m};if(body){opts.headers={
 function fmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h+'h '+m+'m '+x+'s';}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
-async function testAI(){const b=$('aiResult');b.textContent='Testing...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
+async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
+async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
 async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}

@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "43.1.0",
-  "description": "WhatsApp bot — manual QR refresh, task scheduler, baileys-antiban",
+  "version": "43.2.0",
+  "description": "WhatsApp bot — manual QR refresh + 515 handshake fix",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

@@ -1,8 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v40.0
-// Image broadcast via caption | Group auto-discovery | Admin working
+// WHATSAPP BOT v41.0
+// fromMe fix | Working admin | Group auto-discovery | Image broadcast
 // ================================================================
 
 const express = require('express');
@@ -26,7 +26,7 @@ const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
 
-// Hardcoded admin LIDs (fallback when phone fields empty)
+// Hardcoded admin LIDs
 const HARDCODED_ADMIN_LIDS = ['115110005706891'];
 
 const REWIND_KEY = process.env.REWIND_KEY || 'sk-rewind-31c3a65acc981512de959195485deec0';
@@ -45,6 +45,20 @@ const BC_DELAY_MAX_MS = 6000;
 
 const USER_HISTORY_SIZE = 4;
 const PENDING_EXPIRY_MS = 60 * 60 * 1000;
+
+// ================================================================
+// BOT-SENT-ID TRACKER (prevents reply loops)
+// ================================================================
+const botSentIds = new Set();
+function markBotSent(id) {
+  if (!id) return;
+  botSentIds.add(id);
+  if (botSentIds.size > 2000) {
+    const arr = [...botSentIds];
+    botSentIds.clear();
+    for (const i of arr.slice(-1000)) botSentIds.add(i);
+  }
+}
 
 // ================================================================
 // ADMIN LID STORE
@@ -158,8 +172,10 @@ function pushLiveMessage(entry) {
 }
 async function alertAdmin(text) {
   if (!sock) return;
-  try { await sock.sendMessage(ADMIN_JID, { text }); }
-  catch (e) { pushLog('warn', 'admin', `Alert failed: ${e.message}`); }
+  try {
+    const r = await sock.sendMessage(ADMIN_JID, { text });
+    if (r?.key?.id) markBotSent(r.key.id);
+  } catch (e) { pushLog('warn', 'admin', `Alert failed: ${e.message}`); }
 }
 const _origError = console.error;
 console.error = (...args) => { _origError.apply(console, args); pushLog('error', 'system', args.map(String).join(' ')); };
@@ -172,6 +188,7 @@ let qrDataUri = null;
 let connectionStatus = 'disconnected';
 let botStartTime = Date.now();
 let botNumber = null;
+let botJid = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 let isConnecting = false;
@@ -237,10 +254,7 @@ function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(jo
 function saveGroups() {
   try {
     const arr = [...joinedGroups.entries()].map(([jid, v]) => ({
-      jid,
-      name: v.name,
-      joinedAt: v.joinedAt,
-      discovered: v.discovered || false,
+      jid, name: v.name, joinedAt: v.joinedAt, discovered: v.discovered || false,
       lastGreetedAt: lastGreetingAt.get(jid) || null
     }));
     fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify(arr, null, 2));
@@ -254,12 +268,7 @@ function savePending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify([..
 function discoverGroup(jid, groupName) {
   if (!jid || !jid.endsWith('@g.us')) return false;
   if (joinedGroups.has(jid)) return false;
-
-  joinedGroups.set(jid, {
-    name: groupName || null,
-    joinedAt: Date.now(),
-    discovered: true
-  });
+  joinedGroups.set(jid, { name: groupName || null, joinedAt: Date.now(), discovered: true });
   lastGreetingAt.set(jid, Date.now());
   saveGroups();
   resetDailyStats();
@@ -274,13 +283,9 @@ function discoverGroup(jid, groupName) {
 function extractAllPhoneCandidates(msg, senderJid) {
   const phones = new Set();
   const candidates = [
-    msg.key?.participantPn,
-    msg.key?.senderPn,
-    msg.key?.remoteJidAlt,
-    msg.key?.participantAlt,
-    senderJid,
-    msg.key?.remoteJid,
-    msg.key?.participant
+    msg.key?.participantPn, msg.key?.senderPn,
+    msg.key?.remoteJidAlt, msg.key?.participantAlt,
+    senderJid, msg.key?.remoteJid, msg.key?.participant
   ].filter(Boolean);
   for (const c of candidates) {
     if (typeof c === 'string') {
@@ -498,19 +503,25 @@ async function forwardToAdminForHelp(id, pending) {
 async function resolvePending(id, action, payload, adminChatJid) {
   const p = pendingRequests.get(id);
   if (!p) return { ok: false, error: `No pending request ${id}` };
-  const reply = (t) => sock.sendMessage(adminChatJid, { text: t });
+  const reply = async (t) => {
+    const r = await sock.sendMessage(adminChatJid, { text: t });
+    if (r?.key?.id) markBotSent(r.key.id);
+    return r;
+  };
   try {
     if (action === 'skip') {
       const casual = await askRewind(`User said: "${p.userHistory.map(h => h.text).join(' / ')}". Reply casually and warmly. No filler. 1 short sentence.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Warm, casual WhatsApp tone with light Shona sprinkled in.`);
       const fallback = casual || 'Sorry, couldn\'t find that right now 😅';
-      await sock.sendMessage(p.userJid, { text: fallback });
+      const r = await sock.sendMessage(p.userJid, { text: fallback });
+      if (r?.key?.id) markBotSent(r.key.id);
       pendingRequests.delete(id); savePending();
       resetDailyStats(); dailyStats.pendingResolved++;
       await reply(`✅ Replied casually to ${p.userName}.`);
       return { ok: true };
     }
     if (action === 'say') {
-      await sock.sendMessage(p.userJid, { text: payload });
+      const r = await sock.sendMessage(p.userJid, { text: payload });
+      if (r?.key?.id) markBotSent(r.key.id);
       pendingRequests.delete(id); savePending();
       resetDailyStats(); dailyStats.pendingResolved++;
       await reply(`✅ Sent your text to ${p.userName}.`);
@@ -521,12 +532,14 @@ async function resolvePending(id, action, payload, adminChatJid) {
     if (p.intent.type === 'video' || p.intent.type === 'gif') {
       const r = await scraperGif(query);
       if (!r.ok || r.gifs.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      await sock.sendMessage(p.userJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: '' });
+      const sent = await sock.sendMessage(p.userJid, { video: { url: r.gifs[0] }, gifPlayback: true });
+      if (sent?.key?.id) markBotSent(sent.key.id);
       resetDailyStats(); dailyStats.picsSent++;
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      await sock.sendMessage(p.userJid, { image: { url: r.images[0] } });
+      const sent = await sock.sendMessage(p.userJid, { image: { url: r.images[0] } });
+      if (sent?.key?.id) markBotSent(sent.key.id);
       resetDailyStats(); dailyStats.picsSent++;
     }
     pendingRequests.delete(id); savePending();
@@ -566,12 +579,13 @@ function scheduleGreetings() {
       if (sinceLast < minMs) continue;
       const progress = (sinceLast - minMs) / (maxMs - minMs);
       if (Math.random() > Math.min(progress, 1)) continue;
-      const reply = pickGreeting(getTimeOfDay());
+      const replyText = pickGreeting(getTimeOfDay());
       try {
-        await sock.sendMessage(jid, { text: reply });
+        const r = await sock.sendMessage(jid, { text: replyText });
+        if (r?.key?.id) markBotSent(r.key.id);
         lastGreetingAt.set(jid, now);
         resetDailyStats(); dailyStats.greetingsSent++;
-        pushLog('info', 'greeting', `Sent to ${jid}: ${reply}`);
+        pushLog('info', 'greeting', `Sent to ${jid}: ${replyText}`);
         await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
       } catch (e) { pushLog('warn', 'greeting', `Failed ${jid}: ${e.message}`); }
     }
@@ -604,12 +618,10 @@ function scheduleDailyReport() {
       `📢 Broadcasts: *${s.broadcastsSent || 0}*`,
       `📸 Image broadcasts: *${s.imageBroadcasts || 0}*`,
       `👋 Greetings: *${s.greetingsSent || 0}*`,
-      `🤖 AI errors: *${s.aiErrors || 0}*`,
-      `❓ Pending: *${s.pendingCreated || 0}/${s.pendingResolved || 0}*`, ``,
+      `🤖 AI errors: *${s.aiErrors || 0}*`, ``,
       `Uptime: ${Math.floor((Date.now() - botStartTime) / 3600000)}h`
     ].join('\n');
-    try { await sock.sendMessage(ADMIN_JID, { text: summary }); pushLog('success', 'daily', 'Daily summary sent'); }
-    catch (e) { pushLog('error', 'daily', `Report failed: ${e.message}`); }
+    await alertAdmin(summary);
   }, 60 * 1000);
 }
 
@@ -626,10 +638,12 @@ async function broadcast({ message, imageUrl = null, gifUrl = null, imageBuffer 
   for (let i = 0; i < targets.length; i++) {
     const t = targets[i];
     try {
-      if (gifUrl) await sock.sendMessage(t.jid, { video: { url: gifUrl }, gifPlayback: true, caption: message || '' });
-      else if (imageBuffer) await sock.sendMessage(t.jid, { image: imageBuffer, caption: message || '' });
-      else if (imageUrl) await sock.sendMessage(t.jid, { image: { url: imageUrl }, caption: message || '' });
-      else await sock.sendMessage(t.jid, { text: message });
+      let sent;
+      if (gifUrl) sent = await sock.sendMessage(t.jid, { video: { url: gifUrl }, gifPlayback: true, caption: message || '' });
+      else if (imageBuffer) sent = await sock.sendMessage(t.jid, { image: imageBuffer, caption: message || '' });
+      else if (imageUrl) sent = await sock.sendMessage(t.jid, { image: { url: imageUrl }, caption: message || '' });
+      else sent = await sock.sendMessage(t.jid, { text: message });
+      if (sent?.key?.id) markBotSent(sent.key.id);
       results.sent++;
       resetDailyStats(); dailyStats.broadcastsSent++;
     } catch (e) { results.failed++; results.errors.push({ jid: t.jid, error: e.message }); }
@@ -660,12 +674,12 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v40*
+const COMMAND_LIST = `🥖 *BreadBot v41*
 
 *Image broadcast* (send an image with a caption)
-• Send image + caption \`!bcdm Buy this product\` → DMs
-• Send image + caption \`!bcgroup Check this\` → Groups
-• Send image + caption \`!all Offer inside\` → Everyone
+• Image + caption \`!bcdm Buy this product\` → DMs
+• Image + caption \`!bcgroup Check this\` → Groups
+• Image + caption \`!all Offer inside\` → Everyone
 
 *Text broadcast*
 !bcdm <msg> · !bcgroup <msg> · !all <msg>
@@ -716,10 +730,11 @@ async function connectBot() {
       if (connection === 'open') {
         isConnecting = false; connectionStatus = 'connected'; reconnectAttempts = 0;
         botStartTime = Date.now();
-        botNumber = sock.user?.id?.split(':')[0]?.split('@')[0] || 'unknown';
+        botJid = sock.user?.id || null;
+        botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
         try { await sock.sendPresenceUpdate('available'); } catch (e) {}
-        try { await sock.sendMessage(ADMIN_JID, { text: `✅ *BreadBot ONLINE*\n📱 ${botNumber}\n\nSend !commands` }); } catch (e) {}
+        await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n\nSend !commands`);
       }
       if (connection === 'close') {
         isConnecting = false;
@@ -741,7 +756,7 @@ async function connectBot() {
     sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const msg of messages || []) {
         try {
-          if (msg.key?.fromMe) continue;
+          pushLog('info', 'raw', `upsert: fromMe=${msg.key?.fromMe} chat=${msg.key?.remoteJid}`);
           await handleMessage(msg);
         } catch (e) {
           pushLog('error', 'handler', `handleMessage: ${e.message}`);
@@ -771,6 +786,11 @@ async function handleMessage(msg) {
   processedMessages.add(msgId);
   if (processedMessages.size > 10000) processedMessages.clear();
 
+  // Skip bot's own echoes
+  if (botSentIds.has(msgId)) {
+    return;
+  }
+
   lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName };
 
   // Unwrap
@@ -792,15 +812,12 @@ async function handleMessage(msg) {
   const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
   const phone = extractPhone(msg, senderJid);
   const lid = extractLid(msg, senderJid);
-  const pushName = msg.pushName || 'Unknown';
+  const pushName = msg.pushName || (msg.key.fromMe ? 'You' : 'Unknown');
   const chatType = isGroup ? 'group' : 'dm';
 
   // ── GROUP AUTO-DISCOVERY ──
   if (isGroup) {
-    const discovered = discoverGroup(chatJid, null);
-    if (discovered) {
-      pushLog('success', 'group', `Now tracking: ${chatJid}`);
-    }
+    discoverGroup(chatJid, null);
   } else {
     activeDMs.add(chatJid);
   }
@@ -821,18 +838,19 @@ async function handleMessage(msg) {
     if (['bcdm', 'bcgroup', 'all'].includes(cmd)) {
       const caption = args.slice(1).join(' ').trim();
       pushLog('info', 'broadcast', `Image broadcast via caption (${cmd}): "${caption}"`);
-      await sock.sendMessage(chatJid, { text: `⏳ Downloading your image and preparing broadcast...` });
+
+      const ack = await sock.sendMessage(chatJid, { text: `⏳ Downloading your image and preparing broadcast...` });
+      if (ack?.key?.id) markBotSent(ack.key.id);
 
       try {
         const buffer = await downloadMediaMessage(
-          msg,
-          'buffer',
-          {},
+          msg, 'buffer', {},
           { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
         );
 
         if (!buffer) {
-          await sock.sendMessage(chatJid, { text: '❌ Could not download the image.' });
+          const r = await sock.sendMessage(chatJid, { text: '❌ Could not download the image.' });
+          if (r?.key?.id) markBotSent(r.key.id);
           return;
         }
 
@@ -844,26 +862,30 @@ async function handleMessage(msg) {
             : activeDMs.size;
 
         if (count === 0) {
-          await sock.sendMessage(chatJid, { text: `📭 No ${mode} targets.` });
+          const r = await sock.sendMessage(chatJid, { text: `📭 No ${mode} targets.` });
+          if (r?.key?.id) markBotSent(r.key.id);
           return;
         }
 
-        await sock.sendMessage(chatJid, { text: `📸 Broadcasting to ${count} ${mode}...\nCaption: "${caption || '(none)'}"` });
+        const pre = await sock.sendMessage(chatJid, { text: `📸 Broadcasting to ${count} ${mode}...\nCaption: "${caption || '(none)'}"` });
+        if (pre?.key?.id) markBotSent(pre.key.id);
 
         const r = await broadcast({ message: caption, imageBuffer: buffer, mode });
 
         resetDailyStats(); dailyStats.imageBroadcasts++;
-        await sock.sendMessage(chatJid, { text: `✅ *Image broadcast done*\n✅ Sent: *${r.sent}*\n❌ Failed: *${r.failed}*` });
+        const done = await sock.sendMessage(chatJid, { text: `✅ *Image broadcast done*\n✅ Sent: *${r.sent}*\n❌ Failed: *${r.failed}*` });
+        if (done?.key?.id) markBotSent(done.key.id);
       } catch (e) {
         pushLog('error', 'broadcast', `Image broadcast failed: ${e.message}`);
-        await sock.sendMessage(chatJid, { text: `❌ ${e.message}` });
+        const r = await sock.sendMessage(chatJid, { text: `❌ ${e.message}` });
+        if (r?.key?.id) markBotSent(r.key.id);
       }
       return;
     }
   }
 
-  // ── NON-ADMIN TRACKING ──
-  if (!isGroup && !isAdmin && text) {
+  // Track user history (non-admin DMs only, and not from bot)
+  if (!isGroup && !isAdmin && !msg.key.fromMe && text) {
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
     const h = userHistories.get(senderJid);
     h.push({ text, ts: Date.now() });
@@ -877,12 +899,15 @@ async function handleMessage(msg) {
     for (const c of codes) if (queueJoin(c, phone || pushName, chatType)) added++;
     if (added > 0) {
       pushLog('info', 'join', `Queued ${added}/${codes.length} from ${pushName} via ${chatType}`);
-      if (!isGroup) { try { await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` }); } catch (e) {} }
+      if (!isGroup) {
+        const r = await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` });
+        if (r?.key?.id) markBotSent(r.key.id);
+      }
       processJoinQueue();
     }
   }
 
-  // Admin text commands in DM
+  // Admin text commands in DM (from any chat, incl. "Message Yourself")
   if (!isGroup && isAdmin && text.startsWith('!')) {
     pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone || '—'} lid ${lid || '—'})`);
     await handleAdminCommand(text, chatJid, msg);
@@ -916,8 +941,13 @@ async function handleMessage(msg) {
         if (intent.type === 'video' || intent.type === 'gif') {
           const r = await scraperGif(intent.query);
           if (r.ok && r.gifs.length > 0) {
-            try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true }, { quoted: msg }); }
-            catch (e) { await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
+            try {
+              const s = await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true }, { quoted: msg });
+              if (s?.key?.id) markBotSent(s.key.id);
+            } catch (e) {
+              const s = await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg });
+              if (s?.key?.id) markBotSent(s.key.id);
+            }
             resetDailyStats();
             if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
             return;
@@ -925,8 +955,13 @@ async function handleMessage(msg) {
         } else {
           const r = await scraperSearch(intent.query);
           if (r.ok && r.images.length > 0) {
-            try { await sock.sendMessage(chatJid, { image: { url: r.images[0] } }, { quoted: msg }); }
-            catch (e) { await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg }); }
+            try {
+              const s = await sock.sendMessage(chatJid, { image: { url: r.images[0] } }, { quoted: msg });
+              if (s?.key?.id) markBotSent(s.key.id);
+            } catch (e) {
+              const s = await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg });
+              if (s?.key?.id) markBotSent(s.key.id);
+            }
             resetDailyStats(); dailyStats.picsSent++;
             return;
           }
@@ -936,13 +971,15 @@ async function handleMessage(msg) {
       const id = createPendingRequest(senderJid, pushName, phone, history, intent);
       pushLog('warn', 'ai', `Pending ${id} for ${pushName}`);
       const ack = await askRewind(
-        `User asked for something. Reply in one short casual WhatsApp sentence (max 8 words). No filler. No "how can I help".`,
-        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp, roleplaying a real person. Reply in ${langName}. Light Shona ok.`
+        `User asked for something. Reply in one short casual WhatsApp sentence (max 8 words). No filler.`,
+        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp, roleplaying a real person. Reply in ${langName}.`
       );
       const finalAck = (ack && !containsForbidden(ack)) ? ack : 'checking rn 😊';
-      try { await sock.sendMessage(chatJid, { text: finalAck }, { quoted: msg }); } catch (e) {}
-      const pending = pendingRequests.get(id);
-      await forwardToAdminForHelp(id, pending);
+      try {
+        const s = await sock.sendMessage(chatJid, { text: finalAck }, { quoted: msg });
+        if (s?.key?.id) markBotSent(s.key.id);
+      } catch (e) {}
+      await forwardToAdminForHelp(id, pendingRequests.get(id));
       return;
     }
 
@@ -956,7 +993,6 @@ RULES:
 - NEVER say you're an AI, assistant, bot, or language model.
 - NEVER ask "how can I help you" or offer assistance.
 - NEVER use filler phrases like "I understand", "based on your message", "I hope this helps".
-- NEVER explain yourself. Just respond like a friend would.
 - No technical terms, no code, no URLs, no formal language.`;
 
     const aiReply = await askRewind(text, systemPrompt);
@@ -964,7 +1000,8 @@ RULES:
     if (containsForbidden(aiReply)) { pushLog('warn', 'ai', `Dropped (forbidden): ${aiReply.slice(0, 80)}`); return; }
     const final = humanize(aiReply);
     if (!final) { pushLog('warn', 'ai', 'Empty after humanize'); return; }
-    await sock.sendMessage(chatJid, { text: final }, { quoted: msg });
+    const s = await sock.sendMessage(chatJid, { text: final }, { quoted: msg });
+    if (s?.key?.id) markBotSent(s.key.id);
     resetDailyStats(); dailyStats.dmsReplied++;
     pushLog('info', 'ai', `DM reply to ${pushName}: ${final.slice(0, 50)}`);
   }
@@ -976,7 +1013,11 @@ RULES:
 async function handleAdminCommand(text, chatJid, msg) {
   const args = text.slice(1).trim().split(/\s+/);
   const cmd = args[0].toLowerCase();
-  const reply = (t) => sock.sendMessage(chatJid, { text: t }, { quoted: msg });
+  const reply = async (t) => {
+    const r = await sock.sendMessage(chatJid, { text: t }, { quoted: msg });
+    if (r?.key?.id) markBotSent(r.key.id);
+    return r;
+  };
 
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
@@ -985,7 +1026,8 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
       const lid = extractLid(msg, chatJid);
-      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*\nAdmin LIDs: *${[...adminLids].join(', ') || 'none'}*`);
+      const isAdm = isAdminSender(msg, chatJid);
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${isAdm ? 'YES ✅' : 'NO ❌'}*\nAdmin LIDs: *${[...adminLids].join(', ') || 'none'}*`);
       break;
     }
     case 'aitest': {
@@ -1062,9 +1104,9 @@ async function handleAdminCommand(text, chatJid, msg) {
     }
     case 'clearsqueue': { const n = joinQueue.length; joinQueue = []; saveQueue(); await reply(`🧹 Cleared ${n}.`); break; }
     case 'groups': {
-      if (joinedGroups.size === 0) { await reply('📭 No groups.'); return; }
-      const list = [...joinedGroups.keys()].slice(0, 30).map((j, i) => `${i + 1}. ${j}`).join('\n');
-      await reply(`👥 *Joined/Discovered (${joinedGroups.size})*\n${list}`);
+      if (joinedGroups.size === 0) { await reply('📭 No groups tracked yet.'); return; }
+      const list = [...joinedGroups.entries()].slice(0, 30).map(([jid, v], i) => `${i + 1}. ${jid}${v.discovered ? ' (discovered)' : ''}`).join('\n');
+      await reply(`👥 *Groups (${joinedGroups.size})*\n${list}`);
       break;
     }
     case 'leave': {
@@ -1083,7 +1125,10 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results (${r.error || 'empty'})`); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: `Preview 1/${r.images.length}\n!nextpic · !bcastpic <caption>` }); }
+      try {
+        const s = await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: `Preview 1/${r.images.length}\n!nextpic · !bcastpic <caption>` });
+        if (s?.key?.id) markBotSent(s.key.id);
+      }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1091,7 +1136,10 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (previewCache.imageUrls.length === 0) { await reply('❌ No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex + 1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
-      try { await sock.sendMessage(chatJid, { image: { url: previewCache.currentUrl }, caption: `Preview ${previewCache.imageIndex + 1}/${previewCache.imageUrls.length}` }); }
+      try {
+        const s = await sock.sendMessage(chatJid, { image: { url: previewCache.currentUrl }, caption: `Preview ${previewCache.imageIndex + 1}/${previewCache.imageUrls.length}` });
+        if (s?.key?.id) markBotSent(s.key.id);
+      }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1103,7 +1151,10 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (!r.ok || r.gifs.length === 0) { await reply(`❌ No results (${r.error || 'empty'})`); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: `GIF 1/${r.gifs.length}\n!nextgif · !bcastgif <caption>` }); }
+      try {
+        const s = await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: `GIF 1/${r.gifs.length}\n!nextgif · !bcastgif <caption>` });
+        if (s?.key?.id) markBotSent(s.key.id);
+      }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1111,7 +1162,10 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (previewCache.gifUrls.length === 0) { await reply('❌ No preview.'); return; }
       previewCache.gifIndex = (previewCache.gifIndex + 1) % previewCache.gifUrls.length;
       previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
-      try { await sock.sendMessage(chatJid, { video: { url: previewCache.currentUrl }, gifPlayback: true, caption: `GIF ${previewCache.gifIndex + 1}/${previewCache.gifUrls.length}` }); }
+      try {
+        const s = await sock.sendMessage(chatJid, { video: { url: previewCache.currentUrl }, gifPlayback: true, caption: `GIF ${previewCache.gifIndex + 1}/${previewCache.gifUrls.length}` });
+        if (s?.key?.id) markBotSent(s.key.id);
+      }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1267,9 +1321,9 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v40</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v41</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v40</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v41</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined/Discovered</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>

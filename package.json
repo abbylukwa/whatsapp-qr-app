@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "40.0.0",
-  "description": "WhatsApp bot — image broadcast via caption commands",
+  "version": "41.0.0",
+  "description": "WhatsApp bot — fromMe fix + admin + groups + image broadcast",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

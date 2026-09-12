@@ -1,8 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v39.0
-// Stable Baileys 6.7.18 | LID support | Full feature set
+// WHATSAPP BOT v39.1
+// Working admin (broad candidate scan) | Casual roleplay | No photo desc
 // ================================================================
 
 const express = require('express');
@@ -10,14 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const NodeCache = require('node-cache');
 const {
-  makeWASocket,
-  DisconnectReason,
-  useMultiFileAuthState,
-  Browsers,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  normalizeMessageContent,
-  proto
+  makeWASocket, DisconnectReason, useMultiFileAuthState,
+  Browsers, fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -30,6 +24,10 @@ const PORT = process.env.PORT || 10000;
 const AUTH_FOLDER = 'auth_info';
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '');
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
+const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
+
+// Hardcoded admin LIDs (fallback when phone fields empty)
+const HARDCODED_ADMIN_LIDS = ['115110005706891'];
 
 const REWIND_KEY = process.env.REWIND_KEY || 'sk-rewind-31c3a65acc981512de959195485deec0';
 const SCRAPER_URL = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/, '');
@@ -49,91 +47,36 @@ const USER_HISTORY_SIZE = 4;
 const PENDING_EXPIRY_MS = 60 * 60 * 1000;
 
 // ================================================================
-// LID → PHONE MAP (persistent)
+// ADMIN LID STORE
 // ================================================================
-const LID_MAP_FILE = path.join(__dirname, 'lid_map_cache.json');
-let lidMap = new Map();
+let adminLids = new Set(HARDCODED_ADMIN_LIDS);
 
-function loadLidMapFromDisk() {
-  let count = 0;
+function loadAdminLids() {
   try {
-    if (fs.existsSync(LID_MAP_FILE)) {
-      const obj = JSON.parse(fs.readFileSync(LID_MAP_FILE, 'utf8'));
-      for (const [lid, phone] of Object.entries(obj)) {
-        const p = String(phone).replace(/\D/g, '');
-        if (p.length >= 10) { lidMap.set(lid, p); count++; }
-      }
-    }
-  } catch (e) { console.error('loadLidMap cache:', e.message); }
-  try {
-    if (fs.existsSync(AUTH_FOLDER)) {
-      const files = fs.readdirSync(AUTH_FOLDER);
-      for (const f of files) {
-        if (!f.startsWith('lid-mapping-') || !f.endsWith('_reverse.json')) continue;
-        const lidUser = f.replace('lid-mapping-', '').replace('_reverse.json', '');
-        try {
-          const raw = fs.readFileSync(path.join(AUTH_FOLDER, f), 'utf8');
-          const phone = String(JSON.parse(raw)).replace(/\D/g, '');
-          if (phone.length >= 10) { lidMap.set(lidUser, phone); count++; }
-        } catch (e) {}
-      }
-    }
-  } catch (e) { console.error('loadLidMap auth:', e.message); }
-  console.log(`[LID] Loaded ${lidMap.size} mappings (${count} entries scanned)`);
-}
-
-function saveLidMap() {
-  try {
-    fs.writeFileSync(LID_MAP_FILE, JSON.stringify(Object.fromEntries(lidMap), null, 2));
-  } catch (e) {}
-}
-
-function setLidMapping(lidUser, phone) {
-  if (!lidUser || !phone) return;
-  const p = String(phone).replace(/\D/g, '');
-  if (p.length < 10) return;
-  if (lidMap.get(lidUser) === p) return;
-  lidMap.set(lidUser, p);
-  saveLidMap();
-  pushLog('info', 'lid', `Mapped ${lidUser} → ${p}`);
-}
-
-async function resolveLidToPhone(lidUser, altJid) {
-  if (!lidUser) return null;
-  if (lidMap.has(lidUser)) return lidMap.get(lidUser);
-  if (altJid && typeof altJid === 'string' && !altJid.endsWith('@lid')) {
-    const digits = altJid.split('@')[0].split(':')[0].replace(/\D/g, '');
-    if (digits.length >= 10 && digits.length <= 14) {
-      setLidMapping(lidUser, digits);
-      return digits;
-    }
-  }
-  try {
-    if (sock?.signalRepository?.lidMapping?.getPNForLID) {
-      const pn = await sock.signalRepository.lidMapping.getPNForLID(`${lidUser}@lid`);
-      if (pn) {
-        const digits = String(pn).split('@')[0].split(':')[0].replace(/\D/g, '');
-        if (digits.length >= 10 && digits.length <= 14) {
-          setLidMapping(lidUser, digits);
-          return digits;
-        }
-      }
+    if (fs.existsSync(ADMIN_LID_FILE)) {
+      const arr = JSON.parse(fs.readFileSync(ADMIN_LID_FILE, 'utf8')) || [];
+      for (const lid of arr) adminLids.add(lid);
     }
   } catch (e) {}
-  return null;
+}
+function saveAdminLids() {
+  try { fs.writeFileSync(ADMIN_LID_FILE, JSON.stringify([...adminLids], null, 2)); } catch (e) {}
 }
 
 // ================================================================
-// FORBIDDEN / FILLER FILTER
+// FORBIDDEN / FILLER FILTER  (expanded cat-bot filter)
 // ================================================================
 const FORBIDDEN_PATTERNS = [
+  // Refusals
   /\bcannot\b/i, /\bcan'?t\b/i, /\bunable to\b/i,
   /\bi refuse\b/i, /\bnot allowed\b/i,
   /\bagainst my guidelines\b/i, /\bas an ai\b/i, /\bi am an ai\b/i,
   /\blanguage model\b/i, /\bsorry,? i\b/i, /\bi apologize\b/i,
+  // Tech/debug leaks
   /\bapi[_ ]?key\b/i, /\bconsole\.log\b/i, /\berror:/i,
   /\bstack trace\b/i, /\btraceback\b/i, /\bdebug\b/i,
   /\bnode\.js\b/i, /\bnpm\b/i,
+  // Generic AI filler (the "weird conversations" to avoid)
   /how can i help you today\??/i, /how may i help you\??/i,
   /is there anything else/i, /anything else i can help/i,
   /let me know if/i, /feel free to/i,
@@ -146,7 +89,13 @@ const FORBIDDEN_PATTERNS = [
   /don'?t hesitate to/i, /do not hesitate/i, /\bas an assistant\b/i,
   /\bgreetings!\b/i, /how are you today\?/i, /i understand that/i,
   /based on your (query|request)/i, /to answer your question/i,
-  /in response to/i, /\bapi_key\b/i, /\btoken\b/i
+  /in response to/i, /\bapi_key\b/i, /\btoken\b/i,
+  /\bas an? (ai|assistant|bot|language model)\b/i,
+  /\bi'?m an? (ai|assistant|bot|language model)\b/i,
+  /\bi cannot (provide|help|assist|do|generate)\b/i,
+  /\bit'?s important to (note|remember|understand)\b/i,
+  /\bhowever,? (i|it) (must|should|need)\b/i,
+  /\bi should (mention|note|point out)\b/i,
 ];
 
 function containsForbidden(text) {
@@ -229,10 +178,8 @@ let botNumber = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 let isConnecting = false;
-let isShuttingDown = false;
 
 let lastRawMsg = null;
-let lastNormalized = null;
 
 const processedMessages = new Set();
 const activeChats = new Set();
@@ -284,46 +231,54 @@ function loadState() {
       for (const p of arr) if (now - p.requestedAt < PENDING_EXPIRY_MS) pendingRequests.set(p.id, p);
     }
   } catch (e) {}
-  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} lidMap=${lidMap.size}`);
+  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size}`);
 }
 function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue, null, 2)); } catch (e) {} }
 function saveGroups() { try { fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify([...joinedGroups.entries()].map(([jid, v]) => ({ jid, ...v })), null, 2)); } catch (e) {} }
 function savePending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify([...pendingRequests.values()], null, 2)); } catch (e) {} }
 
 // ================================================================
-// PHONE / LID EXTRACTION
+// ADMIN DETECTION — v36.0 style (broad candidate scan)
 // ================================================================
-function extractLid(msg, senderJid) {
-  const candidates = [senderJid, msg.key?.participant, msg.key?.remoteJid, msg.key?.remoteJidAlt, msg.key?.participantAlt].filter(Boolean);
-  for (const c of candidates) if (typeof c === 'string' && c.endsWith('@lid')) return c.split('@')[0].split(':')[0];
+function extractAllPhoneCandidates(msg, senderJid) {
+  const phones = new Set();
+  const candidates = [
+    msg.key?.participantPn,
+    msg.key?.senderPn,
+    msg.key?.remoteJidAlt,
+    msg.key?.participantAlt,
+    senderJid,
+    msg.key?.remoteJid,
+    msg.key?.participant
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (typeof c === 'string') {
+      const digits = c.split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (digits.length >= 10) phones.add(digits);
+    }
+  }
+  return [...phones];
+}
+function extractLidFromMsg(msg, senderJid) {
+  const candidates = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
+  for (const c of candidates) if (typeof c === 'string' && c.includes('@lid')) return c.split('@')[0];
   return null;
 }
-function extractAltJid(msg) {
-  const candidates = [msg.key?.participantAlt, msg.key?.remoteJidAlt, msg.key?.participantPn, msg.key?.senderPn].filter(Boolean);
-  for (const c of candidates) if (typeof c === 'string' && c.endsWith('@s.whatsapp.net')) return c;
-  return null;
-}
-function extractPhoneDirect(msg) {
-  const alt = extractAltJid(msg);
-  if (!alt) return null;
-  const digits = alt.split('@')[0].split(':')[0].replace(/\D/g, '');
-  return (digits.length >= 10 && digits.length <= 14) ? digits : null;
-}
-async function isAdminSender(msg, senderJid) {
-  const directPhone = extractPhoneDirect(msg);
-  if (directPhone === ADMIN_PHONE) {
-    const lid = extractLid(msg, senderJid);
-    if (lid) setLidMapping(lid, ADMIN_PHONE);
+function isAdminSender(msg, senderJid) {
+  // 1. Any field with admin phone digits
+  const candidates = extractAllPhoneCandidates(msg, senderJid);
+  if (candidates.includes(ADMIN_PHONE)) {
+    const lid = extractLidFromMsg(msg, senderJid);
+    if (lid && !adminLids.has(lid)) { adminLids.add(lid); saveAdminLids(); pushLog('success', 'admin', `Registered admin LID ${lid}`); }
     return true;
   }
-  const lid = extractLid(msg, senderJid);
-  if (lid) {
-    const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt;
-    const resolved = await resolveLidToPhone(lid, altJid);
-    if (resolved === ADMIN_PHONE) return true;
-  }
+  // 2. Hardcoded or cached LID
+  const lid = extractLidFromMsg(msg, senderJid);
+  if (lid && adminLids.has(lid)) return true;
   return false;
 }
+function extractPhone(msg, senderJid) { const c = extractAllPhoneCandidates(msg, senderJid); return c.length > 0 ? c[0] : null; }
+function extractLid(msg, senderJid) { return extractLidFromMsg(msg, senderJid); }
 
 // ================================================================
 // INVITE LINK
@@ -536,9 +491,8 @@ async function resolvePending(id, action, payload, adminChatJid) {
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      const caption = await askRewind(`User asked for "${query}". Short casual reply (max 8 words) with emoji. Optionally 1 light Shona word like "sharp", "hezvoka", "eish", "zvakanaka". No filler.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona.`);
-      const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
-      await sock.sendMessage(p.userJid, { image: { url: r.images[0] }, caption: finalCaption });
+      // Send image with NO caption
+      await sock.sendMessage(p.userJid, { image: { url: r.images[0] } });
       resetDailyStats(); dailyStats.picsSent++;
     }
     pendingRequests.delete(id); savePending();
@@ -606,8 +560,7 @@ function scheduleDailyReport() {
       `👥 Groups: *${joinedGroups.size}*`,
       `💬 DMs: *${activeDMs.size}*`,
       `📋 Queue: *${joinQueue.length}*`,
-      `⏳ Pending: *${pendingRequests.size}*`,
-      `🆔 LID map: *${lidMap.size}*`, ``,
+      `⏳ Pending: *${pendingRequests.size}*`, ``,
       `✅ Joined: *${s.joined || 0}*`,
       `❌ Failed: *${s.failed || 0}*`,
       `💌 DM replies: *${s.dmsReplied || 0}*`,
@@ -669,10 +622,10 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v39*
+const COMMAND_LIST = `🥖 *BreadBot v39.1*
 
 *Test*
-!whoami · !lidmap · !rawmsg · !aitest · !scraperstatus
+!whoami · !aitest · !scraperstatus
 !scrapersearch <q> · !scrapergif <q> · !test · !testall
 
 *Pending*
@@ -693,10 +646,10 @@ const COMMAND_LIST = `🥖 *BreadBot v39*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION (FIXED — stable Baileys, no RC9 regressions)
+// CONNECTION
 // ================================================================
 async function connectBot() {
-  if (isConnecting || isShuttingDown) return;
+  if (isConnecting) return;
   isConnecting = true;
   try {
     pushLog('info', 'bot', 'Initializing...');
@@ -704,95 +657,44 @@ async function connectBot() {
     const { version } = await fetchLatestBaileysVersion();
     pushLog('info', 'bot', `WA version ${version.join('.')}`);
 
-    const logger = pino({ level: 'silent' });
-
     sock = makeWASocket({
-      version,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger)
-      },
-      printQRInTerminal: false,
+      version, auth: state, printQRInTerminal: false,
       browser: Browsers.macOS('Desktop'),
-      logger,
-      // ── STABLE CONFIG: no syncFullHistory (RC9 bug), no markOnlineOnConnect (opening-phase 428) ──
-      shouldSyncHistoryMessage: ({ syncType }) => syncType !== 2, // allow all except FULL history
-      markOnlineOnConnect: false, // presence set manually after open to avoid opening-phase 428
+      logger: pino({ level: 'silent' }),
+      markOnlineOnConnect: false, syncFullHistory: false,
       generateHighQualityLinkPreview: false,
-      getMessage: async () => proto.Message.create({})
+      getMessage: async () => undefined
     });
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        qrDataUri = await QRCode.toDataURL(qr);
-        connectionStatus = 'qr';
-        pushLog('info', 'bot', 'QR generated — scan now');
-      }
-
+      if (qr) { qrDataUri = await QRCode.toDataURL(qr); connectionStatus = 'qr'; pushLog('info', 'bot', 'QR generated'); }
       if (connection === 'open') {
-        isConnecting = false;
-        connectionStatus = 'connected';
-        reconnectAttempts = 0;
+        isConnecting = false; connectionStatus = 'connected'; reconnectAttempts = 0;
         botStartTime = Date.now();
         botNumber = sock.user?.id?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
-        // Manually set presence so the bot appears online
-        try { await sock.sendPresenceUpdate('available'); pushLog('info', 'bot', 'Presence set to available'); } catch (e) { pushLog('warn', 'bot', `Presence failed: ${e.message}`); }
-        try {
-          await sock.sendMessage(ADMIN_JID, { text: `✅ *BreadBot ONLINE*\n📱 ${botNumber}\n\nSend !commands` });
-        } catch (e) {}
+        try { await sock.sendPresenceUpdate('available'); } catch (e) {}
+        try { await sock.sendMessage(ADMIN_JID, { text: `✅ *BreadBot ONLINE*\n📱 ${botNumber}\n\nSend !commands` }); } catch (e) {}
       }
-
       if (connection === 'close') {
         isConnecting = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        pushLog('warn', 'bot', `Disconnected (${code})`);
-
-        if (code === DisconnectReason.loggedOut) {
-          connectionStatus = 'disconnected';
-          pushLog('error', 'bot', 'Logged out — rescan QR');
-          return;
-        }
-
-        if (reconnectAttempts < MAX_RECONNECT) {
+        const shouldReconnect = code !== DisconnectReason.loggedOut;
+        if (shouldReconnect && reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
           const delay = Math.min(5000 * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
-          pushLog('warn', 'bot', `Retry in ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
+          pushLog('warn', 'bot', `Disconnected (${code}), retry ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
           setTimeout(() => { try { sock.end(undefined); } catch (e) {} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error', 'bot', 'Max retries — click Clear Session on dashboard');
+          pushLog('error', 'bot', code === DisconnectReason.loggedOut ? 'Logged out — rescan' : 'Max retries');
         }
       }
     });
-
     sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('lid-mapping.update', (updates) => {
-      try {
-        if (Array.isArray(updates)) {
-          for (const u of updates) {
-            if (u?.id && u?.pn) setLidMapping(String(u.id).split('@')[0].split(':')[0], u.pn);
-          }
-        } else if (updates && typeof updates === 'object') {
-          if (updates.mapping && typeof updates.mapping === 'object') {
-            for (const [lid, pn] of Object.entries(updates.mapping)) {
-              setLidMapping(String(lid).split('@')[0].split(':')[0], pn);
-            }
-          } else {
-            for (const [k, v] of Object.entries(updates)) {
-              if (k && v) setLidMapping(String(k).split('@')[0].split(':')[0], v);
-            }
-          }
-        }
-      } catch (e) { pushLog('warn', 'lid', `lid-mapping.update error: ${e.message}`); }
-    });
-
     sock.ev.on('messages.upsert', async ({ messages }) => {
-      pushLog('info', 'raw', `messages.upsert: ${messages?.length || 0}`);
       for (const msg of messages || []) {
         try {
           if (msg.key?.fromMe) continue;
@@ -802,27 +704,13 @@ async function connectBot() {
         }
       }
     });
-
   } catch (err) {
     isConnecting = false;
     pushLog('error', 'bot', `Connection failed: ${err.message}`);
     connectionStatus = 'error';
-    // Route opening-phase 428 through reconnect policy
-    if (err?.output?.statusCode === 428) {
-      pushLog('warn', 'bot', 'Opening-phase 428 caught — will retry with backoff');
-      if (reconnectAttempts < MAX_RECONNECT) {
-        reconnectAttempts++;
-        const delay = Math.min(5000 * reconnectAttempts, 30000);
-        setTimeout(() => { sock = null; connectBot(); }, delay);
-      }
-    }
   }
 }
-async function disconnectBot() {
-  isShuttingDown = true;
-  if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); }
-  isShuttingDown = false;
-}
+async function disconnectBot() { if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); } }
 function refreshQR() { qrDataUri = null; connectionStatus = 'disconnected'; disconnectBot(); setTimeout(connectBot, 1500); }
 
 // ================================================================
@@ -839,62 +727,39 @@ async function handleMessage(msg) {
   processedMessages.add(msgId);
   if (processedMessages.size > 10000) processedMessages.clear();
 
-  const normalized = normalizeMessageContent(msg.message);
-  lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName, rawMessage: msg.message };
-  lastNormalized = { ts: new Date().toISOString(), normalized };
+  lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName };
 
-  if (!normalized) {
-    pushLog('warn', 'msg', `normalizeMessageContent returned null — skipping`);
-    return;
+  // Unwrap message content
+  let m = msg.message;
+  let guard = 0;
+  while (m && guard++ < 10) {
+    if (m.ephemeralMessage?.message) { m = m.ephemeralMessage.message; continue; }
+    if (m.viewOnceMessage?.message) { m = m.viewOnceMessage.message; continue; }
+    if (m.viewOnceMessageV2?.message) { m = m.viewOnceMessageV2.message; continue; }
+    if (m.deviceSentMessage?.message) { m = m.deviceSentMessage.message; continue; }
+    if (m.documentWithCaptionMessage?.message) { m = m.documentWithCaptionMessage.message; continue; }
+    break;
   }
 
-  const text = (
-    normalized.conversation
-    || normalized.extendedTextMessage?.text
-    || normalized.imageMessage?.caption
-    || normalized.videoMessage?.caption
-    || normalized.documentMessage?.caption
-    || normalized.buttonsResponseMessage?.selectedDisplayText
-    || normalized.listResponseMessage?.title
-    || ''
-  );
-
-  const mediaType = normalized.imageMessage ? 'image'
-    : normalized.videoMessage ? 'video'
-    : normalized.audioMessage ? 'audio'
-    : normalized.documentMessage ? 'document'
-    : normalized.stickerMessage ? 'sticker'
-    : 'text';
+  const text = m?.conversation || m?.extendedTextMessage?.text || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
+  const mediaType = m?.imageMessage ? 'image' : m?.videoMessage ? 'video' : m?.audioMessage ? 'audio' : m?.documentMessage ? 'document' : 'text';
 
   const isGroup = chatJid.endsWith('@g.us');
   const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
+  const phone = extractPhone(msg, senderJid);
   const lid = extractLid(msg, senderJid);
-  const directPhone = extractPhoneDirect(msg);
   const pushName = msg.pushName || 'Unknown';
   const chatType = isGroup ? 'group' : 'dm';
 
   if (!isGroup) activeDMs.add(chatJid);
 
-  let displayPhone = directPhone;
-  if (!displayPhone && lid) {
-    const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt;
-    try { displayPhone = await resolveLidToPhone(lid, altJid); } catch (e) {}
-  }
-
-  pushLog('info', 'msg', `${chatType === 'group' ? '👥' : '💬'} ${pushName} — text="${text.slice(0, 60)}" type=${mediaType}${displayPhone ? ' phone=' + displayPhone : ''}${lid ? ' lid=' + lid : ''}`);
-
   pushLiveMessage({
     id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
-    senderName: pushName, phone: displayPhone || '—', lid: lid || '—',
+    senderName: pushName, phone: phone || '—', lid: lid || '—',
     text: text.slice(0, 200) || `[${mediaType}]`, mediaType
   });
 
-  if (!text && mediaType === 'text') {
-    pushLog('warn', 'msg', `Empty text after normalize — unusual wrapper`);
-    return;
-  }
-
-  const isAdmin = await isAdminSender(msg, senderJid);
+  const isAdmin = isAdminSender(msg, senderJid);
 
   if (!isGroup && !isAdmin && text) {
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
@@ -906,7 +771,7 @@ async function handleMessage(msg) {
   const codes = extractAllInviteCodes(text);
   if (codes.length > 0) {
     let added = 0;
-    for (const c of codes) if (queueJoin(c, displayPhone || pushName, chatType)) added++;
+    for (const c of codes) if (queueJoin(c, phone || pushName, chatType)) added++;
     if (added > 0) {
       pushLog('info', 'join', `Queued ${added}/${codes.length} from ${pushName} via ${chatType}`);
       if (!isGroup) { try { await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` }); } catch (e) {} }
@@ -915,7 +780,7 @@ async function handleMessage(msg) {
   }
 
   if (!isGroup && isAdmin && text.startsWith('!')) {
-    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${displayPhone || '—'} lid ${lid || '—'})`);
+    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone || '—'} lid ${lid || '—'})`);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
@@ -931,6 +796,12 @@ async function handleMessage(msg) {
     const lang = detectLanguage(text);
     const langName = LANG_NAMES[lang] || 'English';
 
+    // Ignore violation messages (cat bot filter)
+    if (containsForbidden(text)) {
+      pushLog('info', 'filter', `Message from ${pushName} ignored (forbidden)`);
+      return;
+    }
+
     const intent = detectMediaIntent(text);
     if (intent) {
       pushLog('info', 'pic', `Intent ${intent.type} — "${intent.query}" from ${pushName}`);
@@ -939,12 +810,8 @@ async function handleMessage(msg) {
         if (intent.type === 'video' || intent.type === 'gif') {
           const r = await scraperGif(intent.query);
           if (r.ok && r.gifs.length > 0) {
-            const caption = await askRewind(
-              `User asked for a ${intent.type} of "${intent.query}". Short casual reply (max 8 words) with emoji. Optionally 1 light Shona word like "sharp", "hezvoka", "eish", "zvakanaka". No filler.`,
-              `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona sprinkled in. Reply in ${langName}.`
-            );
-            const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
-            try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: finalCaption }, { quoted: msg }); }
+            // NO caption on video
+            try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true }, { quoted: msg }); }
             catch (e) { await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
             resetDailyStats();
             if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
@@ -953,12 +820,8 @@ async function handleMessage(msg) {
         } else {
           const r = await scraperSearch(intent.query);
           if (r.ok && r.images.length > 0) {
-            const caption = await askRewind(
-              `User asked for a picture of "${intent.query}". Short casual reply (max 8 words) with emoji. Optionally 1 light Shona word like "sharp", "hezvoka", "eish", "zvakanaka". No filler.`,
-              `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona sprinkled in. Reply in ${langName}.`
-            );
-            const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
-            try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: finalCaption }, { quoted: msg }); }
+            // NO caption on image
+            try { await sock.sendMessage(chatJid, { image: { url: r.images[0] } }, { quoted: msg }); }
             catch (e) { await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg }); }
             resetDailyStats(); dailyStats.picsSent++;
             return;
@@ -966,20 +829,33 @@ async function handleMessage(msg) {
         }
       }
       const history = userHistories.get(senderJid) || [];
-      const id = createPendingRequest(senderJid, pushName, displayPhone, history, intent);
+      const id = createPendingRequest(senderJid, pushName, phone, history, intent);
       pushLog('warn', 'ai', `Pending ${id} for ${pushName}`);
       const ack = await askRewind(
-        `User asked for something. Reply casually that you're checking and will send shortly (max 8 words). Optionally 1 light Shona word. No filler.`,
-        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona.`
+        `User asked for something. Reply in one short casual WhatsApp sentence (max 8 words). No filler. No "how can I help".`,
+        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp, roleplaying a real person. Reply in ${langName}. Light Shona ok.`
       );
-      const finalAck = (ack && !containsForbidden(ack)) ? ack : 'Checking for you... one sec 😊';
+      const finalAck = (ack && !containsForbidden(ack)) ? ack : 'checking rn 😊';
       try { await sock.sendMessage(chatJid, { text: finalAck }, { quoted: msg }); } catch (e) {}
       const pending = pendingRequests.get(id);
       await forwardToAdminForHelp(id, pending);
       return;
     }
 
-    const systemPrompt = `You are Abby Faith Sithole, 23, from Harare, Zimbabwe. Friendly, warm, playful. Reply in ${langName}. Sprinkle in LIGHT Shona naturally — words like "mhoro", "sei uri", "ndiri right", "sharp", "eish", "aiwa", "hezvoka", "zvakanaka", "ndoda", "uri bho", "zvinei", "ndizvo". Don't overdo it — at most one Shona word or short phrase per reply, sometimes zero. Casual WhatsApp tone. No technical terms, no code, no logs, no URLs. 1-2 sentences max. Never ask "how can I help you". Never offer assistance. Just respond naturally like a friend.`;
+    // ── CASUAL ROLEPLAY AI REPLY ──
+    const systemPrompt = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. You are a REAL person, not an AI, not an assistant, not a bot. Roleplay her naturally.
+
+RULES:
+- Reply in ${langName}. Mix in light Shona sometimes ("mhoro", "sei uri", "sharp", "eish", "hezvoka", "zvakanaka", "uri bho", "zvinei", "ndizvo").
+- Keep replies SHORT: 1-2 sentences max. Like real WhatsApp texting.
+- Be casual, playful, warm. React naturally to what they say.
+- NEVER say you're an AI, assistant, bot, or language model.
+- NEVER ask "how can I help you" or offer assistance.
+- NEVER use filler phrases like "I understand", "based on your message", "I hope this helps".
+- NEVER explain yourself. Just respond like a friend would.
+- If the message is weird or something you wouldn't answer, reply very briefly or just with "😂" or "???" or something casual.
+- No technical terms, no code, no URLs, no formal language.
+- Text like a real person on WhatsApp.`;
 
     const aiReply = await askRewind(text, systemPrompt);
     if (!aiReply) { pushLog('warn', 'ai', `No reply for ${pushName}`); return; }
@@ -1003,28 +879,11 @@ async function handleAdminCommand(text, chatJid, msg) {
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nLID map: *${lidMap.size}*`); break;
+    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nAdmin LIDs: *${[...adminLids].join(', ') || 'none'}*`); break;
     case 'whoami': {
-      const directPhone = extractPhoneDirect(msg);
+      const c = extractAllPhoneCandidates(msg, chatJid);
       const lid = extractLid(msg, chatJid);
-      const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt || null;
-      let resolved = null;
-      if (lid) {
-        try { resolved = await resolveLidToPhone(lid, altJid); } catch (e) {}
-      }
-      const admin = await isAdminSender(msg, chatJid);
-      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nAlt JID: *${altJid || '—'}*\nDirect phone: *${directPhone || '—'}*\nResolved phone: *${resolved || '—'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${admin ? 'YES ✅' : 'NO ❌'}*\nLID map size: *${lidMap.size}*`);
-      break;
-    }
-    case 'lidmap': {
-      const entries = [...lidMap.entries()].slice(0, 30).map(([lid, phone]) => `• ${lid} → ${phone}`).join('\n');
-      await reply(`🗺️ *LID → Phone map (${lidMap.size})*\n\n${entries || '(empty)'}`);
-      break;
-    }
-    case 'rawmsg': {
-      if (!lastNormalized) { await reply('❌ No messages seen yet.'); return; }
-      const s = JSON.stringify({ normalized: lastNormalized, original: lastRawMsg?.key }, null, 2).slice(0, 3000);
-      await reply(`📦 *Last message*\n\n\`\`\`\n${s}\n\`\`\``);
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*\nAdmin LIDs: *${[...adminLids].join(', ') || 'none'}*`);
       break;
     }
     case 'aitest': {
@@ -1037,7 +896,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'scraperstatus': {
       await reply('🔎 Testing scraper...');
       const st = await scraperStatus();
-      if (st.ok) await reply(`✅ *Scraper WORKS*\n\nStatus: *${st.data.status || 'ok'}*\nUptime: *${Math.floor(st.data.uptime || 0)}s*\nTemp files: *${st.data.tempFiles || 0}*\nVersion: *${st.data.version || '—'}*`);
+      if (st.ok) await reply(`✅ *Scraper WORKS*\n\nStatus: *${st.data.status || 'ok'}*\nUptime: *${Math.floor(st.data.uptime || 0)}s*\nTemp files: *${st.data.tempFiles || 0}*`);
       else await reply(`❌ *Scraper FAILED*\n\nError: *${st.error}*\nURL: *${SCRAPER_URL}*`);
       break;
     }
@@ -1053,7 +912,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'scrapergif': {
       const q = args.slice(1).join(' ');
       if (!q) { await reply('❌ Usage: `!scrapergif <query>`'); return; }
-      await reply(`🔎 Searching scraper GIFs for *${q}*...`);
+      await reply(`🔎 Searching GIFs for *${q}*...`);
       const r = await scraperGif(q);
       if (!r.ok) { await reply(`❌ Failed: ${r.error}`); return; }
       await reply(`✅ Found *${r.gifs.length}* GIFs\nFirst: ${r.gifs[0] || 'none'}`);
@@ -1062,10 +921,10 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
     case 'stats': {
       const s = (resetDailyStats(), dailyStats);
-      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nLID map: *${lidMap.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
-    case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail (of ${scraperStats.searchCalls})\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail (of ${scraperStats.gifCalls})\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
+    case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
 
     case 'pending': {
       if (pendingRequests.size === 0) { await reply('📭 No pending requests.'); return; }
@@ -1244,7 +1103,6 @@ async function runFullTestSuite() {
     `💬 DMs: ${activeDMs.size}`,
     `📋 Queue: ${joinQueue.length}`,
     `⏳ Pending: ${pendingRequests.size}`,
-    `🆔 LID map: ${lidMap.size}`,
     `🕒 ${Date.now() - t0}ms`].join('\n');
 }
 
@@ -1280,19 +1138,8 @@ app.get('/admin/messages-stream', (req, res) => {
   for (const m of liveMessages.slice(-100)) res.write(`data: ${JSON.stringify(m)}\n\n`);
   msgClients.add(res); req.on('close', () => msgClients.delete(res));
 });
-app.get('/admin/lidmap', (req, res) => res.json({ count: lidMap.size, map: Object.fromEntries(lidMap) }));
 app.get('/admin/aitest', async (req, res) => { const r = await testRewindRaw(); res.json(r); });
 app.get('/admin/scraperstatus', async (req, res) => { const r = await scraperStatus(); res.json(r); });
-app.get('/admin/scrapersearch', async (req, res) => {
-  const q = req.query.q;
-  if (!q) return res.status(400).json({ error: 'q required' });
-  const r = await scraperSearch(q); res.json(r);
-});
-app.get('/admin/scrapergif', async (req, res) => {
-  const q = req.query.q;
-  if (!q) return res.status(400).json({ error: 'q required' });
-  const r = await scraperGif(q); res.json(r);
-});
 app.get('/admin/pending', (req, res) => res.json({ pending: [...pendingRequests.values()] }));
 app.post('/admin/pending/:id/resolve', async (req, res) => {
   const { id } = req.params;
@@ -1312,15 +1159,15 @@ app.get('/admin/stats', (req, res) => {
     lastJoinAt: lastJoinAt || null,
     dailyStats, scraperStats,
     adminPhone: ADMIN_PHONE,
-    lidMapSize: lidMap.size,
+    adminLids: [...adminLids],
     pendingCount: pendingRequests.size,
     pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query }))
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v39</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v39.1</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v39</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LID map: <b id="lidMapSize">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v39.1</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
@@ -1338,7 +1185,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('lidMapSize').textContent=d.lidMapSize||0;const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.adminLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}
@@ -1360,14 +1207,14 @@ setInterval(processJoinQueue, 30 * 1000);
 // STARTUP
 // ================================================================
 loadState();
-loadLidMapFromDisk();
+loadAdminLids();
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Admin phone (digits): ${ADMIN_PHONE}`);
-  console.log(`LID map loaded: ${lidMap.size} entries`);
+  console.log(`Admin phone: ${ADMIN_PHONE}`);
+  console.log(`Admin LIDs: ${[...adminLids].join(', ')}`);
   pushLog('info', 'system', `Boot port ${PORT}`);
   pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
-  pushLog('info', 'system', `LID map loaded: ${lidMap.size}`);
+  pushLog('info', 'system', `Admin LIDs: ${[...adminLids].join(', ')}`);
   pushLog('info', 'system', `Scraper: ${SCRAPER_URL}`);
   scheduleGreetings();
   scheduleDailyReport();

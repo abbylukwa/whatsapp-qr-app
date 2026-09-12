@@ -1,8 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v36.5
-// Admin LID detection | Shona in AI replies | Minimal connection
+// WHATSAPP BOT v36.6
+// LID → phone translator | Shona in AI replies | Minimal connection
 // ================================================================
 
 const express = require('express');
@@ -25,10 +25,11 @@ const AUTH_FOLDER = 'auth_info';
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '');
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
+const LID_MAP_FILE = path.join(__dirname, 'lid_to_phone.json');
 
-// Hardcoded admin LIDs (WhatsApp sends only LID now, not phone)
+// Fallback hardcoded LIDs (used only if translation fails)
 const ADMIN_LIDS = new Set(
-  (process.env.ADMIN_LIDS || '115110005706891')
+  (process.env.ADMIN_LIDS || '')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean)
@@ -52,7 +53,68 @@ const USER_HISTORY_SIZE = 4;
 const PENDING_EXPIRY_MS = 60 * 60 * 1000;
 
 // ================================================================
-// ADMIN LID CACHE
+// LID → PHONE TRANSLATOR
+// ================================================================
+let lidToPhone = new Map();
+
+function loadLidMap() {
+  try {
+    if (fs.existsSync(LID_MAP_FILE)) {
+      const obj = JSON.parse(fs.readFileSync(LID_MAP_FILE, 'utf8'));
+      lidToPhone = new Map(Object.entries(obj));
+      console.log(`[LID] Loaded ${lidToPhone.size} mappings`);
+    }
+  } catch (e) { console.error('loadLidMap:', e.message); }
+}
+function saveLidMap() {
+  try { fs.writeFileSync(LID_MAP_FILE, JSON.stringify(Object.fromEntries(lidToPhone), null, 2)); } catch (e) {}
+}
+function cacheLidMapping(lid, phone) {
+  if (!lid || !phone) return;
+  const clean = String(phone).replace(/\D/g, '');
+  if (clean.length < 10) return;
+  if (lidToPhone.get(lid) === clean) return;
+  lidToPhone.set(lid, clean);
+  saveLidMap();
+  console.log(`[LID] Mapped ${lid} → ${clean}`);
+}
+
+async function translateLidToPhone(lid) {
+  if (!lid) return null;
+  if (lidToPhone.has(lid)) return lidToPhone.get(lid);
+
+  // Method 1: Baileys signalRepository (internal API)
+  try {
+    const pnJid = await sock?.signalRepository?.lidMapping?.getPNForLID?.(lid + '@lid');
+    if (pnJid) {
+      const digits = String(pnJid).split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (digits.length >= 10) { cacheLidMapping(lid, digits); return digits; }
+    }
+  } catch (e) {}
+
+  // Method 2: onWhatsApp query (queries WA servers)
+  try {
+    const result = await sock?.onWhatsApp?.(lid + '@lid');
+    if (result?.[0]?.jid) {
+      const digits = result[0].jid.split('@')[0].replace(/\D/g, '');
+      if (digits.length >= 10) { cacheLidMapping(lid, digits); return digits; }
+    }
+  } catch (e) {}
+
+  // Method 3: store contacts
+  try {
+    const contacts = sock?.store?.contacts || {};
+    if (contacts[lid + '@lid']?.id) {
+      const digits = contacts[lid + '@lid'].id.split('@')[0].replace(/\D/g, '');
+      if (digits.length >= 10) { cacheLidMapping(lid, digits); return digits; }
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+// ================================================================
+// ADMIN LID CACHE (legacy, extra safety)
 // ================================================================
 let adminLids = new Set();
 function loadAdminLids() {
@@ -219,7 +281,7 @@ function loadState() {
       for (const p of arr) if (now - p.requestedAt < PENDING_EXPIRY_MS) pendingRequests.set(p.id, p);
     }
   } catch (e) {}
-  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} hardcoded=${ADMIN_LIDS.size}`);
+  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} lidMap=${lidToPhone.size}`);
 }
 function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue, null, 2)); } catch (e) {} }
 function saveGroups() { try { fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify([...joinedGroups.entries()].map(([jid, v]) => ({ jid, ...v })), null, 2)); } catch (e) {} }
@@ -244,27 +306,38 @@ function extractLidFromMsg(msg, senderJid) {
   for (const c of candidates) if (typeof c === 'string' && c.includes('@lid')) return c.split('@')[0];
   return null;
 }
-function isAdminSender(msg, senderJid) {
-  // 1. Check hardcoded/env admin LIDs first (WhatsApp sends only LID now)
-  const lid = extractLidFromMsg(msg, senderJid);
-  if (lid && ADMIN_LIDS.has(lid)) return true;
 
-  // 2. Check any phone candidate against admin phone
+async function isAdminSender(msg, senderJid) {
+  const lid = extractLidFromMsg(msg, senderJid);
+
+  // 1. Direct phone candidates in message key
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   if (candidates.includes(ADMIN_PHONE)) {
-    if (lid && !adminLids.has(lid)) {
-      adminLids.add(lid);
-      saveAdminLids();
-      pushLog('success', 'admin', `Registered admin LID ${lid}`);
-    }
+    if (lid) cacheLidMapping(lid, ADMIN_PHONE);
     return true;
   }
 
-  // 3. Check cached LIDs
+  // 2. Hardcoded LIDs (env fallback)
+  if (lid && ADMIN_LIDS.has(lid)) {
+    cacheLidMapping(lid, ADMIN_PHONE);
+    return true;
+  }
+
+  // 3. Translate LID → phone via Baileys
+  if (lid) {
+    const translated = await translateLidToPhone(lid);
+    if (translated === ADMIN_PHONE) {
+      if (!adminLids.has(lid)) { adminLids.add(lid); saveAdminLids(); }
+      return true;
+    }
+  }
+
+  // 4. Previously cached LIDs
   if (lid && adminLids.has(lid)) return true;
 
   return false;
 }
+
 function extractPhone(msg, senderJid) { const c = extractAllPhoneCandidates(msg, senderJid); return c.length > 0 ? c[0] : null; }
 function extractLid(msg, senderJid) { return extractLidFromMsg(msg, senderJid); }
 
@@ -611,10 +684,10 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v36.5*
+const COMMAND_LIST = `🥖 *BreadBot v36.6*
 
 *Test*
-!aitest · !scraperstatus · !scrapersearch <q> · !scrapergif <q>
+!testlid · !aitest · !scraperstatus · !scrapersearch <q> · !scrapergif <q>
 !test · !testall · !whoami
 
 *Pending*
@@ -635,7 +708,7 @@ const COMMAND_LIST = `🥖 *BreadBot v36.5*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION — MINIMAL CONFIG (working)
+// CONNECTION
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -702,6 +775,21 @@ async function connectBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // LID ↔ PN mapping events from Baileys
+    sock.ev.on('lid-mapping.update', (updates) => {
+      try {
+        if (Array.isArray(updates)) {
+          for (const u of updates) {
+            if (u?.id && u?.pn) cacheLidMapping(String(u.id).split('@')[0].split(':')[0], u.pn);
+          }
+        } else if (updates && typeof updates === 'object') {
+          for (const [k, v] of Object.entries(updates)) {
+            if (k && v) cacheLidMapping(String(k).split('@')[0].split(':')[0], v);
+          }
+        }
+      } catch (e) { pushLog('warn', 'lid', `lid-mapping event: ${e.message}`); }
+    });
+
     sock.ev.on('messages.upsert', async ({ messages }) => {
       pushLog('info', 'raw', `messages.upsert: ${messages?.length || 0}`);
       for (const msg of messages || []) {
@@ -749,13 +837,31 @@ async function handleMessage(msg) {
 
   if (!isGroup) activeDMs.add(chatJid);
 
-  pushLiveMessage({
-    id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
-    senderName: pushName, phone: phone || '—', lid: lid || '—',
-    text: text.slice(0, 200) || `[${mediaType}]`, mediaType
-  });
+  // Try to translate LID → phone immediately (populates cache for live panel too)
+  if (lid && !phone) {
+    const translated = await translateLidToPhone(lid);
+    if (translated) {
+      pushLiveMessage({
+        id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
+        senderName: pushName, phone: translated, lid: lid || '—',
+        text: text.slice(0, 200) || `[${mediaType}]`, mediaType
+      });
+    } else {
+      pushLiveMessage({
+        id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
+        senderName: pushName, phone: '—', lid: lid || '—',
+        text: text.slice(0, 200) || `[${mediaType}]`, mediaType
+      });
+    }
+  } else {
+    pushLiveMessage({
+      id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
+      senderName: pushName, phone: phone || '—', lid: lid || '—',
+      text: text.slice(0, 200) || `[${mediaType}]`, mediaType
+    });
+  }
 
-  const isAdmin = isAdminSender(msg, senderJid);
+  const isAdmin = await isAdminSender(msg, senderJid);
 
   // Track user history (non-admin DMs only)
   if (!isGroup && !isAdmin && text) {
@@ -784,10 +890,10 @@ async function handleMessage(msg) {
     return;
   }
 
-  // Groups: silent (greetings handled by scheduler). Admin is ignored here too.
+  // Groups: silent
   if (isGroup) return;
 
-  // Admin in DM without command → ignore (don't AI-reply to admin)
+  // Admin in DM without command → ignore
   if (isAdmin) {
     pushLog('info', 'admin', `Admin DM ignored (no command): "${text.slice(0, 60)}"`);
     return;
@@ -832,7 +938,6 @@ async function handleMessage(msg) {
           }
         }
       }
-      // No results OR vague → pending request + ask admin
       const history = userHistories.get(senderJid) || [];
       const id = createPendingRequest(senderJid, pushName, phone, history, intent);
       pushLog('warn', 'ai', `Pending ${id} for ${pushName}`);
@@ -872,10 +977,20 @@ async function handleAdminCommand(text, chatJid, msg) {
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nAdmin LIDs: *${[...ADMIN_LIDS].join(', ')}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*`); break;
+    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nLID map: *${lidToPhone.size}*`); break;
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
-      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${extractLid(msg, chatJid) || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected phone: *${ADMIN_PHONE}*\nHardcoded LIDs: *${[...ADMIN_LIDS].join(', ')}*\nCached LIDs: *${[...adminLids].join(', ') || 'none'}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*`);
+      const lid = extractLid(msg, chatJid);
+      const translated = lid ? await translateLidToPhone(lid) : null;
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nTranslated phone: *${translated || 'FAILED'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${(await isAdminSender(msg, chatJid)) ? 'YES ✅' : 'NO ❌'}*\nLID map size: *${lidToPhone.size}*`);
+      break;
+    }
+    case 'testlid': {
+      const lid = extractLid(msg, chatJid);
+      const candidates = extractAllPhoneCandidates(msg, chatJid);
+      const translated = lid ? await translateLidToPhone(lid) : null;
+      const mappings = [...lidToPhone.entries()].slice(0, 10).map(([l, p]) => `• ${l} → ${p}`).join('\n') || 'none';
+      await reply(`🔍 *LID Test*\n\nYour LID: *${lid || 'none'}*\nPhone candidates in msg: *${candidates.join(', ') || 'none'}*\nTranslated phone: *${translated || 'FAILED'}*\nExpected admin: *${ADMIN_PHONE}*\nTotal mappings cached: *${lidToPhone.size}*\n\n_All cached mappings:_\n${mappings}`);
       break;
     }
     case 'aitest': {
@@ -913,7 +1028,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
     case 'stats': {
       const s = (resetDailyStats(), dailyStats);
-      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nLID map: *${lidToPhone.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail (of ${scraperStats.searchCalls})\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail (of ${scraperStats.gifCalls})\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
@@ -1095,6 +1210,7 @@ async function runFullTestSuite() {
     `💬 DMs: ${activeDMs.size}`,
     `📋 Queue: ${joinQueue.length}`,
     `⏳ Pending: ${pendingRequests.size}`,
+    `🆔 LID map: ${lidToPhone.size}`,
     `🕒 ${Date.now() - t0}ms`].join('\n');
 }
 
@@ -1142,6 +1258,7 @@ app.get('/admin/scrapergif', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'q required' });
   const r = await scraperGif(q); res.json(r);
 });
+app.get('/admin/lidmap', (req, res) => res.json({ count: lidToPhone.size, map: Object.fromEntries(lidToPhone) }));
 app.get('/admin/pending', (req, res) => res.json({ pending: [...pendingRequests.values()] }));
 app.post('/admin/pending/:id/resolve', async (req, res) => {
   const { id } = req.params;
@@ -1160,15 +1277,16 @@ app.get('/admin/stats', (req, res) => {
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
     lastJoinAt: lastJoinAt || null,
     dailyStats, scraperStats,
-    adminLids: [...adminLids], adminPhone: ADMIN_PHONE, hardcodedLids: [...ADMIN_LIDS],
+    adminPhone: ADMIN_PHONE,
+    lidMapSize: lidToPhone.size,
     pendingCount: pendingRequests.size,
     pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query }))
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.5</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.6</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v36.5</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v36.6</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LID map: <b id="lidMapSize">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
@@ -1186,7 +1304,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.hardcodedLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('lidMapSize').textContent=d.lidMapSize||0;const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}
@@ -1209,14 +1327,14 @@ setInterval(processJoinQueue, 30 * 1000);
 // ================================================================
 loadState();
 loadAdminLids();
+loadLidMap();
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Admin phone (digits): ${ADMIN_PHONE}`);
-  console.log(`Hardcoded admin LIDs: ${[...ADMIN_LIDS].join(', ')}`);
-  console.log(`Cached admin LIDs: ${[...adminLids].join(', ') || 'none'}`);
+  console.log(`LID→phone mappings: ${lidToPhone.size}`);
   pushLog('info', 'system', `Boot port ${PORT}`);
   pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
-  pushLog('info', 'system', `Admin LIDs (hardcoded): ${[...ADMIN_LIDS].join(', ')}`);
+  pushLog('info', 'system', `LID map loaded: ${lidToPhone.size}`);
   pushLog('info', 'system', `Scraper: ${SCRAPER_URL}`);
   scheduleGreetings();
   scheduleDailyReport();

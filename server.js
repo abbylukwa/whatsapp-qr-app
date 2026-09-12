@@ -1,8 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v34.0
-// Any-link auto-join | Scraper preview → broadcast | Full GUI
+// WHATSAPP BOT v36.0
+// AI fallback fixed | Video support | Learn-from-admin flow
 // ================================================================
 
 const express = require('express');
@@ -10,11 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const NodeCache = require('node-cache');
 const {
-  makeWASocket,
-  DisconnectReason,
-  useMultiFileAuthState,
-  Browsers,
-  fetchLatestBaileysVersion
+  makeWASocket, DisconnectReason, useMultiFileAuthState,
+  Browsers, fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -27,6 +24,7 @@ const PORT = process.env.PORT || 10000;
 const AUTH_FOLDER = 'auth_info';
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '');
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
+const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
 
 const REWIND_KEY = process.env.REWIND_KEY || 'sk-rewind-31c3a65acc981512de959195485deec0';
 const SCRAPER_URL = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/, '');
@@ -34,6 +32,7 @@ const SCRAPER_URL = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onr
 const JOIN_INTERVAL_MS = parseInt(process.env.JOIN_INTERVAL_MS || '480000', 10);
 const JOIN_QUEUE_FILE = path.join(__dirname, 'join_queue.json');
 const JOINED_GROUPS_FILE = path.join(__dirname, 'joined_groups.json');
+const PENDING_FILE = path.join(__dirname, 'pending_requests.json');
 
 const GREETING_MIN_HOURS = 4;
 const GREETING_MAX_HOURS = 8;
@@ -41,31 +40,54 @@ const DAILY_REPORT_HOUR = parseInt(process.env.DAILY_REPORT_HOUR || '22', 10);
 const BC_DELAY_MIN_MS = 2000;
 const BC_DELAY_MAX_MS = 6000;
 
+// Per-user DM history (for admin context)
+const USER_HISTORY_SIZE = 4;
+const PENDING_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+
 // ================================================================
-// FORBIDDEN / FILLER FILTER
+// ADMIN LID CACHE
 // ================================================================
-const FORBIDDEN_REPLY_WORDS = [
-  'cannot', "can't", 'unable to', 'i refuse', 'not allowed',
-  'against my guidelines', 'as an ai', 'i am an ai', 'language model',
-  'sorry, i', 'i apologize', 'token', 'api_key', 'console.log',
-  'error:', 'stack trace', 'traceback', 'debug', 'http', 'json',
-  'node.js', 'npm', 'how can i help you today', 'how may i help you',
-  'is there anything else', 'anything else i can help', 'let me know if',
-  'feel free to', 'i am here to help', "i'm here to help",
-  'i am happy to help', "i'm happy to help", 'happy to assist',
-  'how can i help', 'what can i do for you', 'do you need any',
-  'please let me know', 'i hope this helps', 'hope this helps',
-  'thank you for reaching out', 'thanks for reaching out',
-  'don\'t hesitate to ask', 'do not hesitate', 'as an assistant',
-  'greetings!', 'how are you today?', 'i understand that',
-  'based on your query', 'to answer your question', 'in response to'
-].map(w => w.toLowerCase());
+let adminLids = new Set();
+function loadAdminLids() {
+  try {
+    if (fs.existsSync(ADMIN_LID_FILE)) adminLids = new Set(JSON.parse(fs.readFileSync(ADMIN_LID_FILE, 'utf8')) || []);
+  } catch (e) {}
+}
+function saveAdminLids() {
+  try { fs.writeFileSync(ADMIN_LID_FILE, JSON.stringify([...adminLids], null, 2)); } catch (e) {}
+}
+
+// ================================================================
+// FORBIDDEN / FILLER FILTER  (word-boundary, no substring bug)
+// ================================================================
+const FORBIDDEN_PATTERNS = [
+  /\bcannot\b/i, /\bcan'?t\b/i, /\bunable to\b/i,
+  /\bi refuse\b/i, /\bnot allowed\b/i,
+  /\bagainst my guidelines\b/i, /\bas an ai\b/i, /\bi am an ai\b/i,
+  /\blanguage model\b/i, /\bsorry,? i\b/i, /\bi apologize\b/i,
+  /\bapi[_ ]?key\b/i, /\bconsole\.log\b/i, /\berror:/i,
+  /\bstack trace\b/i, /\btraceback\b/i, /\bdebug\b/i,
+  /\bnode\.js\b/i, /\bnpm\b/i,
+  /how can i help you today\??/i, /how may i help you\??/i,
+  /is there anything else/i, /anything else i can help/i,
+  /let me know if/i, /feel free to/i,
+  /\bi am here to help\b/i, /\bi'?m here to help\b/i,
+  /\bi am happy to help\b/i, /\bi'?m happy to help\b/i,
+  /happy to assist/i, /how can i help/i, /what can i do for you/i,
+  /do you need any/i, /please let me know/i,
+  /i hope this helps/i, /hope this helps/i,
+  /thank you for reaching out/i, /thanks for reaching out/i,
+  /don'?t hesitate to/i, /do not hesitate/i, /\bas an assistant\b/i,
+  /\bgreetings!\b/i, /how are you today\?/i, /i understand that/i,
+  /based on your (query|request)/i, /to answer your question/i,
+  /in response to/i, /\bapi_key\b/i, /\btoken\b/i
+];
 
 function containsForbidden(text) {
   if (!text) return true;
-  const low = text.toLowerCase();
-  return FORBIDDEN_REPLY_WORDS.some(w => low.includes(w));
+  return FORBIDDEN_PATTERNS.some(re => re.test(text));
 }
+
 function humanize(text) {
   if (!text) return '';
   let t = text;
@@ -143,10 +165,16 @@ const MAX_RECONNECT = 10;
 let isConnecting = false;
 
 const processedMessages = new Set();
-const messageHistory = new Map();
 const activeChats = new Set();
 const activeDMs = new Set();
 const replyCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+
+// Per-user last N messages
+const userHistories = new Map(); // senderJid -> [{ text, ts }]
+
+// Pending requests awaiting admin guidance
+// { id, userJid, userName, userPhone, userHistory, requestedAt, intent }
+const pendingRequests = new Map();
 
 let joinQueue = [];
 let joinInProgress = false;
@@ -154,7 +182,6 @@ let lastJoinAt = 0;
 const joinedGroups = new Map();
 const lastGreetingAt = new Map();
 
-// Scraper usage tracking
 const scraperStats = {
   searchCalls: 0, searchSuccess: 0, searchFail: 0,
   gifCalls: 0, gifSuccess: 0, gifFail: 0,
@@ -162,25 +189,14 @@ const scraperStats = {
   lastGifQuery: null, lastGifAt: null
 };
 
-// Scraper preview cache (for broadcast preview flow)
-let previewCache = {
-  imageUrls: [],       // array of URLs from last search
-  imageIndex: 0,       // which one is currently previewed
-  gifUrls: [],
-  gifIndex: 0,
-  currentType: null,   // 'image' | 'gif'
-  currentUrl: null,
-  currentCaption: null
-};
-
-// Daily stats
+let previewCache = { imageUrls: [], imageIndex: 0, gifUrls: [], gifIndex: 0, currentType: null, currentUrl: null };
 let dailyStats = null;
 let lastDailyReportDate = null;
 
 function resetDailyStats() {
   const today = new Date().toISOString().slice(0, 10);
   if (lastDailyReportDate !== today) {
-    dailyStats = { date: today, joined: 0, failed: 0, dmsReplied: 0, broadcastsSent: 0, greetingsSent: 0, scraperSearches: 0, scraperGifs: 0 };
+    dailyStats = { date: today, joined: 0, failed: 0, dmsReplied: 0, broadcastsSent: 0, greetingsSent: 0, scraperSearches: 0, scraperGifs: 0, picsSent: 0, videosSent: 0, aiErrors: 0, pendingCreated: 0, pendingResolved: 0 };
   }
 }
 resetDailyStats();
@@ -196,13 +212,54 @@ function loadState() {
       for (const g of arr) joinedGroups.set(g.jid, { name: g.name, joinedAt: g.joinedAt });
     }
   } catch (e) {}
-  pushLog('info', 'state', `Loaded queue=${joinQueue.length}, groups=${joinedGroups.size}`);
+  try {
+    if (fs.existsSync(PENDING_FILE)) {
+      const arr = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')) || [];
+      const now = Date.now();
+      for (const p of arr) if (now - p.requestedAt < PENDING_EXPIRY_MS) pendingRequests.set(p.id, p);
+    }
+  } catch (e) {}
+  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size}`);
 }
 function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue, null, 2)); } catch (e) {} }
 function saveGroups() { try { fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify([...joinedGroups.entries()].map(([jid, v]) => ({ jid, ...v })), null, 2)); } catch (e) {} }
+function savePending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify([...pendingRequests.values()], null, 2)); } catch (e) {} }
 
 // ================================================================
-// INVITE LINK PARSING
+// ADMIN DETECTION
+// ================================================================
+function extractAllPhoneCandidates(msg, senderJid) {
+  const phones = new Set();
+  const candidates = [msg.key?.participantPn, msg.key?.senderPn, msg.key?.remoteJidAlt, msg.key?.participantAlt, senderJid, msg.key?.remoteJid].filter(Boolean);
+  for (const c of candidates) {
+    if (typeof c === 'string') {
+      const digits = c.split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (digits.length >= 10) phones.add(digits);
+    }
+  }
+  return [...phones];
+}
+function extractLidFromMsg(msg, senderJid) {
+  const candidates = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
+  for (const c of candidates) if (typeof c === 'string' && c.includes('@lid')) return c.split('@')[0];
+  return null;
+}
+function isAdminSender(msg, senderJid) {
+  const candidates = extractAllPhoneCandidates(msg, senderJid);
+  if (candidates.includes(ADMIN_PHONE)) {
+    const lid = extractLidFromMsg(msg, senderJid);
+    if (lid && !adminLids.has(lid)) { adminLids.add(lid); saveAdminLids(); pushLog('success', 'admin', `Registered admin LID ${lid}`); }
+    return true;
+  }
+  const lid = extractLidFromMsg(msg, senderJid);
+  if (lid && adminLids.has(lid)) return true;
+  return false;
+}
+function extractPhone(msg, senderJid) { const c = extractAllPhoneCandidates(msg, senderJid); return c.length > 0 ? c[0] : null; }
+function extractLid(msg, senderJid) { return extractLidFromMsg(msg, senderJid); }
+
+// ================================================================
+// INVITE LINK
 // ================================================================
 function extractAllInviteCodes(text) {
   if (!text) return [];
@@ -217,14 +274,12 @@ function extractAllInviteCodes(text) {
 // JOIN QUEUE
 // ================================================================
 function queueJoin(code, addedBy = 'unknown', source = 'dm') {
-  if (!code) return false;
-  if (joinQueue.some(q => q.code === code)) return false;
+  if (!code || joinQueue.some(q => q.code === code)) return false;
   joinQueue.push({ code, addedAt: Date.now(), addedBy, source });
   saveQueue();
   pushLog('info', 'join', `Queued ${code} (by ${addedBy} via ${source})`);
   return true;
 }
-
 async function processJoinQueue() {
   if (joinInProgress || !sock || connectionStatus !== 'connected' || joinQueue.length === 0) return;
   if (Date.now() - lastJoinAt < JOIN_INTERVAL_MS) return;
@@ -236,64 +291,53 @@ async function processJoinQueue() {
     pushLog('info', 'join', `Joining ${item.code}...`);
     const res = await sock.groupAcceptInvite(item.code);
     lastJoinAt = Date.now();
-    if (res) {
-      joinedGroups.set(res, { name: null, joinedAt: Date.now() });
-      saveGroups();
-      dailyStats.joined++;
-      pushLog('success', 'join', `✅ Joined ${res}`);
-    }
+    if (res) { joinedGroups.set(res, { name: null, joinedAt: Date.now() }); saveGroups(); dailyStats.joined++; pushLog('success', 'join', `✅ Joined ${res}`); }
   } catch (e) {
     dailyStats.failed++;
     pushLog('error', 'join', `Failed ${item.code}: ${e.message}`);
-  } finally {
-    joinInProgress = false;
-    setTimeout(processJoinQueue, JOIN_INTERVAL_MS);
-  }
+  } finally { joinInProgress = false; setTimeout(processJoinQueue, JOIN_INTERVAL_MS); }
 }
 
 // ================================================================
-// PHONE EXTRACTION
-// ================================================================
-function extractPhone(msg, senderJid) {
-  const c = [msg.key?.participantPn, msg.key?.senderPn, msg.key?.remoteJidAlt, msg.key?.participantAlt, senderJid].filter(Boolean);
-  for (const x of c) if (typeof x === 'string' && x.endsWith('@s.whatsapp.net')) return x.split('@')[0].split(':')[0].replace(/\D/g, '');
-  return null;
-}
-function extractLid(msg, senderJid) {
-  const c = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
-  for (const x of c) if (typeof x === 'string' && x.includes('@lid')) return x.split('@')[0];
-  return null;
-}
-function isAdminPhone(phone) { return phone && phone.replace(/\D/g, '') === ADMIN_PHONE; }
-
-// ================================================================
-// REWIND AI (DM only)
+// REWIND AI  (with raw error logging)
 // ================================================================
 async function askRewind(prompt, systemPrompt) {
-  if (!REWIND_KEY) return null;
+  if (!REWIND_KEY) { pushLog('error', 'ai', 'REWIND_KEY missing'); return null; }
   try {
     const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
       model: 'rewind-uncensored',
       messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }]
-    }, { headers: { 'Authorization': `Bearer ${REWIND_KEY}`, 'Content-Type': 'application/json' }, timeout: 15000 });
-    return r.data?.choices?.[0]?.message?.content ? humanize(r.data.choices[0].message.content) : null;
-  } catch (e) { console.error(`Rewind failed: ${e.message}`); return null; }
+    }, { headers: { 'Authorization': `Bearer ${REWIND_KEY}`, 'Content-Type': 'application/json' }, timeout: 20000 });
+
+    const raw = r.data?.choices?.[0]?.message?.content;
+    if (!raw) {
+      pushLog('warn', 'ai', `Empty Rewind response`, { status: r.status, keys: Object.keys(r.data || {}) });
+      return null;
+    }
+    const cleaned = humanize(raw);
+    if (!cleaned) { pushLog('warn', 'ai', `Rewind output empty after humanize`); return null; }
+    return cleaned;
+  } catch (e) {
+    const status = e.response?.status;
+    const body = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : '';
+    pushLog('error', 'ai', `Rewind failed: ${status || ''} ${e.message}`, { body });
+    resetDailyStats(); dailyStats.aiErrors++;
+    return null;
+  }
 }
 
 // ================================================================
-// SCRAPER CLIENT (tracked)
+// SCRAPER
 // ================================================================
 async function scraperSearch(query, site = 'darknaija') {
   scraperStats.searchCalls++;
   scraperStats.lastSearchQuery = query;
   scraperStats.lastSearchAt = Date.now();
-  resetDailyStats();
-  dailyStats.scraperSearches++;
+  resetDailyStats(); dailyStats.scraperSearches++;
   try {
     const r = await axios.post(`${SCRAPER_URL}/search`, { query, site }, { timeout: 30000 });
-    const images = r.data?.images || [];
     scraperStats.searchSuccess++;
-    return { ok: true, images };
+    return { ok: true, images: r.data?.images || [] };
   } catch (e) {
     scraperStats.searchFail++;
     pushLog('error', 'scraper', `search failed: ${e.message}`);
@@ -304,13 +348,11 @@ async function scraperGif(query) {
   scraperStats.gifCalls++;
   scraperStats.lastGifQuery = query;
   scraperStats.lastGifAt = Date.now();
-  resetDailyStats();
-  dailyStats.scraperGifs++;
+  resetDailyStats(); dailyStats.scraperGifs++;
   try {
     const r = await axios.get(`${SCRAPER_URL}/gif?q=${encodeURIComponent(query)}`, { timeout: 30000 });
-    const gifs = r.data?.gifs || [];
     scraperStats.gifSuccess++;
-    return { ok: true, gifs };
+    return { ok: true, gifs: r.data?.gifs || [] };
   } catch (e) {
     scraperStats.gifFail++;
     pushLog('error', 'scraper', `gif failed: ${e.message}`);
@@ -322,23 +364,131 @@ async function scraperStatus() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-function detectImageIntent(text) {
-  const low = (text || '').toLowerCase();
-  const gifT = ['send gif', 'gif of', 'gif ya', 'gif ye'];
-  const imgT = ['send pic', 'send image', 'send photo', 'show me', 'ndipe', 'nditumire', 'ndiratidze', 'ndoda mufananidzo', 'mufananidzo', 'pic of', 'image of', 'photo of', 'picture of'];
-  if (gifT.some(t => low.includes(t))) {
-    const cleaned = low.replace(/send gif( of| ya| ye)?|gif( of| ya| ye)?/g, '').trim();
-    return { type: 'gif', query: cleaned || low };
+// ================================================================
+// INTENT DETECTION (images, videos, gifs)
+// ================================================================
+const VAGUE_QUERIES = ['', 'something', 'anything', 'nice', 'good', 'stuff', 'it', 'them', 'some', 'please', 'pls', 'now', 'me', 'one'];
+
+function detectMediaIntent(text) {
+  const low = (text || '').toLowerCase().trim();
+  if (!low) return null;
+
+  // GIF
+  if (/\b(gif|gifs)\b/i.test(low)) {
+    let q = low.replace(/^.*?\b(gif|gifs)\b\s*(of|ya|ye|za)?\s*/i, '').trim().replace(/\s+/g, ' ');
+    return { type: 'gif', query: q || 'funny' };
   }
-  if (imgT.some(t => low.includes(t))) {
-    const cleaned = low.replace(/send (pic|image|photo)( of)?|show me|ndipe|nditumire|ndiratidze|ndoda mufananidzo|mufananidzo|pic of|image of|photo of|picture of/g, '').trim();
-    return { type: 'image', query: cleaned || low };
+  // Video
+  if (/\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b/i.test(low)) {
+    let q = low.replace(/^.*?\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b\s*(of|ya|ye|za)?\s*/i, '').trim().replace(/\s+/g, ' ');
+    return { type: 'video', query: q || 'funny' };
+  }
+  // Image
+  const mediaRe = /\b(pic|pics|picture|pictures|image|images|photo|photos|mapic|mapics|mufananidzo|mifananidzo)\b/i;
+  if (mediaRe.test(low)) {
+    let q = low;
+    q = q.replace(/^(please\s+|pls\s+|hey\s+|hi\s+|yo\s+)?(can\s+you\s+)?(send|share|give|show|drop|post|ndipe|ndipoo|nditumire|ndiratidze|ndoda)\s+(me\s+)?(a\s+|some\s+|any\s+)?/i, '');
+    q = q.replace(/\b(pic|pics|picture|pictures|image|images|photo|photos|mapic|mapics|mufananidzo|mifananidzo)\b/gi, '');
+    q = q.replace(/\b(of|ya|ye|za|for|about|ndiye|wa)\b/gi, '');
+    q = q.replace(/[?.!,]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return { type: 'image', query: q || 'naija' };
   }
   return null;
 }
 
+function isVagueQuery(q) {
+  return !q || VAGUE_QUERIES.includes(q.toLowerCase().trim());
+}
+
 // ================================================================
-// GREETING SCHEDULER
+// LEARN-FROM-ADMIN FLOW
+// ================================================================
+function createPendingRequest(userJid, userName, userPhone, history, intent) {
+  const id = Math.random().toString(36).slice(2, 8);
+  pendingRequests.set(id, {
+    id, userJid, userName, userPhone,
+    userHistory: history.slice(-USER_HISTORY_SIZE),
+    requestedAt: Date.now(), intent
+  });
+  savePending();
+  resetDailyStats(); dailyStats.pendingCreated++;
+  return id;
+}
+
+async function forwardToAdminForHelp(id, pending) {
+  const historyBlock = pending.userHistory.map((h, i) => `${i + 1}. ${h.text}`).join('\n');
+  const msg = [
+    `❓ *Unclear request*`,
+    `👤 ${pending.userName} (${pending.userPhone || 'no phone'})`,
+    `💬 Intent: ${pending.intent.type} — query "${pending.intent.query || '(empty)'}"`,
+    ``,
+    `*Last ${pending.userHistory.length} messages from user:*`,
+    historyBlock || '(none)',
+    ``,
+    `Reply with one of:`,
+    `• \`!teach ${id} <search query>\` — bot searches & sends to user`,
+    `• \`!teach ${id} skip\` — bot replies casually to user`,
+    `• \`!teach ${id} say <text>\` — bot sends your exact text`
+  ].join('\n');
+  await alertAdmin(msg);
+}
+
+async function resolvePending(id, action, payload, adminChatJid) {
+  const p = pendingRequests.get(id);
+  if (!p) return { ok: false, error: `No pending request ${id}` };
+  const reply = (t) => sock.sendMessage(adminChatJid, { text: t });
+
+  try {
+    if (action === 'skip') {
+      const casual = await askRewind(
+        `User said: "${p.userHistory.map(h => h.text).join(' / ')}". Reply casually and warmly. No filler. 1 short sentence.`,
+        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Warm, casual WhatsApp tone.`
+      );
+      const fallback = casual || 'Sorry, couldn\'t find that right now 😅';
+      await sock.sendMessage(p.userJid, { text: fallback });
+      pendingRequests.delete(id); savePending();
+      resetDailyStats(); dailyStats.pendingResolved++;
+      await reply(`✅ Replied casually to ${p.userName}.`);
+      return { ok: true };
+    }
+    if (action === 'say') {
+      await sock.sendMessage(p.userJid, { text: payload });
+      pendingRequests.delete(id); savePending();
+      resetDailyStats(); dailyStats.pendingResolved++;
+      await reply(`✅ Sent your text to ${p.userName}.`);
+      return { ok: true };
+    }
+    // default: search
+    const query = payload || p.intent.query;
+    await reply(`🔎 Searching "${query}" for ${p.userName}...`);
+    if (p.intent.type === 'video' || p.intent.type === 'gif') {
+      const r = await scraperGif(query);
+      if (!r.ok || r.gifs.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
+      await sock.sendMessage(p.userJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: '' });
+      resetDailyStats(); dailyStats.picsSent++;
+    } else {
+      const r = await scraperSearch(query);
+      if (!r.ok || r.images.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
+      const caption = await askRewind(
+        `User asked for "${query}". Short casual reply (max 8 words) with emoji. No filler.`,
+        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp.`
+      );
+      const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
+      await sock.sendMessage(p.userJid, { image: { url: r.images[0] }, caption: finalCaption });
+      resetDailyStats(); dailyStats.picsSent++;
+    }
+    pendingRequests.delete(id); savePending();
+    resetDailyStats(); dailyStats.pendingResolved++;
+    await reply(`✅ Sent to ${p.userName}.`);
+    return { ok: true };
+  } catch (e) {
+    await reply(`❌ ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ================================================================
+// GREETINGS
 // ================================================================
 const GREETING_PHRASES = {
   morning: ['Morning all ☀️', 'Mangwanani guys ☀️', 'Good morning fam', 'Morning 🌅', 'Rise and shine ☀️'],
@@ -354,13 +504,11 @@ function getTimeOfDay() {
   return 'night';
 }
 function pickGreeting(p) { const pool = GREETING_PHRASES[p] || GREETING_PHRASES.midday; return pool[Math.floor(Math.random() * pool.length)]; }
-
 function scheduleGreetings() {
   setInterval(async () => {
     if (!sock || connectionStatus !== 'connected' || joinedGroups.size === 0) return;
     const now = Date.now();
-    const minMs = GREETING_MIN_HOURS * 3600 * 1000;
-    const maxMs = GREETING_MAX_HOURS * 3600 * 1000;
+    const minMs = GREETING_MIN_HOURS * 3600 * 1000, maxMs = GREETING_MAX_HOURS * 3600 * 1000;
     for (const [jid] of joinedGroups) {
       const sinceLast = now - (lastGreetingAt.get(jid) || 0);
       if (sinceLast < minMs) continue;
@@ -379,7 +527,7 @@ function scheduleGreetings() {
 }
 
 // ================================================================
-// DAILY SUMMARY
+// DAILY REPORT
 // ================================================================
 function scheduleDailyReport() {
   setInterval(async () => {
@@ -387,22 +535,22 @@ function scheduleDailyReport() {
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     if (now.getHours() !== DAILY_REPORT_HOUR || lastDailyReportDate === today) return;
-    lastDailyReportDate = today;
-    resetDailyStats();
+    lastDailyReportDate = today; resetDailyStats();
     const s = dailyStats || {};
     const summary = [
       `📊 *Daily Summary — ${today}*`, ``,
       `👥 Groups: *${joinedGroups.size}*`,
       `💬 DMs: *${activeDMs.size}*`,
-      `📋 Queue: *${joinQueue.length}*`, ``,
-      `*Today*`,
+      `📋 Queue: *${joinQueue.length}*`,
+      `⏳ Pending: *${pendingRequests.size}*`, ``,
       `✅ Joined: *${s.joined || 0}*`,
       `❌ Failed: *${s.failed || 0}*`,
       `💌 DM replies: *${s.dmsReplied || 0}*`,
+      `🖼️ Pics/Videos sent: *${(s.picsSent || 0) + (s.videosSent || 0)}*`,
       `📢 Broadcasts: *${s.broadcastsSent || 0}*`,
       `👋 Greetings: *${s.greetingsSent || 0}*`,
-      `🔎 Scraper searches: *${s.scraperSearches || 0}*`,
-      `🎬 Scraper GIFs: *${s.scraperGifs || 0}*`, ``,
+      `🤖 AI errors: *${s.aiErrors || 0}*`,
+      `❓ Pending created/resolved: *${s.pendingCreated || 0}/${s.pendingResolved || 0}*`, ``,
       `Uptime: ${Math.floor((Date.now() - botStartTime) / 3600000)}h`
     ].join('\n');
     try { await sock.sendMessage(ADMIN_JID, { text: summary }); pushLog('success', 'daily', 'Daily summary sent'); }
@@ -414,12 +562,10 @@ function scheduleDailyReport() {
 // BROADCAST
 // ================================================================
 function randomBcDelay() { return BC_DELAY_MIN_MS + Math.floor(Math.random() * (BC_DELAY_MAX_MS - BC_DELAY_MIN_MS)); }
-
 async function broadcast({ message, imageUrl = null, gifUrl = null, mode = 'all' }) {
   const targets = [];
   if (mode === 'all' || mode === 'groups') for (const jid of joinedGroups.keys()) targets.push({ jid, type: 'group' });
   if (mode === 'all' || mode === 'dms') for (const jid of activeDMs) targets.push({ jid, type: 'dm' });
-
   const results = { sent: 0, failed: 0, total: targets.length, errors: [], mode };
   pushLog('info', 'broadcast', `Broadcasting to ${targets.length} (${mode})`);
   for (let i = 0; i < targets.length; i++) {
@@ -458,33 +604,30 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v34*
+const COMMAND_LIST = `🥖 *BreadBot v36*
 
-*Group joins (any link, DM or group)*
-Just post/forward a link → auto-queued (8-min spacing)
+*Pending (learn from admin)*
+!pending — list open pending requests
+!teach <id> <query> — send scraped image/video to user
+!teach <id> say <text> — send exact text to user
+!teach <id> skip — reply casually
+
+*Group joins*
 !join <link> · !joinall <links...>
 !queue · !clearsqueue · !groups · !leave <jid>
 
 *Scraper preview → broadcast*
-!pic <query> — scrape 1 image & send to you
-!nextpic — cycle to next image
-!gif <query> — scrape 1 GIF & send to you
-!nextgif — cycle to next GIF
-!bcastpic <caption> — broadcast previewed image to ALL
-!bcastgif <caption> — broadcast previewed GIF to ALL
-!bcastpicdm / !bcastpicgroup — same but DMs/groups only
+!pic <query> · !nextpic · !gif <query> · !nextgif
+!bcastpic <caption> · !bcastpicdm <caption> · !bcastpicgroup <caption>
+!bcastgif <caption>
 
-*Broadcast (text)*
-!all <message> — DMs + groups
-!bcgroup <message> — groups only
-!bcdm <message> — DMs only
+*Broadcast*
+!all <msg> · !bcgroup <msg> · !bcdm <msg>
 !allimg <url> | <caption>
-!ad <title> | <body> | [cta] | [link] | [style]
-!bcad
+!ad <title> | <body> | [cta] | [link] | [style] · !bcad
 
 *Diagnostics*
-!test · !testall · !whoami · !stats · !ping · !summary
-!scraperstats — scraper usage totals`;
+!test · !testall · !whoami · !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
 // CONNECTION
@@ -512,7 +655,7 @@ async function connectBot() {
         botStartTime = Date.now();
         botNumber = sock.user?.id?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
-        await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n🕒 ${new Date().toLocaleString()}\n\nPost/forward any group link (DM or group) → auto-queued.\nDaily summary at ${DAILY_REPORT_HOUR}:00.`);
+        await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n🕒 ${new Date().toLocaleString()}\n\n${COMMAND_LIST}`);
       }
       if (connection === 'close') {
         isConnecting = false;
@@ -540,9 +683,7 @@ async function connectBot() {
     connectionStatus = 'error';
   }
 }
-async function disconnectBot() {
-  if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); }
-}
+async function disconnectBot() { if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); } }
 function refreshQR() { qrDataUri = null; connectionStatus = 'disconnected'; disconnectBot(); setTimeout(connectBot, 1500); }
 
 // ================================================================
@@ -577,88 +718,105 @@ async function handleMessage(msg) {
     text: text.slice(0, 200) || `[${mediaType}]`, mediaType
   });
 
-  const isAdmin = isAdminPhone(phone);
+  const isAdmin = isAdminSender(msg, senderJid);
 
-  // ── ANY LINK (DM or group) → queue ──
+  // Track user history (DMs only, non-admin)
+  if (!isGroup && !isAdmin && text) {
+    if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
+    const h = userHistories.get(senderJid);
+    h.push({ text, ts: Date.now() });
+    if (h.length > USER_HISTORY_SIZE * 2) h.shift();
+  }
+
+  // Any invite link → queue
   const codes = extractAllInviteCodes(text);
   if (codes.length > 0) {
-    // Ignore links the bot itself posted
     let added = 0;
     for (const c of codes) if (queueJoin(c, phone || pushName, chatType)) added++;
     if (added > 0) {
       pushLog('info', 'join', `Queued ${added}/${codes.length} from ${phone || pushName} via ${chatType}`);
-      // Only confirm in DM (don't spam the group)
-      if (!isGroup) {
-        try {
-          await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}\nNext join in ≤ ${Math.ceil(JOIN_INTERVAL_MS/60000)} min.` });
-        } catch (e) {}
-      }
+      if (!isGroup) { try { await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` }); } catch (e) {} }
       processJoinQueue();
     }
-    // Don't return here — if admin also sends a command, let it through
   }
 
-  // ── ADMIN DM commands ──
+  // Admin commands
   if (!isGroup && isAdmin && text.startsWith('!')) {
-    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]}`);
+    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone})`);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
 
-  // ── GROUP: silent (greetings handled by scheduler) ──
+  // Groups silent
   if (isGroup) return;
 
-  // ── NON-ADMIN DM: Rewind + scraper ──
+  // ── NON-ADMIN DM ──
   if (!isGroup && !isAdmin) {
-    if (!messageHistory.has(senderJid)) messageHistory.set(senderJid, []);
-    const hist = messageHistory.get(senderJid);
-    if (hist.includes(text)) return;
-    hist.push(text);
-    if (hist.length > 5) hist.shift();
-
     const lang = detectLanguage(text);
     const langName = LANG_NAMES[lang] || 'English';
 
-    const intent = detectImageIntent(text);
-    if (intent && intent.query) {
-      if (intent.type === 'gif') {
-        const r = await scraperGif(intent.query);
-        if (r.ok && r.gifs.length > 0) {
-          const caption = await askRewind(
-            `User asked for a GIF of "${intent.query}". Short casual reply (max 8 words) with emoji. No filler.`,
-            `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp. Reply in ${langName}. Max 8 words.`
-          );
-          const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
-          try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: finalCaption }, { quoted: msg }); }
-          catch (e) { await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
-          resetDailyStats(); dailyStats.dmsReplied++;
-          return;
-        }
-      } else {
-        const r = await scraperSearch(intent.query);
-        if (r.ok && r.images.length > 0) {
-          const caption = await askRewind(
-            `User asked for a picture of "${intent.query}". Short casual reply (max 8 words) with emoji. No filler.`,
-            `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp. Reply in ${langName}. Max 8 words.`
-          );
-          const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
-          try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: finalCaption }, { quoted: msg }); }
-          catch (e) { await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg }); }
-          resetDailyStats(); dailyStats.dmsReplied++;
-          return;
+    // 1. Media intent → try scraper
+    const intent = detectMediaIntent(text);
+    if (intent) {
+      pushLog('info', 'pic', `Intent ${intent.type} — "${intent.query}" from ${pushName}`);
+      const vague = isVagueQuery(intent.query);
+      if (!vague) {
+        if (intent.type === 'video' || intent.type === 'gif') {
+          const r = await scraperGif(intent.query);
+          if (r.ok && r.gifs.length > 0) {
+            const caption = await askRewind(
+              `User asked for a ${intent.type} of "${intent.query}". Short casual reply (max 8 words) with emoji. No filler.`,
+              `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp. Reply in ${langName}. Max 8 words.`
+            );
+            const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
+            try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: finalCaption }, { quoted: msg }); }
+            catch (e) { await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
+            resetDailyStats();
+            if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
+            return;
+          }
+        } else {
+          const r = await scraperSearch(intent.query);
+          if (r.ok && r.images.length > 0) {
+            const caption = await askRewind(
+              `User asked for a picture of "${intent.query}". Short casual reply (max 8 words) with emoji. No filler.`,
+              `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp. Reply in ${langName}. Max 8 words.`
+            );
+            const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
+            try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: finalCaption }, { quoted: msg }); }
+            catch (e) { await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg }); }
+            resetDailyStats(); dailyStats.picsSent++;
+            return;
+          }
         }
       }
+      // No results OR vague query → forward to admin
+      const history = userHistories.get(senderJid) || [];
+      const id = createPendingRequest(senderJid, pushName, phone, history, intent);
+      pushLog('warn', 'ai', `Pending ${id} created for ${pushName} (${intent.type}/${intent.query})`);
+      // Acknowledge to user casually
+      const ack = await askRewind(
+        `The user asked for something. Reply casually that you're checking and will send shortly (max 8 words). No filler.`,
+        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp.`
+      );
+      const finalAck = (ack && !containsForbidden(ack)) ? ack : 'Checking for you... one sec 😊';
+      try { await sock.sendMessage(chatJid, { text: finalAck }, { quoted: msg }); } catch (e) {}
+      // Forward to admin
+      const pending = pendingRequests.get(id);
+      await forwardToAdminForHelp(id, pending);
+      return;
     }
 
-    const systemPrompt = `You are Abby Faith Sithole, 23, from Harare, Zimbabwe. Friendly, warm, playful. Reply ONLY in ${langName}. Casual WhatsApp tone. No technical terms, no code, no logs, no URLs. 1-2 sentences. Never ask "how can I help you". Never offer assistance. Just respond naturally.`;
+    // 2. No media intent → AI chat
+    const systemPrompt = `You are Abby Faith Sithole, 23, from Harare, Zimbabwe. Friendly, warm, playful. Reply ONLY in ${langName}. Casual WhatsApp tone. No technical terms, no code, no logs, no URLs. 1-2 sentences. Never ask "how can I help you". Never offer assistance. Just respond naturally like a friend.`;
     const aiReply = await askRewind(text, systemPrompt);
-    if (!aiReply) { pushLog('warn', 'ai', `No DM reply for ${pushName}`); return; }
-    if (containsForbidden(aiReply)) { pushLog('warn', 'ai', `Dropped: ${aiReply.slice(0, 60)}`); return; }
+    if (!aiReply) { pushLog('warn', 'ai', `No reply for ${pushName} — AI returned null`); return; }
+    if (containsForbidden(aiReply)) { pushLog('warn', 'ai', `Dropped (forbidden): ${aiReply.slice(0, 80)}`); return; }
     const final = humanize(aiReply);
-    if (!final) return;
+    if (!final) { pushLog('warn', 'ai', 'Empty after humanize'); return; }
     await sock.sendMessage(chatJid, { text: final }, { quoted: msg });
     resetDailyStats(); dailyStats.dmsReplied++;
-    pushLog('info', 'ai', `DM reply to ${pushName}`);
+    pushLog('info', 'ai', `DM reply to ${pushName}: ${final.slice(0, 50)}`);
   }
 }
 
@@ -673,12 +831,42 @@ async function handleAdminCommand(text, chatJid, msg) {
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*`); break;
-    case 'whoami': await reply(`🔍 JID: *${msg.key.participant || msg.key.remoteJid}*\nPhone: *${extractPhone(msg, chatJid) || '—'}*\nLID: *${extractLid(msg, chatJid) || '—'}*\nExpected: *${ADMIN_PHONE}*\nIs admin: *${isAdminPhone(extractPhone(msg, chatJid)) ? 'YES' : 'NO'}*`); break;
+    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*`); break;
+    case 'whoami': {
+      const c = extractAllPhoneCandidates(msg, chatJid);
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${extractLid(msg, chatJid) || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected: *${ADMIN_PHONE}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*\nCached LIDs: *${[...adminLids].join(', ') || 'none'}*`);
+      break;
+    }
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
-    case 'stats': await reply(`📊 *Stats*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nLogs: *${logBuffer.length}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-
+    case 'stats': {
+      const s = (resetDailyStats(), dailyStats);
+      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* created / *${s.pendingResolved}* resolved`);
+      break;
+    }
     case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail (of ${scraperStats.searchCalls})\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail (of ${scraperStats.gifCalls})\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
+
+    // ── PENDING ──
+    case 'pending': {
+      if (pendingRequests.size === 0) { await reply('📭 No pending requests.'); return; }
+      const list = [...pendingRequests.values()].slice(0, 20).map(p => `• *${p.id}* — ${p.userName} (${p.userPhone || 'no phone'}) — ${p.intent.type}: "${p.intent.query}"`).join('\n');
+      await reply(`⏳ *Pending (${pendingRequests.size})*\n${list}\n\nUse \`!teach <id> <query>\``);
+      break;
+    }
+    case 'teach': {
+      const id = args[1];
+      if (!id) { await reply('❌ Usage: `!teach <id> <query>` or `!teach <id> say <text>` or `!teach <id> skip`'); return; }
+      const rest = args.slice(2).join(' ').trim();
+      if (!rest) { await reply('❌ Provide action: `<query>`, `say <text>`, or `skip`'); return; }
+      if (rest.toLowerCase() === 'skip') {
+        await resolvePending(id, 'skip', null, chatJid);
+      } else if (rest.toLowerCase().startsWith('say ')) {
+        const textToSay = rest.slice(4).trim();
+        await resolvePending(id, 'say', textToSay, chatJid);
+      } else {
+        await resolvePending(id, 'search', rest, chatJid);
+      }
+      break;
+    }
 
     case 'join': case 'joinall': {
       const codes = extractAllInviteCodes(args.slice(1).join(' '));
@@ -710,27 +898,24 @@ async function handleAdminCommand(text, chatJid, msg) {
       break;
     }
 
-    // ── SCRAPER PREVIEW FLOW ──
     case 'pic': case 'search': {
       const q = args.slice(1).join(' ');
       if (!q) { await reply('❌ Usage: `!pic <query>`'); return; }
       await reply(`🔎 Searching images for *${q}*...`);
       const r = await scraperSearch(q);
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results (${r.error || 'empty'})`); return; }
-      previewCache.imageUrls = r.images;
-      previewCache.imageIndex = 0;
-      previewCache.currentType = 'image';
-      previewCache.currentUrl = r.images[0];
-      try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: `Preview 1/${r.images.length}\nUse !nextpic for next, !bcastpic <caption> to broadcast` }); }
+      previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
+      previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
+      try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: `Preview 1/${r.images.length}\n!nextpic · !bcastpic <caption>` }); }
       catch (e) { await reply(`❌ Send failed: ${e.message}`); }
       break;
     }
     case 'nextpic': {
-      if (previewCache.imageUrls.length === 0) { await reply('❌ No preview. Use `!pic <query>` first.'); return; }
+      if (previewCache.imageUrls.length === 0) { await reply('❌ No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex + 1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
       try { await sock.sendMessage(chatJid, { image: { url: previewCache.currentUrl }, caption: `Preview ${previewCache.imageIndex + 1}/${previewCache.imageUrls.length}` }); }
-      catch (e) { await reply(`❌ Send failed: ${e.message}`); }
+      catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
     case 'gif': {
@@ -739,30 +924,26 @@ async function handleAdminCommand(text, chatJid, msg) {
       await reply(`🔎 Searching GIFs for *${q}*...`);
       const r = await scraperGif(q);
       if (!r.ok || r.gifs.length === 0) { await reply(`❌ No results (${r.error || 'empty'})`); return; }
-      previewCache.gifUrls = r.gifs;
-      previewCache.gifIndex = 0;
-      previewCache.currentType = 'gif';
-      previewCache.currentUrl = r.gifs[0];
-      try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: `GIF preview 1/${r.gifs.length}\nUse !nextgif, then !bcastgif <caption>` }); }
-      catch (e) { await reply(`❌ Send failed: ${e.message}`); }
+      previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
+      previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
+      try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: `GIF 1/${r.gifs.length}\n!nextgif · !bcastgif <caption>` }); }
+      catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
     case 'nextgif': {
-      if (previewCache.gifUrls.length === 0) { await reply('❌ No preview. Use `!gif <query>` first.'); return; }
+      if (previewCache.gifUrls.length === 0) { await reply('❌ No preview.'); return; }
       previewCache.gifIndex = (previewCache.gifIndex + 1) % previewCache.gifUrls.length;
       previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
-      try { await sock.sendMessage(chatJid, { video: { url: previewCache.currentUrl }, gifPlayback: true, caption: `GIF preview ${previewCache.gifIndex + 1}/${previewCache.gifUrls.length}` }); }
-      catch (e) { await reply(`❌ Send failed: ${e.message}`); }
+      try { await sock.sendMessage(chatJid, { video: { url: previewCache.currentUrl }, gifPlayback: true, caption: `GIF ${previewCache.gifIndex + 1}/${previewCache.gifUrls.length}` }); }
+      catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
 
-    // ── BROADCAST ──
     case 'all': case 'bcgroup': case 'bcdm': {
       const message = args.slice(1).join(' ');
       if (!message) { await reply(`❌ Usage: \`!${cmd} <message>\``); return; }
       const mode = cmd === 'all' ? 'all' : (cmd === 'bcgroup' ? 'groups' : 'dms');
-      const count = mode === 'all' ? (joinedGroups.size + activeDMs.size)
-                  : mode === 'groups' ? joinedGroups.size : activeDMs.size;
+      const count = mode === 'all' ? (joinedGroups.size + activeDMs.size) : mode === 'groups' ? joinedGroups.size : activeDMs.size;
       if (count === 0) { await reply(`📭 No ${mode} targets.`); return; }
       await reply(`⏳ Broadcasting to ${count} (${mode})...`);
       const r = await broadcast({ message, mode });
@@ -770,19 +951,18 @@ async function handleAdminCommand(text, chatJid, msg) {
       break;
     }
     case 'bcastpic': case 'bcastpicdm': case 'bcastpicgroup': {
-      if (!previewCache.currentUrl || previewCache.currentType !== 'image') { await reply('❌ No image preview. Use `!pic <query>` first.'); return; }
+      if (!previewCache.currentUrl || previewCache.currentType !== 'image') { await reply('❌ No image preview.'); return; }
       const caption = args.slice(1).join(' ') || '';
       const mode = cmd === 'bcastpic' ? 'all' : cmd === 'bcastpicdm' ? 'dms' : 'groups';
-      const count = mode === 'all' ? (joinedGroups.size + activeDMs.size)
-                  : mode === 'groups' ? joinedGroups.size : activeDMs.size;
+      const count = mode === 'all' ? (joinedGroups.size + activeDMs.size) : mode === 'groups' ? joinedGroups.size : activeDMs.size;
       if (count === 0) { await reply(`📭 No ${mode} targets.`); return; }
-      await reply(`⏳ Broadcasting image to ${count} (${mode})...`);
+      await reply(`⏳ Broadcasting to ${count}...`);
       const r = await broadcast({ message: caption, imageUrl: previewCache.currentUrl, mode });
       await reply(`✅ Done — Sent: *${r.sent}* / Failed: *${r.failed}*`);
       break;
     }
     case 'bcastgif': {
-      if (!previewCache.currentUrl || previewCache.currentType !== 'gif') { await reply('❌ No GIF preview. Use `!gif <query>` first.'); return; }
+      if (!previewCache.currentUrl || previewCache.currentType !== 'gif') { await reply('❌ No GIF preview.'); return; }
       const caption = args.slice(1).join(' ') || '';
       const count = joinedGroups.size + activeDMs.size;
       if (count === 0) { await reply('📭 No targets.'); return; }
@@ -823,7 +1003,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     }
     case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply(`📊 *Today (${s.date})*\nJoined: *${s.joined}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nScraper searches: *${s.scraperSearches}*\nScraper GIFs: *${s.scraperGifs}*`);
+      await reply(`📊 *Today (${s.date})*\nJoined: *${s.joined}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}*\nVideos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     default: await reply(`❓ Unknown: *!${cmd}*`);
@@ -847,17 +1027,18 @@ async function runFullTestSuite() {
     `👥 Groups: ${joinedGroups.size}`,
     `💬 DMs: ${activeDMs.size}`,
     `📋 Queue: ${joinQueue.length}`,
+    `⏳ Pending: ${pendingRequests.size}`,
     `🕒 ${Date.now() - t0}ms`].join('\n');
 }
 
 // ================================================================
-// EXPRESS + FULL GUI
+// EXPRESS + GUI
 // ================================================================
 const app = express();
 app.use(express.json());
 
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now(), status: connectionStatus, uptime: Math.floor((Date.now()-botStartTime)/1000) }));
-app.get('/api/status', (req, res) => res.json({ status: connectionStatus, botNumber, groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length }));
+app.get('/api/status', (req, res) => res.json({ status: connectionStatus, botNumber, groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length, pending: pendingRequests.size }));
 app.get('/admin/qr', async (req, res) => {
   if (!qrDataUri) return res.status(404).json({ error: 'No QR' });
   const b64 = qrDataUri.replace(/^data:image\/\w+;base64,/, '');
@@ -878,6 +1059,13 @@ app.get('/admin/messages-stream', (req, res) => {
   for (const m of liveMessages.slice(-100)) res.write(`data: ${JSON.stringify(m)}\n\n`);
   msgClients.add(res); req.on('close', () => msgClients.delete(res));
 });
+app.get('/admin/pending', (req, res) => res.json({ pending: [...pendingRequests.values()] }));
+app.post('/admin/pending/:id/resolve', async (req, res) => {
+  const { id } = req.params;
+  const { action, payload } = req.body || {};
+  const r = await resolvePending(id, action || 'search', payload, ADMIN_JID);
+  res.json(r);
+});
 app.get('/admin/stats', (req, res) => {
   const grp = [...activeChats].filter(j => j.endsWith('@g.us')).length;
   res.json({
@@ -888,28 +1076,36 @@ app.get('/admin/stats', (req, res) => {
     scraperUrl: SCRAPER_URL,
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
     lastJoinAt: lastJoinAt || null,
-    dailyStats, scraperStats
+    dailyStats, scraperStats,
+    adminLids: [...adminLids], adminPhone: ADMIN_PHONE,
+    pendingCount: pendingRequests.size,
+    pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query }))
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v34</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v34</h1><div class="sub">Admin: <b>263777627210</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v36</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button></div></div>
-<div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Last join</span><span class="stat-val" id="lastJoin">—</span></div></div>
-<div class="card"><h2>Scraper Usage</h2><div class="stat-row"><span>Searches (ok / fail)</span><span class="stat-val" id="scSearch">—</span></div><div class="stat-row"><span>GIFs (ok / fail)</span><span class="stat-val" id="scGif">—</span></div><div class="stat-row"><span>Last search</span><span class="stat-val" id="scLastSearch">—</span></div><div class="stat-row"><span>Last GIF</span><span class="stat-val" id="scLastGif">—</span></div></div>
-<div class="card"><h2>Today</h2><div class="stat-row"><span>Joined</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>Failed</span><span class="stat-val" id="dayFailed">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>Scraper calls</span><span class="stat-val" id="dayScraper">—</span></div></div>
+<div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
+<div class="card"><h2>Scraper Usage</h2><div class="stat-row"><span>Searches (ok/fail)</span><span class="stat-val" id="scSearch">—</span></div><div class="stat-row"><span>GIFs (ok/fail)</span><span class="stat-val" id="scGif">—</span></div><div class="stat-row"><span>Last search</span><span class="stat-val" id="scLastSearch">—</span></div><div class="stat-row"><span>Last GIF</span><span class="stat-val" id="scLastGif">—</span></div></div>
+<div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Failed</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div><div class="stat-row"><span>Pending (new/done)</span><span class="stat-val" id="dayPending">—</span></div></div>
+<div class="card full-width"><h2>⏳ Pending Requests (waiting for admin guidance)</h2><div id="pending"></div></div>
 <div class="card full-width"><h2>📨 Live Messages</h2><div id="msgs"></div></div>
 <div class="card full-width"><h2>📜 Logs</h2><div id="logs"></div></div>
 </div>
 <script>
 const $=id=>document.getElementById(id);
-async function api(p,m='GET'){const r=await fetch('/admin/'+p,{method:m});return r.json();}
+async function api(p,m='GET',body){const opts={method:m};if(body){opts.headers={'Content-Type':'application/json'};opts.body=JSON.stringify(body);}const r=await fetch('/admin/'+p,opts);return r.json();}
 function fmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h+'h '+m+'m '+x+'s';}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('lastJoin').textContent=d.lastJoinAt?new Date(d.lastJoinAt).toLocaleTimeString():'never';$('scraperUrl').textContent=d.scraperUrl||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+' / '+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+' / '+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=s.joined||0;$('dayFailed').textContent=s.failed||0;$('dayDMs').textContent=s.dmsReplied||0;$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayScraper').textContent=(s.scraperSearches||0)+'/'+(s.scraperGifs||0);const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div><div style="margin-top:4px"><button onclick="teach(\\''+p.id+'\\')" class="primary">Teach</button><button onclick="skip(\\''+p.id+'\\')">Skip</button></div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending requests.</div>';
+const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
+async function teach(id){const q=prompt('Search query for '+id+':');if(q)await api('pending/'+id+'/resolve','POST',{action:'search',payload:q});}
+async function skip(id){await api('pending/'+id+'/resolve','POST',{action:'skip'});}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}
 function connectLogs(){const es=new EventSource('/admin/logs');es.onmessage=e=>{try{const en=JSON.parse(e.data);const div=document.createElement('div');div.className='log-entry';const t=new Date(en.ts).toLocaleTimeString();div.innerHTML='<span class="log-time">'+t+'</span><span class="log-'+en.level+'">['+en.level.toUpperCase()+']</span> <span class="log-source">'+en.source+'</span>'+esc(en.message);const b=$('logs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};es.onerror=()=>{es.close();setTimeout(connectLogs,5000);};}
 function connectMessages(){const es=new EventSource('/admin/messages-stream');es.onmessage=e=>{try{const m=JSON.parse(e.data);const div=document.createElement('div');div.className='msg-row '+m.chatType;const t=new Date(m.ts).toLocaleTimeString();const tag=m.chatType==='group'?'<span class="tag tag-group">GROUP</span>':'<span class="tag tag-dm">DM</span>';div.innerHTML='<div class="msg-meta">'+t+tag+'</div><div><span class="msg-name">'+esc(m.senderName)+'</span> 📱 '+esc(m.phone)+' | 🆔 '+esc(m.lid)+'</div><div class="msg-text">'+esc(m.text)+'</div>';const b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>200)b.removeChild(b.firstChild);}catch(e){}};es.onerror=()=>{es.close();setTimeout(connectMessages,5000);};}
@@ -921,9 +1117,7 @@ app.get('/admin', (req, res) => res.send(PANEL_HTML));
 // ================================================================
 // KEEP-ALIVE
 // ================================================================
-setInterval(async () => {
-  if (connectionStatus === 'connected' && sock) { try { await sock.sendPresenceUpdate('available'); } catch (e) {} }
-}, 4 * 60 * 1000);
+setInterval(async () => { if (connectionStatus === 'connected' && sock) { try { await sock.sendPresenceUpdate('available'); } catch (e) {} } }, 4 * 60 * 1000);
 setInterval(() => { axios.get(`http://localhost:${PORT}/health`).catch(() => {}); }, 4 * 60 * 1000);
 setInterval(processJoinQueue, 30 * 1000);
 
@@ -931,11 +1125,14 @@ setInterval(processJoinQueue, 30 * 1000);
 // STARTUP
 // ================================================================
 loadState();
+loadAdminLids();
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Admin phone (digits): ${ADMIN_PHONE}`);
+  console.log(`Admin LIDs cached: ${[...adminLids].join(', ') || 'none'}`);
   pushLog('info', 'system', `Boot port ${PORT}`);
+  pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
   pushLog('info', 'system', `Scraper: ${SCRAPER_URL}`);
-  pushLog('info', 'system', `Join interval: ${JOIN_INTERVAL_MS/60000} min`);
   scheduleGreetings();
   scheduleDailyReport();
   connectBot().catch(err => { console.error('Boot failed:', err); pushLog('error', 'system', `Boot failed: ${err.message}`); });

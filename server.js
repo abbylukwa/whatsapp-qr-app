@@ -1,18 +1,28 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v37.1
-// Message unwrapping fix | LID-based admin | Shona AI
+// WHATSAPP BOT v38.0
+// Baileys 7.0.0-rc.9 | Working LID resolution | Full feature set
 // ================================================================
 
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const NodeCache = require('node-cache');
+
+// ── v7 is ESM-only. In CJS, import the default export first. ──
+const baileys = require('@whiskeysockets/baileys').default;
 const {
-  makeWASocket, DisconnectReason, useMultiFileAuthState,
-  Browsers, fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
+  makeWASocket,
+  DisconnectReason,
+  useMultiFileAuthState,
+  Browsers,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  normalizeMessageContent,
+  proto
+} = baileys;
+
 const QRCode = require('qrcode');
 const pino = require('pino');
 const axios = require('axios');
@@ -24,10 +34,6 @@ const PORT = process.env.PORT || 10000;
 const AUTH_FOLDER = 'auth_info';
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '');
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
-const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
-
-// Your LID — hardcoded because WhatsApp no longer sends phone numbers
-const HARDCODED_ADMIN_LIDS = ['115110005706891'];
 
 const REWIND_KEY = process.env.REWIND_KEY || 'sk-rewind-31c3a65acc981512de959195485deec0';
 const SCRAPER_URL = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/, '');
@@ -47,70 +53,91 @@ const USER_HISTORY_SIZE = 4;
 const PENDING_EXPIRY_MS = 60 * 60 * 1000;
 
 // ================================================================
-// ADMIN LID STORE
+// LID → PHONE MAP (persistent, loaded from auth_info at startup)
 // ================================================================
-let adminLids = new Set(HARDCODED_ADMIN_LIDS);
+const LID_MAP_FILE = path.join(__dirname, 'lid_map_cache.json');
+let lidMap = new Map(); // lidUser (string) → phoneDigits (string)
 
-function loadAdminLids() {
+function loadLidMapFromDisk() {
+  let count = 0;
+
+  // Source 1: our own cache file (survives redeploys)
   try {
-    if (fs.existsSync(ADMIN_LID_FILE)) {
-      const arr = JSON.parse(fs.readFileSync(ADMIN_LID_FILE, 'utf8')) || [];
-      for (const lid of arr) adminLids.add(lid);
+    if (fs.existsSync(LID_MAP_FILE)) {
+      const obj = JSON.parse(fs.readFileSync(LID_MAP_FILE, 'utf8'));
+      for (const [lid, phone] of Object.entries(obj)) {
+        const p = String(phone).replace(/\D/g, '');
+        if (p.length >= 10) { lidMap.set(lid, p); count++; }
+      }
     }
+  } catch (e) { console.error('loadLidMap cache:', e.message); }
+
+  // Source 2: Baileys auth_info reverse files (lid-mapping-{lid}_reverse.json)
+  try {
+    if (fs.existsSync(AUTH_FOLDER)) {
+      const files = fs.readdirSync(AUTH_FOLDER);
+      for (const f of files) {
+        if (!f.startsWith('lid-mapping-') || !f.endsWith('_reverse.json')) continue;
+        const lidUser = f.replace('lid-mapping-', '').replace('_reverse.json', '');
+        try {
+          const raw = fs.readFileSync(path.join(AUTH_FOLDER, f), 'utf8');
+          const phone = String(JSON.parse(raw)).replace(/\D/g, '');
+          if (phone.length >= 10) { lidMap.set(lidUser, phone); count++; }
+        } catch (e) {}
+      }
+    }
+  } catch (e) { console.error('loadLidMap auth:', e.message); }
+
+  console.log(`[LID] Loaded ${lidMap.size} mappings (${count} entries scanned)`);
+}
+
+function saveLidMap() {
+  try {
+    fs.writeFileSync(LID_MAP_FILE, JSON.stringify(Object.fromEntries(lidMap), null, 2));
   } catch (e) {}
 }
-function saveAdminLids() {
-  try { fs.writeFileSync(ADMIN_LID_FILE, JSON.stringify([...adminLids], null, 2)); } catch (e) {}
+
+function setLidMapping(lidUser, phone) {
+  if (!lidUser || !phone) return;
+  const p = String(phone).replace(/\D/g, '');
+  if (p.length < 10) return;
+  if (lidMap.get(lidUser) === p) return;
+  lidMap.set(lidUser, p);
+  saveLidMap();
+  pushLog('info', 'lid', `Mapped ${lidUser} → ${p}`);
 }
 
-// ================================================================
-// MESSAGE UNWRAPPING HELPERS (the fix)
-// ================================================================
-function unwrapMessage(msg) {
-  if (!msg?.message) return null;
-  let m = msg.message;
+// Three-layer resolution: cache → altJid → signalRepository → (disk already in cache)
+async function resolveLidToPhone(lidUser, altJid) {
+  if (!lidUser) return null;
 
-  // Iteratively unwrap nested containers
-  let guard = 0;
-  while (guard++ < 10) {
-    if (m.ephemeralMessage?.message) { m = m.ephemeralMessage.message; continue; }
-    if (m.viewOnceMessage?.message) { m = m.viewOnceMessage.message; continue; }
-    if (m.viewOnceMessageV2?.message) { m = m.viewOnceMessageV2.message; continue; }
-    if (m.viewOnceMessageV2Extension?.message) { m = m.viewOnceMessageV2Extension.message; continue; }
-    if (m.deviceSentMessage?.message) { m = m.deviceSentMessage.message; continue; }
-    if (m.documentWithCaptionMessage?.message) { m = m.documentWithCaptionMessage.message; continue; }
-    if (m.editedMessage?.message) { m = m.editedMessage.message; continue; }
-    if (m.protocolMessage?.editedMessage) { m = m.protocolMessage.editedMessage; continue; }
-    break;
+  // Layer 1: cache (includes disk-loaded mappings)
+  if (lidMap.has(lidUser)) return lidMap.get(lidUser);
+
+  // Layer 2: alt JID from extractAddressingContext (v7 populates this on every message)
+  if (altJid && typeof altJid === 'string' && !altJid.endsWith('@lid')) {
+    const digits = altJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+    if (digits.length >= 10 && digits.length <= 14) {
+      setLidMapping(lidUser, digits);
+      return digits;
+    }
   }
-  return m;
-}
 
-function getMessageText(msg) {
-  const m = unwrapMessage(msg);
-  if (!m) return '';
-  return (
-    m.conversation
-    || m.extendedTextMessage?.text
-    || m.imageMessage?.caption
-    || m.videoMessage?.caption
-    || m.documentMessage?.caption
-    || m.buttonsResponseMessage?.selectedDisplayText
-    || m.listResponseMessage?.title
-    || m.templateButtonReplyMessage?.selectedDisplayText
-    || ''
-  );
-}
+  // Layer 3: Baileys v7 signal repository (REAL API — not dead code like v6)
+  try {
+    if (sock?.signalRepository?.lidMapping?.getPNForLID) {
+      const pn = await sock.signalRepository.lidMapping.getPNForLID(`${lidUser}@lid`);
+      if (pn) {
+        const digits = String(pn).split('@')[0].split(':')[0].replace(/\D/g, '');
+        if (digits.length >= 10 && digits.length <= 14) {
+          setLidMapping(lidUser, digits);
+          return digits;
+        }
+      }
+    }
+  } catch (e) { /* silent */ }
 
-function getMediaType(msg) {
-  const m = unwrapMessage(msg);
-  if (!m) return 'text';
-  if (m.imageMessage) return 'image';
-  if (m.videoMessage) return 'video';
-  if (m.audioMessage) return 'audio';
-  if (m.documentMessage) return 'document';
-  if (m.stickerMessage) return 'sticker';
-  return 'text';
+  return null;
 }
 
 // ================================================================
@@ -220,9 +247,8 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 let isConnecting = false;
 
-// Diagnostic
 let lastRawMsg = null;
-let lastUnwrapped = null;
+let lastNormalized = null;
 
 const processedMessages = new Set();
 const activeChats = new Set();
@@ -274,32 +300,15 @@ function loadState() {
       for (const p of arr) if (now - p.requestedAt < PENDING_EXPIRY_MS) pendingRequests.set(p.id, p);
     }
   } catch (e) {}
-  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size}`);
+  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} lidMap=${lidMap.size}`);
 }
 function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue, null, 2)); } catch (e) {} }
 function saveGroups() { try { fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify([...joinedGroups.entries()].map(([jid, v]) => ({ jid, ...v })), null, 2)); } catch (e) {} }
 function savePending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify([...pendingRequests.values()], null, 2)); } catch (e) {} }
 
 // ================================================================
-// PHONE / LID EXTRACTION
+// PHONE / LID EXTRACTION (v7-aware)
 // ================================================================
-function extractPhone(msg, senderJid) {
-  const candidates = [
-    msg.key?.senderPn,
-    msg.key?.participantPn,
-    msg.key?.remoteJidAlt,
-    msg.key?.participantAlt,
-    senderJid
-  ].filter(Boolean);
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.endsWith('@s.whatsapp.net')) {
-      const digits = c.split('@')[0].split(':')[0].replace(/\D/g, '');
-      if (digits.length >= 10 && digits.length <= 14) return digits;
-    }
-  }
-  return null;
-}
-
 function extractLid(msg, senderJid) {
   const candidates = [
     senderJid,
@@ -309,20 +318,52 @@ function extractLid(msg, senderJid) {
     msg.key?.participantAlt
   ].filter(Boolean);
   for (const c of candidates) {
-    if (typeof c === 'string' && c.includes('@lid')) return c.split('@')[0];
+    if (typeof c === 'string' && c.endsWith('@lid')) {
+      return c.split('@')[0].split(':')[0];
+    }
   }
   return null;
 }
 
-function isAdminSender(msg, senderJid) {
-  const phone = extractPhone(msg, senderJid);
-  if (phone && phone === ADMIN_PHONE) {
+function extractAltJid(msg) {
+  // v7: extractAddressingContext populates these on every inbound message
+  const candidates = [
+    msg.key?.participantAlt,
+    msg.key?.remoteJidAlt,
+    msg.key?.participantPn,
+    msg.key?.senderPn
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.endsWith('@s.whatsapp.net')) return c;
+  }
+  return null;
+}
+
+function extractPhoneDirect(msg) {
+  const alt = extractAltJid(msg);
+  if (!alt) return null;
+  const digits = alt.split('@')[0].split(':')[0].replace(/\D/g, '');
+  return (digits.length >= 10 && digits.length <= 14) ? digits : null;
+}
+
+// Async admin check that resolves LID → phone if possible
+async function isAdminSender(msg, senderJid) {
+  // 1. Direct phone in alt JID
+  const directPhone = extractPhoneDirect(msg);
+  if (directPhone === ADMIN_PHONE) {
     const lid = extractLid(msg, senderJid);
-    if (lid && !adminLids.has(lid)) { adminLids.add(lid); saveAdminLids(); pushLog('success', 'admin', `Registered admin LID ${lid}`); }
+    if (lid) setLidMapping(lid, ADMIN_PHONE);
     return true;
   }
+
+  // 2. Resolve LID → phone
   const lid = extractLid(msg, senderJid);
-  if (lid && adminLids.has(lid)) return true;
+  if (lid) {
+    const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt;
+    const resolved = await resolveLidToPhone(lid, altJid);
+    if (resolved === ADMIN_PHONE) return true;
+  }
+
   return false;
 }
 
@@ -607,7 +648,8 @@ function scheduleDailyReport() {
       `👥 Groups: *${joinedGroups.size}*`,
       `💬 DMs: *${activeDMs.size}*`,
       `📋 Queue: *${joinQueue.length}*`,
-      `⏳ Pending: *${pendingRequests.size}*`, ``,
+      `⏳ Pending: *${pendingRequests.size}*`,
+      `🆔 LID map: *${lidMap.size}*`, ``,
       `✅ Joined: *${s.joined || 0}*`,
       `❌ Failed: *${s.failed || 0}*`,
       `💌 DM replies: *${s.dmsReplied || 0}*`,
@@ -669,10 +711,10 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v37.1*
+const COMMAND_LIST = `🥖 *BreadBot v38*
 
 *Test*
-!whoami · !rawmsg · !aitest · !scraperstatus
+!whoami · !lidmap · !rawmsg · !aitest · !scraperstatus
 !scrapersearch <q> · !scrapergif <q> · !test · !testall
 
 *Pending*
@@ -693,7 +735,7 @@ const COMMAND_LIST = `🥖 *BreadBot v37.1*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION
+// CONNECTION (v7)
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -704,12 +746,21 @@ async function connectBot() {
     const { version } = await fetchLatestBaileysVersion();
     pushLog('info', 'bot', `WA version ${version.join('.')}`);
 
+    const logger = pino({ level: 'silent' });
+
     sock = makeWASocket({
       version,
-      auth: state,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger)
+      },
       printQRInTerminal: false,
       browser: Browsers.macOS('Desktop'),
-      logger: pino({ level: 'silent' })
+      logger,
+      syncFullHistory: true,
+      markOnlineOnConnect: true,
+      generateHighQualityLinkPreview: false,
+      getMessage: async () => proto.Message.create({})
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -760,6 +811,28 @@ async function connectBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // v7: lid-mapping.update event (fires when WA learns a new mapping)
+    // Note: may not fire on all accounts — we also scan auth_info files on startup.
+    sock.ev.on('lid-mapping.update', (updates) => {
+      try {
+        if (Array.isArray(updates)) {
+          for (const u of updates) {
+            if (u?.id && u?.pn) setLidMapping(String(u.id).split('@')[0].split(':')[0], u.pn);
+          }
+        } else if (updates && typeof updates === 'object') {
+          if (updates.mapping && typeof updates.mapping === 'object') {
+            for (const [lid, pn] of Object.entries(updates.mapping)) {
+              setLidMapping(String(lid).split('@')[0].split(':')[0], pn);
+            }
+          } else {
+            for (const [k, v] of Object.entries(updates)) {
+              if (k && v) setLidMapping(String(k).split('@')[0].split(':')[0], v);
+            }
+          }
+        }
+      } catch (e) { pushLog('warn', 'lid', `lid-mapping.update error: ${e.message}`); }
+    });
+
     sock.ev.on('messages.upsert', async ({ messages }) => {
       pushLog('info', 'raw', `messages.upsert: ${messages?.length || 0}`);
       for (const msg of messages || []) {
@@ -782,7 +855,7 @@ async function disconnectBot() { if (sock) { try { sock.end(undefined); } catch 
 function refreshQR() { qrDataUri = null; connectionStatus = 'disconnected'; disconnectBot(); setTimeout(connectBot, 1500); }
 
 // ================================================================
-// MESSAGE HANDLER
+// MESSAGE HANDLER (with normalizeMessageContent)
 // ================================================================
 async function handleMessage(msg) {
   if (!sock) return;
@@ -795,37 +868,64 @@ async function handleMessage(msg) {
   processedMessages.add(msgId);
   if (processedMessages.size > 10000) processedMessages.clear();
 
-  // ── UNWRAP + EXTRACT ──
-  const unwrapped = unwrapMessage(msg);
+  // ── OFFICIAL v7 NORMALIZER: unwraps ephemeral / viewOnce / edited / deviceSent ──
+  const normalized = normalizeMessageContent(msg.message);
   lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName, rawMessage: msg.message };
-  lastUnwrapped = { ts: new Date().toISOString(), unwrapped };
+  lastNormalized = { ts: new Date().toISOString(), normalized };
 
-  const text = getMessageText(msg);
-  const mediaType = getMediaType(msg);
+  if (!normalized) {
+    pushLog('warn', 'msg', `normalizeMessageContent returned null — skipping`);
+    return;
+  }
+
+  const text = (
+    normalized.conversation
+    || normalized.extendedTextMessage?.text
+    || normalized.imageMessage?.caption
+    || normalized.videoMessage?.caption
+    || normalized.documentMessage?.caption
+    || normalized.buttonsResponseMessage?.selectedDisplayText
+    || normalized.listResponseMessage?.title
+    || ''
+  );
+
+  const mediaType = normalized.imageMessage ? 'image'
+    : normalized.videoMessage ? 'video'
+    : normalized.audioMessage ? 'audio'
+    : normalized.documentMessage ? 'document'
+    : normalized.stickerMessage ? 'sticker'
+    : 'text';
 
   const isGroup = chatJid.endsWith('@g.us');
   const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
-  const phone = extractPhone(msg, senderJid);
   const lid = extractLid(msg, senderJid);
+  const directPhone = extractPhoneDirect(msg);
   const pushName = msg.pushName || 'Unknown';
   const chatType = isGroup ? 'group' : 'dm';
 
   if (!isGroup) activeDMs.add(chatJid);
 
-  pushLog('info', 'msg', `${chatType === 'group' ? '👥' : '💬'} ${pushName} — text="${text.slice(0, 60)}" type=${mediaType}`);
+  // Try to resolve LID → phone for display
+  let displayPhone = directPhone;
+  if (!displayPhone && lid) {
+    const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt;
+    try { displayPhone = await resolveLidToPhone(lid, altJid); } catch (e) {}
+  }
+
+  pushLog('info', 'msg', `${chatType === 'group' ? '👥' : '💬'} ${pushName} — text="${text.slice(0, 60)}" type=${mediaType}${displayPhone ? ' phone=' + displayPhone : ''}${lid ? ' lid=' + lid : ''}`);
 
   pushLiveMessage({
     id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
-    senderName: pushName, phone: phone || '—', lid: lid || '—',
+    senderName: pushName, phone: displayPhone || '—', lid: lid || '—',
     text: text.slice(0, 200) || `[${mediaType}]`, mediaType
   });
 
   if (!text && mediaType === 'text') {
-    pushLog('warn', 'msg', `Empty text and text-type — possible unwrap failure`);
+    pushLog('warn', 'msg', `Empty text after normalize — possible unusual wrapper`);
     return;
   }
 
-  const isAdmin = isAdminSender(msg, senderJid);
+  const isAdmin = await isAdminSender(msg, senderJid);
 
   // Track user history (non-admin DMs only)
   if (!isGroup && !isAdmin && text) {
@@ -839,7 +939,7 @@ async function handleMessage(msg) {
   const codes = extractAllInviteCodes(text);
   if (codes.length > 0) {
     let added = 0;
-    for (const c of codes) if (queueJoin(c, phone || pushName, chatType)) added++;
+    for (const c of codes) if (queueJoin(c, displayPhone || pushName, chatType)) added++;
     if (added > 0) {
       pushLog('info', 'join', `Queued ${added}/${codes.length} from ${pushName} via ${chatType}`);
       if (!isGroup) { try { await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` }); } catch (e) {} }
@@ -849,7 +949,7 @@ async function handleMessage(msg) {
 
   // Admin commands in DM
   if (!isGroup && isAdmin && text.startsWith('!')) {
-    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone || '—'} lid ${lid || '—'})`);
+    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${displayPhone || '—'} lid ${lid || '—'})`);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
@@ -903,7 +1003,7 @@ async function handleMessage(msg) {
         }
       }
       const history = userHistories.get(senderJid) || [];
-      const id = createPendingRequest(senderJid, pushName, phone, history, intent);
+      const id = createPendingRequest(senderJid, pushName, displayPhone, history, intent);
       pushLog('warn', 'ai', `Pending ${id} for ${pushName}`);
       const ack = await askRewind(
         `User asked for something. Reply casually that you're checking and will send shortly (max 8 words). Optionally 1 light Shona word. No filler.`,
@@ -941,17 +1041,28 @@ async function handleAdminCommand(text, chatJid, msg) {
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*`); break;
+    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nLID map: *${lidMap.size}*`); break;
     case 'whoami': {
-      const phone = extractPhone(msg, chatJid);
+      const directPhone = extractPhoneDirect(msg);
       const lid = extractLid(msg, chatJid);
-      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nPhone: *${phone || '—'}*\nLID: *${lid || '—'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*\nAdmin LIDs: *${[...adminLids].join(', ') || 'none'}*`);
+      const altJid = msg.key?.participantAlt || msg.key?.remoteJidAlt || null;
+      let resolved = null;
+      if (lid) {
+        try { resolved = await resolveLidToPhone(lid, altJid); } catch (e) {}
+      }
+      const admin = await isAdminSender(msg, chatJid);
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${lid || '—'}*\nDirect phone in alt: *${directPhone || '—'}*\nResolved phone: *${resolved || '—'}*\nExpected admin: *${ADMIN_PHONE}*\nIs admin: *${admin ? 'YES ✅' : 'NO ❌'}*\nLID map size: *${lidMap.size}*`);
+      break;
+    }
+    case 'lidmap': {
+      const entries = [...lidMap.entries()].slice(0, 30).map(([lid, phone]) => `• ${lid} → ${phone}`).join('\n');
+      await reply(`🗺️ *LID → Phone map (${lidMap.size})*\n\n${entries || '(empty)'}`);
       break;
     }
     case 'rawmsg': {
-      if (!lastRawMsg) { await reply('❌ No messages seen yet.'); return; }
-      const s = JSON.stringify({ raw: lastRawMsg, unwrapped: lastUnwrapped }, null, 2).slice(0, 3000);
-      await reply(`📦 *Last raw msg*\n\n\`\`\`\n${s}\n\`\`\``);
+      if (!lastNormalized) { await reply('❌ No messages seen yet.'); return; }
+      const s = JSON.stringify({ normalized: lastNormalized, original: lastRawMsg?.key }, null, 2).slice(0, 3000);
+      await reply(`📦 *Last message*\n\n\`\`\`\n${s}\n\`\`\``);
       break;
     }
     case 'aitest': {
@@ -989,7 +1100,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
     case 'stats': {
       const s = (resetDailyStats(), dailyStats);
-      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nLID map: *${lidMap.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail (of ${scraperStats.searchCalls})\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail (of ${scraperStats.gifCalls})\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
@@ -1171,6 +1282,7 @@ async function runFullTestSuite() {
     `💬 DMs: ${activeDMs.size}`,
     `📋 Queue: ${joinQueue.length}`,
     `⏳ Pending: ${pendingRequests.size}`,
+    `🆔 LID map: ${lidMap.size}`,
     `🕒 ${Date.now() - t0}ms`].join('\n');
 }
 
@@ -1206,8 +1318,7 @@ app.get('/admin/messages-stream', (req, res) => {
   for (const m of liveMessages.slice(-100)) res.write(`data: ${JSON.stringify(m)}\n\n`);
   msgClients.add(res); req.on('close', () => msgClients.delete(res));
 });
-app.get('/admin/last-msg-raw', (req, res) => res.json(lastRawMsg || { error: 'no messages yet' }));
-app.get('/admin/last-msg-unwrapped', (req, res) => res.json(lastUnwrapped || { error: 'no messages yet' }));
+app.get('/admin/lidmap', (req, res) => res.json({ count: lidMap.size, map: Object.fromEntries(lidMap) }));
 app.get('/admin/aitest', async (req, res) => { const r = await testRewindRaw(); res.json(r); });
 app.get('/admin/scraperstatus', async (req, res) => { const r = await scraperStatus(); res.json(r); });
 app.get('/admin/scrapersearch', async (req, res) => {
@@ -1239,17 +1350,17 @@ app.get('/admin/stats', (req, res) => {
     lastJoinAt: lastJoinAt || null,
     dailyStats, scraperStats,
     adminPhone: ADMIN_PHONE,
-    adminLids: [...adminLids],
+    lidMapSize: lidMap.size,
     pendingCount: pendingRequests.size,
     pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query }))
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v37.1</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v38</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v37.1</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v38</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LID map: <b id="lidMapSize">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
-<div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button><button onclick="viewRaw()">📦 View Raw Msg</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
+<div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
 <div class="card"><h2>Scraper Usage</h2><div class="stat-row"><span>Searches (ok/fail)</span><span class="stat-val" id="scSearch">—</span></div><div class="stat-row"><span>GIFs (ok/fail)</span><span class="stat-val" id="scGif">—</span></div><div class="stat-row"><span>Last search</span><span class="stat-val" id="scLastSearch">—</span></div><div class="stat-row"><span>Last GIF</span><span class="stat-val" id="scLastGif">—</span></div></div>
 <div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Failed</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div><div class="stat-row"><span>Pending (new/done)</span><span class="stat-val" id="dayPending">—</span></div></div>
@@ -1265,8 +1376,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function viewRaw(){const b=$('testResult');b.textContent='Loading...';const r=await api('last-msg-raw');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.adminLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('lidMapSize').textContent=d.lidMapSize||0;const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}
@@ -1288,14 +1398,14 @@ setInterval(processJoinQueue, 30 * 1000);
 // STARTUP
 // ================================================================
 loadState();
-loadAdminLids();
+loadLidMapFromDisk();
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Admin phone (digits): ${ADMIN_PHONE}`);
-  console.log(`Admin LIDs: ${[...adminLids].join(', ')}`);
+  console.log(`LID map loaded: ${lidMap.size} entries`);
   pushLog('info', 'system', `Boot port ${PORT}`);
   pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
-  pushLog('info', 'system', `Admin LIDs: ${[...adminLids].join(', ')}`);
+  pushLog('info', 'system', `LID map loaded: ${lidMap.size}`);
   pushLog('info', 'system', `Scraper: ${SCRAPER_URL}`);
   scheduleGreetings();
   scheduleDailyReport();

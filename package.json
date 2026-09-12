@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "34.0.0",
-  "description": "WhatsApp bot — any-link join, scraper preview broadcast, full GUI",
+  "version": "36.0.0",
+  "description": "WhatsApp bot — AI fallback fixed, video support, learn-from-admin",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

@@ -1,8 +1,9 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v41.0
-// fromMe fix | Working admin | Group auto-discovery | Image broadcast
+// WHATSAPP BOT v43.0
+// baileys-antiban integration: human typing, entropy, health monitor
+// Task scheduler: concurrency 2, 3s min gap between task starts
 // ================================================================
 
 const express = require('express');
@@ -13,6 +14,24 @@ const {
   makeWASocket, DisconnectReason, useMultiFileAuthState,
   Browsers, fetchLatestBaileysVersion, downloadMediaMessage
 } = require('@whiskeysockets/baileys');
+
+// ── baileys-antiban: human behavior middleware ──
+let wrapSocket = null;
+let wrapSocketWithFingerprint = null;
+let createHumanEntropyService = null;
+let classifyDisconnect = null;
+let SessionHealthMonitor = null;
+try {
+  const antiban = require('baileys-antiban');
+  wrapSocket = antiban.wrapSocket || null;
+  wrapSocketWithFingerprint = antiban.wrapSocketWithFingerprint || null;
+  createHumanEntropyService = antiban.createHumanEntropyService || null;
+  classifyDisconnect = antiban.classifyDisconnect || null;
+  SessionHealthMonitor = antiban.SessionHealthMonitor || null;
+} catch (e) {
+  console.log('[ANTIBAN] package not installed — running without human-emulation layer');
+}
+
 const QRCode = require('qrcode');
 const pino = require('pino');
 const axios = require('axios');
@@ -26,7 +45,6 @@ const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
 
-// Hardcoded admin LIDs
 const HARDCODED_ADMIN_LIDS = ['115110005706891'];
 
 const REWIND_KEY = process.env.REWIND_KEY || 'sk-rewind-31c3a65acc981512de959195485deec0';
@@ -40,15 +58,93 @@ const PENDING_FILE = path.join(__dirname, 'pending_requests.json');
 const GREETING_MIN_HOURS = 4;
 const GREETING_MAX_HOURS = 8;
 const DAILY_REPORT_HOUR = parseInt(process.env.DAILY_REPORT_HOUR || '22', 10);
-const BC_DELAY_MIN_MS = 2000;
-const BC_DELAY_MAX_MS = 6000;
+
+// ── TASK SCHEDULER ──
+const TASK_CONCURRENCY = 2;
+const TASK_MIN_GAP_MS = 3000;
+
+// ── HUMAN TYPING SIMULATION ──
+const TYPING_ENABLED = process.env.TYPING_ENABLED !== 'false';
+const TYPING_MIN_MS = parseInt(process.env.TYPING_MIN_MS || '1500', 10);
+const TYPING_MAX_MS = parseInt(process.env.TYPING_MAX_MS || '4500', 10);
 
 const USER_HISTORY_SIZE = 4;
 const PENDING_EXPIRY_MS = 60 * 60 * 1000;
 
 // ================================================================
-// BOT-SENT-ID TRACKER (prevents reply loops)
+// TASK SCHEDULER
 // ================================================================
+class TaskScheduler {
+  constructor({ concurrency = 2, minGapMs = 3000 } = {}) {
+    this.concurrency = concurrency;
+    this.minGapMs = minGapMs;
+    this.queue = [];
+    this.running = 0;
+    this.lastTaskStartedAt = 0;
+    this.gapTimer = null;
+    this.totalQueued = 0;
+    this.totalRun = 0;
+    this.totalFailed = 0;
+  }
+
+  schedule(name, fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ name, fn, resolve, reject });
+      this.totalQueued++;
+      this._pump();
+    });
+  }
+
+  _pump() {
+    if (this.running >= this.concurrency) return;
+    if (this.queue.length === 0) return;
+
+    const now = Date.now();
+    const timeSinceLast = now - this.lastTaskStartedAt;
+    if (timeSinceLast < this.minGapMs) {
+      if (!this.gapTimer) {
+        const wait = this.minGapMs - timeSinceLast;
+        this.gapTimer = setTimeout(() => {
+          this.gapTimer = null;
+          this._pump();
+        }, wait);
+      }
+      return;
+    }
+
+    const task = this.queue.shift();
+    this.running++;
+    this.lastTaskStartedAt = Date.now();
+
+    Promise.resolve()
+      .then(() => task.fn())
+      .then((result) => { this.totalRun++; task.resolve(result); })
+      .catch((err) => { this.totalFailed++; task.reject(err); })
+      .finally(() => {
+        this.running--;
+        setTimeout(() => this._pump(), this.minGapMs);
+      });
+
+    if (this.running < this.concurrency) {
+      setTimeout(() => this._pump(), this.minGapMs);
+    }
+  }
+
+  stats() {
+    return {
+      queued: this.queue.length,
+      running: this.running,
+      totalQueued: this.totalQueued,
+      totalRun: this.totalRun,
+      totalFailed: this.totalFailed,
+      concurrency: this.concurrency,
+      minGapMs: this.minGapMs
+    };
+  }
+}
+
+const taskScheduler = new TaskScheduler({ concurrency: TASK_CONCURRENCY, minGapMs: TASK_MIN_GAP_MS });
+
 const botSentIds = new Set();
 function markBotSent(id) {
   if (!id) return;
@@ -58,6 +154,40 @@ function markBotSent(id) {
     botSentIds.clear();
     for (const i of arr.slice(-1000)) botSentIds.add(i);
   }
+}
+
+// ================================================================
+// HUMAN TYPING HELPER
+// ================================================================
+async function simulateHumanTyping(jid, messageLength = 20) {
+  if (!TYPING_ENABLED || !sock) return;
+  try {
+    // Estimate typing duration from message length (~40 WPM, ~5 chars/word)
+    const words = Math.max(2, Math.ceil(messageLength / 5));
+    const estMs = (words / 40) * 60 * 1000;
+    const duration = Math.min(
+      TYPING_MAX_MS,
+      Math.max(TYPING_MIN_MS, estMs + (Math.random() * 2000 - 1000))
+    );
+
+    await sock.sendPresenceUpdate('composing', jid);
+    await new Promise(r => setTimeout(r, duration));
+    await sock.sendPresenceUpdate('paused', jid);
+  } catch (e) {
+    // silent
+  }
+}
+
+// ── Queued send with human typing ──
+function queuedSend(jid, content, options = {}) {
+  const textLen = content?.text?.length || content?.caption?.length || 20;
+  return taskScheduler.schedule(`send:${jid}`, async () => {
+    if (!sock) throw new Error('Bot disconnected');
+    await simulateHumanTyping(jid, textLen);
+    const sent = await sock.sendMessage(jid, content, options);
+    if (sent?.key?.id) markBotSent(sent.key.id);
+    return sent;
+  });
 }
 
 // ================================================================
@@ -172,10 +302,7 @@ function pushLiveMessage(entry) {
 }
 async function alertAdmin(text) {
   if (!sock) return;
-  try {
-    const r = await sock.sendMessage(ADMIN_JID, { text });
-    if (r?.key?.id) markBotSent(r.key.id);
-  } catch (e) { pushLog('warn', 'admin', `Alert failed: ${e.message}`); }
+  try { await queuedSend(ADMIN_JID, { text }); } catch (e) { pushLog('warn', 'admin', `Alert failed: ${e.message}`); }
 }
 const _origError = console.error;
 console.error = (...args) => { _origError.apply(console, args); pushLog('error', 'system', args.map(String).join(' ')); };
@@ -184,6 +311,8 @@ console.error = (...args) => { _origError.apply(console, args); pushLog('error',
 // STATE
 // ================================================================
 let sock = null;
+let entropyService = null;
+let healthMonitor = null;
 let qrDataUri = null;
 let connectionStatus = 'disconnected';
 let botStartTime = Date.now();
@@ -192,8 +321,6 @@ let botJid = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 let isConnecting = false;
-
-let lastRawMsg = null;
 
 const processedMessages = new Set();
 const activeChats = new Set();
@@ -222,7 +349,7 @@ let lastDailyReportDate = null;
 function resetDailyStats() {
   const today = new Date().toISOString().slice(0, 10);
   if (lastDailyReportDate !== today) {
-    dailyStats = { date: today, joined: 0, failed: 0, dmsReplied: 0, broadcastsSent: 0, greetingsSent: 0, scraperSearches: 0, scraperGifs: 0, picsSent: 0, videosSent: 0, aiErrors: 0, pendingCreated: 0, pendingResolved: 0, discovered: 0, imageBroadcasts: 0 };
+    dailyStats = { date: today, joined: 0, failed: 0, dmsReplied: 0, broadcastsSent: 0, greetingsSent: 0, scraperSearches: 0, scraperGifs: 0, picsSent: 0, videosSent: 0, aiErrors: 0, pendingCreated: 0, pendingResolved: 0, discovered: 0, imageBroadcasts: 0, badMacs: 0 };
   }
 }
 resetDailyStats();
@@ -345,7 +472,7 @@ async function processJoinQueue() {
   resetDailyStats();
   try {
     pushLog('info', 'join', `Joining ${item.code}...`);
-    const res = await sock.groupAcceptInvite(item.code);
+    const res = await taskScheduler.schedule('groupJoin', () => sock.groupAcceptInvite(item.code));
     lastJoinAt = Date.now();
     if (res) {
       joinedGroups.set(res, { name: null, joinedAt: Date.now(), discovered: false });
@@ -503,25 +630,19 @@ async function forwardToAdminForHelp(id, pending) {
 async function resolvePending(id, action, payload, adminChatJid) {
   const p = pendingRequests.get(id);
   if (!p) return { ok: false, error: `No pending request ${id}` };
-  const reply = async (t) => {
-    const r = await sock.sendMessage(adminChatJid, { text: t });
-    if (r?.key?.id) markBotSent(r.key.id);
-    return r;
-  };
+  const reply = (t) => queuedSend(adminChatJid, { text: t });
   try {
     if (action === 'skip') {
       const casual = await askRewind(`User said: "${p.userHistory.map(h => h.text).join(' / ')}". Reply casually and warmly. No filler. 1 short sentence.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Warm, casual WhatsApp tone with light Shona sprinkled in.`);
       const fallback = casual || 'Sorry, couldn\'t find that right now 😅';
-      const r = await sock.sendMessage(p.userJid, { text: fallback });
-      if (r?.key?.id) markBotSent(r.key.id);
+      await queuedSend(p.userJid, { text: fallback });
       pendingRequests.delete(id); savePending();
       resetDailyStats(); dailyStats.pendingResolved++;
       await reply(`✅ Replied casually to ${p.userName}.`);
       return { ok: true };
     }
     if (action === 'say') {
-      const r = await sock.sendMessage(p.userJid, { text: payload });
-      if (r?.key?.id) markBotSent(r.key.id);
+      await queuedSend(p.userJid, { text: payload });
       pendingRequests.delete(id); savePending();
       resetDailyStats(); dailyStats.pendingResolved++;
       await reply(`✅ Sent your text to ${p.userName}.`);
@@ -532,14 +653,12 @@ async function resolvePending(id, action, payload, adminChatJid) {
     if (p.intent.type === 'video' || p.intent.type === 'gif') {
       const r = await scraperGif(query);
       if (!r.ok || r.gifs.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      const sent = await sock.sendMessage(p.userJid, { video: { url: r.gifs[0] }, gifPlayback: true });
-      if (sent?.key?.id) markBotSent(sent.key.id);
+      await queuedSend(p.userJid, { video: { url: r.gifs[0] }, gifPlayback: true });
       resetDailyStats(); dailyStats.picsSent++;
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      const sent = await sock.sendMessage(p.userJid, { image: { url: r.images[0] } });
-      if (sent?.key?.id) markBotSent(sent.key.id);
+      await queuedSend(p.userJid, { image: { url: r.images[0] } });
       resetDailyStats(); dailyStats.picsSent++;
     }
     pendingRequests.delete(id); savePending();
@@ -581,12 +700,10 @@ function scheduleGreetings() {
       if (Math.random() > Math.min(progress, 1)) continue;
       const replyText = pickGreeting(getTimeOfDay());
       try {
-        const r = await sock.sendMessage(jid, { text: replyText });
-        if (r?.key?.id) markBotSent(r.key.id);
+        await queuedSend(jid, { text: replyText });
         lastGreetingAt.set(jid, now);
         resetDailyStats(); dailyStats.greetingsSent++;
-        pushLog('info', 'greeting', `Sent to ${jid}: ${replyText}`);
-        await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
+        pushLog('info', 'greeting', `Queued greeting for ${jid}: ${replyText}`);
       } catch (e) { pushLog('warn', 'greeting', `Failed ${jid}: ${e.message}`); }
     }
     saveGroups();
@@ -618,7 +735,8 @@ function scheduleDailyReport() {
       `📢 Broadcasts: *${s.broadcastsSent || 0}*`,
       `📸 Image broadcasts: *${s.imageBroadcasts || 0}*`,
       `👋 Greetings: *${s.greetingsSent || 0}*`,
-      `🤖 AI errors: *${s.aiErrors || 0}*`, ``,
+      `🤖 AI errors: *${s.aiErrors || 0}*`,
+      `💥 Bad MACs: *${s.badMacs || 0}*`, ``,
       `Uptime: ${Math.floor((Date.now() - botStartTime) / 3600000)}h`
     ].join('\n');
     await alertAdmin(summary);
@@ -628,26 +746,23 @@ function scheduleDailyReport() {
 // ================================================================
 // BROADCAST
 // ================================================================
-function randomBcDelay() { return BC_DELAY_MIN_MS + Math.floor(Math.random() * (BC_DELAY_MAX_MS - BC_DELAY_MIN_MS)); }
 async function broadcast({ message, imageUrl = null, gifUrl = null, imageBuffer = null, mode = 'all' }) {
   const targets = [];
   if (mode === 'all' || mode === 'groups') for (const jid of joinedGroups.keys()) targets.push({ jid, type: 'group' });
   if (mode === 'all' || mode === 'dms') for (const jid of activeDMs) targets.push({ jid, type: 'dm' });
   const results = { sent: 0, failed: 0, total: targets.length, errors: [], mode };
-  pushLog('info', 'broadcast', `Broadcasting to ${targets.length} (${mode})${imageBuffer ? ' [IMAGE]' : ''}`);
-  for (let i = 0; i < targets.length; i++) {
-    const t = targets[i];
+  pushLog('info', 'broadcast', `Broadcasting to ${targets.length} (${mode})${imageBuffer ? ' [IMAGE]' : ''} — all sends queued at ${TASK_MIN_GAP_MS/1000}s gap / concurrency ${TASK_CONCURRENCY}`);
+  for (const t of targets) {
     try {
-      let sent;
-      if (gifUrl) sent = await sock.sendMessage(t.jid, { video: { url: gifUrl }, gifPlayback: true, caption: message || '' });
-      else if (imageBuffer) sent = await sock.sendMessage(t.jid, { image: imageBuffer, caption: message || '' });
-      else if (imageUrl) sent = await sock.sendMessage(t.jid, { image: { url: imageUrl }, caption: message || '' });
-      else sent = await sock.sendMessage(t.jid, { text: message });
-      if (sent?.key?.id) markBotSent(sent.key.id);
+      let content;
+      if (gifUrl) content = { video: { url: gifUrl }, gifPlayback: true, caption: message || '' };
+      else if (imageBuffer) content = { image: imageBuffer, caption: message || '' };
+      else if (imageUrl) content = { image: { url: imageUrl }, caption: message || '' };
+      else content = { text: message };
+      await queuedSend(t.jid, content);
       results.sent++;
       resetDailyStats(); dailyStats.broadcastsSent++;
     } catch (e) { results.failed++; results.errors.push({ jid: t.jid, error: e.message }); }
-    if (i < targets.length - 1) await new Promise(r => setTimeout(r, randomBcDelay()));
   }
   pushLog('success', 'broadcast', `Done: ${results.sent}/${results.total}`);
   return results;
@@ -674,7 +789,11 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v41*
+const COMMAND_LIST = `🥖 *BreadBot v43*
+
+*Scheduler*
+Every send is queued. Max ${TASK_CONCURRENCY} in parallel, min ${TASK_MIN_GAP_MS/1000}s gap between sends.
+Human typing indicators: ${TYPING_ENABLED ? 'ON' : 'OFF'} (${TYPING_MIN_MS}-${TYPING_MAX_MS}ms)
 
 *Image broadcast* (send an image with a caption)
 • Image + caption \`!bcdm Buy this product\` → DMs
@@ -687,7 +806,7 @@ const COMMAND_LIST = `🥖 *BreadBot v41*
 
 *Test*
 !whoami · !aitest · !scraperstatus
-!scrapersearch <q> · !scrapergif <q> · !test · !testall
+!scrapersearch <q> · !scrapergif <q> · !test · !testall · !sched
 
 *Pending*
 !pending · !teach <id> <query> · !teach <id> say <text> · !teach <id> skip
@@ -704,7 +823,7 @@ const COMMAND_LIST = `🥖 *BreadBot v41*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION
+// CONNECTION (with baileys-antiban wrapping)
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -715,7 +834,7 @@ async function connectBot() {
     const { version } = await fetchLatestBaileysVersion();
     pushLog('info', 'bot', `WA version ${version.join('.')}`);
 
-    sock = makeWASocket({
+    const baseSocket = makeWASocket({
       version, auth: state, printQRInTerminal: false,
       browser: Browsers.macOS('Desktop'),
       logger: pino({ level: 'silent' }),
@@ -724,39 +843,112 @@ async function connectBot() {
       getMessage: async () => undefined
     });
 
+    // ── baileys-antiban wrap ──
+    if (wrapSocket) {
+      try {
+        sock = wrapSocket(baseSocket, {
+          groupOpGuard: { limits: { add: { max: 3, windowMs: 600_000 }, create: { max: 2, windowMs: 600_000 } } },
+          legitimacySignals: { typoProbability: 0.02 },
+          jidCanonicalizer: { enabled: true, canonical: 'pn' }
+        });
+        pushLog('success', 'antiban', 'Socket wrapped with baileys-antiban');
+      } catch (e) {
+        pushLog('warn', 'antiban', `wrapSocket failed: ${e.message} — using raw socket`);
+        sock = baseSocket;
+      }
+    } else {
+      sock = baseSocket;
+      pushLog('warn', 'antiban', 'baileys-antiban not available — running raw');
+    }
+
+    // ── Session Health Monitor (Bad MAC detection) ──
+    if (SessionHealthMonitor) {
+      try {
+        healthMonitor = new SessionHealthMonitor({
+          badMacThreshold: 3,
+          badMacWindowMs: 60_000,
+          onDegraded: (stats) => {
+            pushLog('error', 'health', `SESSION DEGRADED: ${stats.badMacCount} Bad MACs in last minute`);
+            resetDailyStats(); dailyStats.badMacs = stats.badMacCount;
+            alertAdmin(`⚠️ *Session degraded*\n${stats.badMacCount} Bad MAC errors in 60s\nConsider clearing session.`).catch(() => {});
+          }
+        });
+        pushLog('info', 'health', 'Session health monitor started');
+      } catch (e) { pushLog('warn', 'health', `Health monitor failed: ${e.message}`); }
+    }
+
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
+
       if (qr) { qrDataUri = await QRCode.toDataURL(qr); connectionStatus = 'qr'; pushLog('info', 'bot', 'QR generated'); }
+
       if (connection === 'open') {
         isConnecting = false; connectionStatus = 'connected'; reconnectAttempts = 0;
         botStartTime = Date.now();
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
+
+        // ── Start Human Entropy Service ──
+        if (createHumanEntropyService) {
+          try {
+            entropyService = createHumanEntropyService(sock, botJid, {
+              enabled: true,
+              minIntervalMs: 2 * 60 * 60 * 1000,
+              maxIntervalMs: 6 * 60 * 60 * 1000
+            });
+            entropyService.start();
+            pushLog('success', 'entropy', 'Human entropy service started');
+          } catch (e) { pushLog('warn', 'entropy', `Entropy failed: ${e.message}`); }
+        }
+
         try { await sock.sendPresenceUpdate('available'); } catch (e) {}
         await alertAdmin(`✅ *BreadBot ONLINE*\n📱 ${botNumber}\n\nSend !commands`);
       }
+
       if (connection === 'close') {
         isConnecting = false;
-        const code = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = code !== DisconnectReason.loggedOut;
+
+        // ── classifyDisconnect ──
+        let code = lastDisconnect?.error?.output?.statusCode;
+        let classification = null;
+        if (classifyDisconnect) {
+          try { classification = classifyDisconnect(code); } catch (e) {}
+        }
+
+        if (classification) {
+          pushLog('warn', 'bot', `Disconnected (${code}) — ${classification.message} [${classification.category}]`);
+        } else {
+          pushLog('warn', 'bot', `Disconnected (${code})`);
+        }
+
+        if (entropyService) { try { entropyService.stop(); } catch (e) {} entropyService = null; }
+
+        const shouldReconnect = classification
+          ? classification.shouldReconnect
+          : code !== DisconnectReason.loggedOut;
+
         if (shouldReconnect && reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
-          const delay = Math.min(5000 * reconnectAttempts, 30000);
+          const delay = classification?.backoffMs || Math.min(5000 * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
-          pushLog('warn', 'bot', `Disconnected (${code}), retry ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
+          pushLog('warn', 'bot', `Retry in ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
           setTimeout(() => { try { sock.end(undefined); } catch (e) {} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error', 'bot', code === DisconnectReason.loggedOut ? 'Logged out — rescan' : 'Max retries');
+          pushLog('error', 'bot', classification?.category === 'fatal' || code === DisconnectReason.loggedOut ? 'Fatal — rescan QR' : 'Max retries');
         }
       }
     });
+
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const msg of messages || []) {
         try {
-          pushLog('info', 'raw', `upsert: fromMe=${msg.key?.fromMe} chat=${msg.key?.remoteJid}`);
+          // Feed entropy service with recent contacts
+          if (entropyService && msg.key?.remoteJid && !msg.key.fromMe) {
+            try { entropyService.addRecentContact(msg.key.remoteJid, msg.key); } catch (e) {}
+          }
           await handleMessage(msg);
         } catch (e) {
           pushLog('error', 'handler', `handleMessage: ${e.message}`);
@@ -769,7 +961,10 @@ async function connectBot() {
     connectionStatus = 'error';
   }
 }
-async function disconnectBot() { if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); } }
+async function disconnectBot() {
+  if (entropyService) { try { entropyService.stop(); } catch (e) {} entropyService = null; }
+  if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); }
+}
 function refreshQR() { qrDataUri = null; connectionStatus = 'disconnected'; disconnectBot(); setTimeout(connectBot, 1500); }
 
 // ================================================================
@@ -786,14 +981,8 @@ async function handleMessage(msg) {
   processedMessages.add(msgId);
   if (processedMessages.size > 10000) processedMessages.clear();
 
-  // Skip bot's own echoes
-  if (botSentIds.has(msgId)) {
-    return;
-  }
+  if (botSentIds.has(msgId)) return;
 
-  lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName };
-
-  // Unwrap
   let m = msg.message;
   let guard = 0;
   while (m && guard++ < 10) {
@@ -815,12 +1004,8 @@ async function handleMessage(msg) {
   const pushName = msg.pushName || (msg.key.fromMe ? 'You' : 'Unknown');
   const chatType = isGroup ? 'group' : 'dm';
 
-  // ── GROUP AUTO-DISCOVERY ──
-  if (isGroup) {
-    discoverGroup(chatJid, null);
-  } else {
-    activeDMs.add(chatJid);
-  }
+  if (isGroup) discoverGroup(chatJid, null);
+  else activeDMs.add(chatJid);
 
   pushLiveMessage({
     id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
@@ -838,53 +1023,29 @@ async function handleMessage(msg) {
     if (['bcdm', 'bcgroup', 'all'].includes(cmd)) {
       const caption = args.slice(1).join(' ').trim();
       pushLog('info', 'broadcast', `Image broadcast via caption (${cmd}): "${caption}"`);
-
-      const ack = await sock.sendMessage(chatJid, { text: `⏳ Downloading your image and preparing broadcast...` });
-      if (ack?.key?.id) markBotSent(ack.key.id);
+      await queuedSend(chatJid, { text: `⏳ Downloading your image...` });
 
       try {
-        const buffer = await downloadMediaMessage(
-          msg, 'buffer', {},
-          { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-        );
-
-        if (!buffer) {
-          const r = await sock.sendMessage(chatJid, { text: '❌ Could not download the image.' });
-          if (r?.key?.id) markBotSent(r.key.id);
-          return;
-        }
+        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
+        if (!buffer) { await queuedSend(chatJid, { text: '❌ Could not download the image.' }); return; }
 
         const mode = cmd === 'bcdm' ? 'dms' : cmd === 'bcgroup' ? 'groups' : 'all';
-        const count = mode === 'all'
-          ? (joinedGroups.size + activeDMs.size)
-          : mode === 'groups'
-            ? joinedGroups.size
-            : activeDMs.size;
+        const count = mode === 'all' ? (joinedGroups.size + activeDMs.size) : mode === 'groups' ? joinedGroups.size : activeDMs.size;
+        if (count === 0) { await queuedSend(chatJid, { text: `📭 No ${mode} targets.` }); return; }
 
-        if (count === 0) {
-          const r = await sock.sendMessage(chatJid, { text: `📭 No ${mode} targets.` });
-          if (r?.key?.id) markBotSent(r.key.id);
-          return;
-        }
-
-        const pre = await sock.sendMessage(chatJid, { text: `📸 Broadcasting to ${count} ${mode}...\nCaption: "${caption || '(none)'}"` });
-        if (pre?.key?.id) markBotSent(pre.key.id);
+        await queuedSend(chatJid, { text: `📸 Queued broadcast to ${count} ${mode}.\nCaption: "${caption || '(none)'}"\nScheduler: ${TASK_CONCURRENCY} parallel · ${TASK_MIN_GAP_MS/1000}s gap · typing ${TYPING_ENABLED ? 'ON' : 'OFF'}` });
 
         const r = await broadcast({ message: caption, imageBuffer: buffer, mode });
-
         resetDailyStats(); dailyStats.imageBroadcasts++;
-        const done = await sock.sendMessage(chatJid, { text: `✅ *Image broadcast done*\n✅ Sent: *${r.sent}*\n❌ Failed: *${r.failed}*` });
-        if (done?.key?.id) markBotSent(done.key.id);
+        await queuedSend(chatJid, { text: `✅ *Image broadcast done*\n✅ Sent: *${r.sent}*\n❌ Failed: *${r.failed}*` });
       } catch (e) {
         pushLog('error', 'broadcast', `Image broadcast failed: ${e.message}`);
-        const r = await sock.sendMessage(chatJid, { text: `❌ ${e.message}` });
-        if (r?.key?.id) markBotSent(r.key.id);
+        await queuedSend(chatJid, { text: `❌ ${e.message}` });
       }
       return;
     }
   }
 
-  // Track user history (non-admin DMs only, and not from bot)
   if (!isGroup && !isAdmin && !msg.key.fromMe && text) {
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
     const h = userHistories.get(senderJid);
@@ -892,38 +1053,30 @@ async function handleMessage(msg) {
     if (h.length > USER_HISTORY_SIZE * 2) h.shift();
   }
 
-  // Invite links → queue
   const codes = extractAllInviteCodes(text);
   if (codes.length > 0) {
     let added = 0;
     for (const c of codes) if (queueJoin(c, phone || pushName, chatType)) added++;
     if (added > 0) {
       pushLog('info', 'join', `Queued ${added}/${codes.length} from ${pushName} via ${chatType}`);
-      if (!isGroup) {
-        const r = await sock.sendMessage(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` });
-        if (r?.key?.id) markBotSent(r.key.id);
-      }
+      if (!isGroup) await queuedSend(chatJid, { text: `✅ Queued ${added} new link${added !== 1 ? 's' : ''}.\nQueue: ${joinQueue.length}` });
       processJoinQueue();
     }
   }
 
-  // Admin text commands in DM (from any chat, incl. "Message Yourself")
   if (!isGroup && isAdmin && text.startsWith('!')) {
     pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone || '—'} lid ${lid || '—'})`);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
 
-  // Groups silent
   if (isGroup) return;
 
-  // Admin DM without command → ignore
   if (isAdmin) {
     pushLog('info', 'admin', `Admin DM ignored (no command): "${text.slice(0, 60)}"`);
     return;
   }
 
-  // ── NON-ADMIN DM ──
   if (!isGroup && !isAdmin) {
     const lang = detectLanguage(text);
     const langName = LANG_NAMES[lang] || 'English';
@@ -941,13 +1094,8 @@ async function handleMessage(msg) {
         if (intent.type === 'video' || intent.type === 'gif') {
           const r = await scraperGif(intent.query);
           if (r.ok && r.gifs.length > 0) {
-            try {
-              const s = await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true }, { quoted: msg });
-              if (s?.key?.id) markBotSent(s.key.id);
-            } catch (e) {
-              const s = await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg });
-              if (s?.key?.id) markBotSent(s.key.id);
-            }
+            try { await queuedSend(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true }, { quoted: msg }); }
+            catch (e) { await queuedSend(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
             resetDailyStats();
             if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
             return;
@@ -955,13 +1103,8 @@ async function handleMessage(msg) {
         } else {
           const r = await scraperSearch(intent.query);
           if (r.ok && r.images.length > 0) {
-            try {
-              const s = await sock.sendMessage(chatJid, { image: { url: r.images[0] } }, { quoted: msg });
-              if (s?.key?.id) markBotSent(s.key.id);
-            } catch (e) {
-              const s = await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg });
-              if (s?.key?.id) markBotSent(s.key.id);
-            }
+            try { await queuedSend(chatJid, { image: { url: r.images[0] } }, { quoted: msg }); }
+            catch (e) { await queuedSend(chatJid, { text: r.images[0] }, { quoted: msg }); }
             resetDailyStats(); dailyStats.picsSent++;
             return;
           }
@@ -975,15 +1118,11 @@ async function handleMessage(msg) {
         `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp, roleplaying a real person. Reply in ${langName}.`
       );
       const finalAck = (ack && !containsForbidden(ack)) ? ack : 'checking rn 😊';
-      try {
-        const s = await sock.sendMessage(chatJid, { text: finalAck }, { quoted: msg });
-        if (s?.key?.id) markBotSent(s.key.id);
-      } catch (e) {}
+      try { await queuedSend(chatJid, { text: finalAck }, { quoted: msg }); } catch (e) {}
       await forwardToAdminForHelp(id, pendingRequests.get(id));
       return;
     }
 
-    // ── CASUAL ROLEPLAY AI REPLY ──
     const systemPrompt = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. You are a REAL person, not an AI, not an assistant, not a bot. Roleplay her naturally.
 
 RULES:
@@ -1000,8 +1139,7 @@ RULES:
     if (containsForbidden(aiReply)) { pushLog('warn', 'ai', `Dropped (forbidden): ${aiReply.slice(0, 80)}`); return; }
     const final = humanize(aiReply);
     if (!final) { pushLog('warn', 'ai', 'Empty after humanize'); return; }
-    const s = await sock.sendMessage(chatJid, { text: final }, { quoted: msg });
-    if (s?.key?.id) markBotSent(s.key.id);
+    await queuedSend(chatJid, { text: final }, { quoted: msg });
     resetDailyStats(); dailyStats.dmsReplied++;
     pushLog('info', 'ai', `DM reply to ${pushName}: ${final.slice(0, 50)}`);
   }
@@ -1013,16 +1151,17 @@ RULES:
 async function handleAdminCommand(text, chatJid, msg) {
   const args = text.slice(1).trim().split(/\s+/);
   const cmd = args[0].toLowerCase();
-  const reply = async (t) => {
-    const r = await sock.sendMessage(chatJid, { text: t }, { quoted: msg });
-    if (r?.key?.id) markBotSent(r.key.id);
-    return r;
-  };
+  const reply = (t) => queuedSend(chatJid, { text: t }, { quoted: msg });
 
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nAdmin LIDs: *${[...adminLids].join(', ') || 'none'}*`); break;
+    case 'sched': {
+      const st = taskScheduler.stats();
+      await reply(`⚙️ *Scheduler*\n\nQueued: *${st.queued}*\nRunning: *${st.running}*\nTotal queued: *${st.totalQueued}*\nTotal run: *${st.totalRun}*\nTotal failed: *${st.totalFailed}*\nConcurrency: *${st.concurrency}*\nMin gap: *${st.minGapMs}ms*\nTyping: *${TYPING_ENABLED ? 'ON' : 'OFF'}* (${TYPING_MIN_MS}-${TYPING_MAX_MS}ms)\nAntiban: *${wrapSocket ? 'ACTIVE' : 'OFF'}*\nEntropy: *${entropyService ? 'RUNNING' : 'STOPPED'}*`);
+      break;
+    }
+    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nSched queued: *${taskScheduler.queue.length}*\nAntiban: *${wrapSocket ? 'ACTIVE' : 'OFF'}*`); break;
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
       const lid = extractLid(msg, chatJid);
@@ -1065,7 +1204,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
     case 'stats': {
       const s = (resetDailyStats(), dailyStats);
-      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}*\nDiscovered: *${s.discovered}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nImage broadcasts: *${s.imageBroadcasts}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nSched queued: *${taskScheduler.queue.length}* / running *${taskScheduler.running}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}*\nDiscovered: *${s.discovered}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nImage broadcasts: *${s.imageBroadcasts}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nBad MACs: *${s.badMacs}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
@@ -1112,7 +1251,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'leave': {
       const jid = args[1];
       if (!jid || !jid.endsWith('@g.us')) { await reply('❌ Usage: `!leave <jid@g.us>`'); return; }
-      try { await sock.groupLeave(jid); joinedGroups.delete(jid); saveGroups(); await reply(`✅ Left ${jid}`); }
+      try { await taskScheduler.schedule('groupLeave', () => sock.groupLeave(jid)); joinedGroups.delete(jid); saveGroups(); await reply(`✅ Left ${jid}`); }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1125,10 +1264,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results (${r.error || 'empty'})`); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      try {
-        const s = await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: `Preview 1/${r.images.length}\n!nextpic · !bcastpic <caption>` });
-        if (s?.key?.id) markBotSent(s.key.id);
-      }
+      try { await queuedSend(chatJid, { image: { url: r.images[0] }, caption: `Preview 1/${r.images.length}\n!nextpic · !bcastpic <caption>` }); }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1136,10 +1272,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (previewCache.imageUrls.length === 0) { await reply('❌ No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex + 1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
-      try {
-        const s = await sock.sendMessage(chatJid, { image: { url: previewCache.currentUrl }, caption: `Preview ${previewCache.imageIndex + 1}/${previewCache.imageUrls.length}` });
-        if (s?.key?.id) markBotSent(s.key.id);
-      }
+      try { await queuedSend(chatJid, { image: { url: previewCache.currentUrl }, caption: `Preview ${previewCache.imageIndex + 1}/${previewCache.imageUrls.length}` }); }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1151,10 +1284,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (!r.ok || r.gifs.length === 0) { await reply(`❌ No results (${r.error || 'empty'})`); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      try {
-        const s = await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: `GIF 1/${r.gifs.length}\n!nextgif · !bcastgif <caption>` });
-        if (s?.key?.id) markBotSent(s.key.id);
-      }
+      try { await queuedSend(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: `GIF 1/${r.gifs.length}\n!nextgif · !bcastgif <caption>` }); }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1162,10 +1292,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (previewCache.gifUrls.length === 0) { await reply('❌ No preview.'); return; }
       previewCache.gifIndex = (previewCache.gifIndex + 1) % previewCache.gifUrls.length;
       previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
-      try {
-        const s = await sock.sendMessage(chatJid, { video: { url: previewCache.currentUrl }, gifPlayback: true, caption: `GIF ${previewCache.gifIndex + 1}/${previewCache.gifUrls.length}` });
-        if (s?.key?.id) markBotSent(s.key.id);
-      }
+      try { await queuedSend(chatJid, { video: { url: previewCache.currentUrl }, gifPlayback: true, caption: `GIF ${previewCache.gifIndex + 1}/${previewCache.gifUrls.length}` }); }
       catch (e) { await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1176,7 +1303,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       const mode = cmd === 'all' ? 'all' : (cmd === 'bcgroup' ? 'groups' : 'dms');
       const count = mode === 'all' ? (joinedGroups.size + activeDMs.size) : mode === 'groups' ? joinedGroups.size : activeDMs.size;
       if (count === 0) { await reply(`📭 No ${mode} targets.`); return; }
-      await reply(`⏳ Broadcasting to ${count} (${mode})...`);
+      await reply(`⏳ Queued broadcast to ${count} (${mode}) — ${TASK_CONCURRENCY} parallel · ${TASK_MIN_GAP_MS/1000}s gap`);
       const r = await broadcast({ message, mode });
       await reply(`✅ Done — Sent: *${r.sent}* / Failed: *${r.failed}*`);
       break;
@@ -1187,7 +1314,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       const mode = cmd === 'bcastpic' ? 'all' : cmd === 'bcastpicdm' ? 'dms' : 'groups';
       const count = mode === 'all' ? (joinedGroups.size + activeDMs.size) : mode === 'groups' ? joinedGroups.size : activeDMs.size;
       if (count === 0) { await reply(`📭 No ${mode} targets.`); return; }
-      await reply(`⏳ Broadcasting to ${count}...`);
+      await reply(`⏳ Queued broadcast to ${count}...`);
       const r = await broadcast({ message: caption, imageUrl: previewCache.currentUrl, mode });
       await reply(`✅ Done — Sent: *${r.sent}* / Failed: *${r.failed}*`);
       break;
@@ -1197,7 +1324,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       const caption = args.slice(1).join(' ') || '';
       const count = joinedGroups.size + activeDMs.size;
       if (count === 0) { await reply('📭 No targets.'); return; }
-      await reply(`⏳ Broadcasting GIF to ${count}...`);
+      await reply(`⏳ Queued broadcast GIF to ${count}...`);
       const r = await broadcast({ message: caption, gifUrl: previewCache.currentUrl, mode: 'all' });
       await reply(`✅ Done — Sent: *${r.sent}* / Failed: *${r.failed}*`);
       break;
@@ -1208,7 +1335,7 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (!url) { await reply('❌ Usage: `!allimg <url> | <caption>`'); return; }
       const count = joinedGroups.size + activeDMs.size;
       if (count === 0) { await reply('📭 No targets.'); return; }
-      await reply(`⏳ Broadcasting image to ${count}...`);
+      await reply(`⏳ Queued broadcast image to ${count}...`);
       const r = await broadcast({ message: caption, imageUrl: url, mode: 'all' });
       await reply(`✅ Done — Sent: *${r.sent}* / Failed: *${r.failed}*`);
       break;
@@ -1227,14 +1354,14 @@ async function handleAdminCommand(text, chatJid, msg) {
       if (!adText) { await reply('❌ No ad built.'); return; }
       const count = joinedGroups.size + activeDMs.size;
       if (count === 0) { await reply('📭 No targets.'); return; }
-      await reply(`⏳ Broadcasting ad to ${count}...`);
+      await reply(`⏳ Queued broadcast ad to ${count}...`);
       const r = await broadcast({ message: adText, mode: 'all' });
       await reply(`✅ Done — Sent: *${r.sent}* / Failed: *${r.failed}*`);
       break;
     }
     case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply(`📊 *Today (${s.date})*\nJoined: *${s.joined}*\nDiscovered: *${s.discovered}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}*\nVideos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nImage broadcasts: *${s.imageBroadcasts}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Today (${s.date})*\nJoined: *${s.joined}*\nDiscovered: *${s.discovered}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}*\nVideos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nImage broadcasts: *${s.imageBroadcasts}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nBad MACs: *${s.badMacs}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     default: await reply(`❓ Unknown: *!${cmd}*`);
@@ -1259,6 +1386,10 @@ async function runFullTestSuite() {
     `💬 DMs: ${activeDMs.size}`,
     `📋 Queue: ${joinQueue.length}`,
     `⏳ Pending: ${pendingRequests.size}`,
+    `⚙️ Sched: ${taskScheduler.queue.length} queued / ${taskScheduler.running} running`,
+    `🛡️ Antiban: ${wrapSocket ? 'ACTIVE' : 'OFF'}`,
+    `🎭 Entropy: ${entropyService ? 'RUNNING' : 'STOPPED'}`,
+    `💥 Bad MACs: ${dailyStats?.badMacs || 0}`,
     `🕒 ${Date.now() - t0}ms`].join('\n');
 }
 
@@ -1268,8 +1399,8 @@ async function runFullTestSuite() {
 const app = express();
 app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now(), status: connectionStatus, uptime: Math.floor((Date.now()-botStartTime)/1000) }));
-app.get('/api/status', (req, res) => res.json({ status: connectionStatus, botNumber, groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length, pending: pendingRequests.size }));
+app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now(), status: connectionStatus, uptime: Math.floor((Date.now()-botStartTime)/1000), sched: taskScheduler.stats(), antiban: !!wrapSocket, entropy: !!entropyService }));
+app.get('/api/status', (req, res) => res.json({ status: connectionStatus, botNumber, groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length, pending: pendingRequests.size, sched: taskScheduler.stats() }));
 app.get('/admin/qr', async (req, res) => {
   if (!qrDataUri) return res.status(404).json({ error: 'No QR' });
   const b64 = qrDataUri.replace(/^data:image\/\w+;base64,/, '');
@@ -1296,6 +1427,7 @@ app.get('/admin/messages-stream', (req, res) => {
 });
 app.get('/admin/aitest', async (req, res) => { const r = await testRewindRaw(); res.json(r); });
 app.get('/admin/scraperstatus', async (req, res) => { const r = await scraperStatus(); res.json(r); });
+app.get('/admin/sched', (req, res) => res.json(taskScheduler.stats()));
 app.get('/admin/pending', (req, res) => res.json({ pending: [...pendingRequests.values()] }));
 app.post('/admin/pending/:id/resolve', async (req, res) => {
   const { id } = req.params;
@@ -1317,18 +1449,24 @@ app.get('/admin/stats', (req, res) => {
     adminPhone: ADMIN_PHONE,
     adminLids: [...adminLids],
     pendingCount: pendingRequests.size,
-    pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query }))
+    pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query })),
+    sched: taskScheduler.stats(),
+    antibanActive: !!wrapSocket,
+    entropyRunning: !!entropyService,
+    typingEnabled: TYPING_ENABLED
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v41</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v43</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v41</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v43</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Sched: <b id="schedStatus">—</b> · Antiban: <b id="antibanStatus">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
-<div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined/Discovered</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
+<div class="card"><h2>🛡️ Anti-Ban</h2><div class="stat-row"><span>Antiban</span><span class="stat-val" id="antibanActive">—</span></div><div class="stat-row"><span>Entropy service</span><span class="stat-val" id="entropyRunning">—</span></div><div class="stat-row"><span>Typing sim</span><span class="stat-val" id="typingEnabled">—</span></div><div class="stat-row"><span>Bad MACs today</span><span class="stat-val" id="badMacsToday">—</span></div></div>
+<div class="card"><h2>⚙️ Scheduler</h2><div class="stat-row"><span>Queued</span><span class="stat-val" id="schedQueued">—</span></div><div class="stat-row"><span>Running</span><span class="stat-val" id="schedRunning">—</span></div><div class="stat-row"><span>Total queued</span><span class="stat-val" id="schedTotalQueued">—</span></div><div class="stat-row"><span>Total run</span><span class="stat-val" id="schedTotalRun">—</span></div><div class="stat-row"><span>Total failed</span><span class="stat-val" id="schedTotalFailed">—</span></div><div class="stat-row"><span>Concurrency / gap</span><span class="stat-val" id="schedCfg">—</span></div></div>
+<div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined/Discovered</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Join queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
 <div class="card"><h2>Scraper Usage</h2><div class="stat-row"><span>Searches (ok/fail)</span><span class="stat-val" id="scSearch">—</span></div><div class="stat-row"><span>GIFs (ok/fail)</span><span class="stat-val" id="scGif">—</span></div><div class="stat-row"><span>Last search</span><span class="stat-val" id="scLastSearch">—</span></div><div class="stat-row"><span>Last GIF</span><span class="stat-val" id="scLastGif">—</span></div></div>
-<div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Discovered</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Image broadcasts</span><span class="stat-val" id="dayImgBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div><div class="stat-row"><span>Pending (new/done)</span><span class="stat-val" id="dayPending">—</span></div></div>
+<div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Discovered</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Image broadcasts</span><span class="stat-val" id="dayImgBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div></div>
 <div class="card full-width"><h2>⏳ Pending Requests</h2><div id="pending"></div></div>
 <div class="card full-width"><h2>📨 Live Messages</h2><div id="msgs"></div></div>
 <div class="card full-width"><h2>📜 Logs</h2><div id="logs"></div></div>
@@ -1341,7 +1479,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.adminLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.discovered||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayImgBC').textContent=s.imageBroadcasts||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.adminLids||[]).join(', ')||'—';$('antibanActive').textContent=d.antibanActive?'✅ ACTIVE':'❌ OFF';$('entropyRunning').textContent=d.entropyRunning?'✅ RUNNING':'❌ STOPPED';$('typingEnabled').textContent=d.typingEnabled?'✅ ON':'❌ OFF';$('badMacsToday').textContent=(d.dailyStats?.badMacs||0);$('antibanStatus').textContent=d.antibanActive?'ON':'OFF';const sc=d.sched||{};$('schedQueued').textContent=sc.queued||0;$('schedRunning').textContent=sc.running||0;$('schedTotalQueued').textContent=sc.totalQueued||0;$('schedTotalRun').textContent=sc.totalRun||0;$('schedTotalFailed').textContent=sc.totalFailed||0;$('schedCfg').textContent=(sc.concurrency||2)+' / '+(sc.minGapMs||3000)+'ms';$('schedStatus').textContent=(sc.queued||0)+'q/'+(sc.running||0)+'r';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.discovered||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayImgBC').textContent=s.imageBroadcasts||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}
@@ -1368,9 +1506,14 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Admin phone: ${ADMIN_PHONE}`);
   console.log(`Admin LIDs: ${[...adminLids].join(', ')}`);
+  console.log(`Scheduler: concurrency=${TASK_CONCURRENCY}, minGap=${TASK_MIN_GAP_MS}ms`);
+  console.log(`Antiban: ${wrapSocket ? 'ACTIVE' : 'OFF'}`);
+  console.log(`Typing simulation: ${TYPING_ENABLED ? 'ON' : 'OFF'} (${TYPING_MIN_MS}-${TYPING_MAX_MS}ms)`);
   pushLog('info', 'system', `Boot port ${PORT}`);
   pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
   pushLog('info', 'system', `Admin LIDs: ${[...adminLids].join(', ')}`);
+  pushLog('info', 'system', `Scheduler: concurrency=${TASK_CONCURRENCY}, minGap=${TASK_MIN_GAP_MS}ms`);
+  pushLog('info', 'system', `Antiban: ${wrapSocket ? 'ACTIVE' : 'OFF'} | Typing: ${TYPING_ENABLED ? 'ON' : 'OFF'}`);
   pushLog('info', 'system', `Scraper: ${SCRAPER_URL}`);
   scheduleGreetings();
   scheduleDailyReport();

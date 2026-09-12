@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "37.0.0",
-  "description": "WhatsApp bot — LID-based admin detection",
+  "version": "37.1.0",
+  "description": "WhatsApp bot — unwraps ephemeral/viewOnce/deviceSent messages",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

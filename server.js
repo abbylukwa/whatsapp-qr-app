@@ -1,9 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v43.0
-// baileys-antiban integration: human typing, entropy, health monitor
-// Task scheduler: concurrency 2, 3s min gap between task starts
+// WHATSAPP BOT v43.1
+// Manual QR refresh only | baileys-antiban | Task scheduler
 // ================================================================
 
 const express = require('express');
@@ -86,7 +85,6 @@ class TaskScheduler {
     this.totalRun = 0;
     this.totalFailed = 0;
   }
-
   schedule(name, fn) {
     return new Promise((resolve, reject) => {
       this.queue.push({ name, fn, resolve, reject });
@@ -94,51 +92,34 @@ class TaskScheduler {
       this._pump();
     });
   }
-
   _pump() {
     if (this.running >= this.concurrency) return;
     if (this.queue.length === 0) return;
-
     const now = Date.now();
     const timeSinceLast = now - this.lastTaskStartedAt;
     if (timeSinceLast < this.minGapMs) {
       if (!this.gapTimer) {
         const wait = this.minGapMs - timeSinceLast;
-        this.gapTimer = setTimeout(() => {
-          this.gapTimer = null;
-          this._pump();
-        }, wait);
+        this.gapTimer = setTimeout(() => { this.gapTimer = null; this._pump(); }, wait);
       }
       return;
     }
-
     const task = this.queue.shift();
     this.running++;
     this.lastTaskStartedAt = Date.now();
-
     Promise.resolve()
       .then(() => task.fn())
       .then((result) => { this.totalRun++; task.resolve(result); })
       .catch((err) => { this.totalFailed++; task.reject(err); })
-      .finally(() => {
-        this.running--;
-        setTimeout(() => this._pump(), this.minGapMs);
-      });
-
-    if (this.running < this.concurrency) {
-      setTimeout(() => this._pump(), this.minGapMs);
-    }
+      .finally(() => { this.running--; setTimeout(() => this._pump(), this.minGapMs); });
+    if (this.running < this.concurrency) setTimeout(() => this._pump(), this.minGapMs);
   }
-
   stats() {
     return {
-      queued: this.queue.length,
-      running: this.running,
-      totalQueued: this.totalQueued,
-      totalRun: this.totalRun,
+      queued: this.queue.length, running: this.running,
+      totalQueued: this.totalQueued, totalRun: this.totalRun,
       totalFailed: this.totalFailed,
-      concurrency: this.concurrency,
-      minGapMs: this.minGapMs
+      concurrency: this.concurrency, minGapMs: this.minGapMs
     };
   }
 }
@@ -157,28 +138,23 @@ function markBotSent(id) {
 }
 
 // ================================================================
-// HUMAN TYPING HELPER
+// HUMAN TYPING
 // ================================================================
 async function simulateHumanTyping(jid, messageLength = 20) {
   if (!TYPING_ENABLED || !sock) return;
   try {
-    // Estimate typing duration from message length (~40 WPM, ~5 chars/word)
     const words = Math.max(2, Math.ceil(messageLength / 5));
     const estMs = (words / 40) * 60 * 1000;
     const duration = Math.min(
       TYPING_MAX_MS,
       Math.max(TYPING_MIN_MS, estMs + (Math.random() * 2000 - 1000))
     );
-
     await sock.sendPresenceUpdate('composing', jid);
     await new Promise(r => setTimeout(r, duration));
     await sock.sendPresenceUpdate('paused', jid);
-  } catch (e) {
-    // silent
-  }
+  } catch (e) {}
 }
 
-// ── Queued send with human typing ──
 function queuedSend(jid, content, options = {}) {
   const textLen = content?.text?.length || content?.caption?.length || 20;
   return taskScheduler.schedule(`send:${jid}`, async () => {
@@ -321,6 +297,7 @@ let botJid = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 let isConnecting = false;
+let manualDisconnect = false;
 
 const processedMessages = new Set();
 const activeChats = new Set();
@@ -789,7 +766,7 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v43*
+const COMMAND_LIST = `🥖 *BreadBot v43.1*
 
 *Scheduler*
 Every send is queued. Max ${TASK_CONCURRENCY} in parallel, min ${TASK_MIN_GAP_MS/1000}s gap between sends.
@@ -823,11 +800,12 @@ Human typing indicators: ${TYPING_ENABLED ? 'ON' : 'OFF'} (${TYPING_MIN_MS}-${TY
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION (with baileys-antiban wrapping)
+// CONNECTION — manual reconnect only when waiting for QR
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
   isConnecting = true;
+  manualDisconnect = false;
   try {
     pushLog('info', 'bot', 'Initializing...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
@@ -835,12 +813,18 @@ async function connectBot() {
     pushLog('info', 'bot', `WA version ${version.join('.')}`);
 
     const baseSocket = makeWASocket({
-      version, auth: state, printQRInTerminal: false,
+      version,
+      auth: state,
+      printQRInTerminal: false,
       browser: Browsers.macOS('Desktop'),
       logger: pino({ level: 'silent' }),
-      markOnlineOnConnect: false, syncFullHistory: false,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
       generateHighQualityLinkPreview: false,
-      getMessage: async () => undefined
+      getMessage: async () => undefined,
+      qrTimeout: 300000,
+      connectTimeoutMs: 120000,
+      keepAliveIntervalMs: 30000
     });
 
     // ── baileys-antiban wrap ──
@@ -861,7 +845,7 @@ async function connectBot() {
       pushLog('warn', 'antiban', 'baileys-antiban not available — running raw');
     }
 
-    // ── Session Health Monitor (Bad MAC detection) ──
+    // ── Session Health Monitor ──
     if (SessionHealthMonitor) {
       try {
         healthMonitor = new SessionHealthMonitor({
@@ -880,16 +864,22 @@ async function connectBot() {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr) { qrDataUri = await QRCode.toDataURL(qr); connectionStatus = 'qr'; pushLog('info', 'bot', 'QR generated'); }
+      if (qr) {
+        qrDataUri = await QRCode.toDataURL(qr);
+        connectionStatus = 'qr';
+        pushLog('info', 'bot', 'QR generated — scan now');
+      }
 
       if (connection === 'open') {
-        isConnecting = false; connectionStatus = 'connected'; reconnectAttempts = 0;
+        isConnecting = false;
+        connectionStatus = 'connected';
+        reconnectAttempts = 0;
         botStartTime = Date.now();
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
 
-        // ── Start Human Entropy Service ──
+        // ── Human Entropy Service ──
         if (createHumanEntropyService) {
           try {
             entropyService = createHumanEntropyService(sock, botJid, {
@@ -909,8 +899,7 @@ async function connectBot() {
       if (connection === 'close') {
         isConnecting = false;
 
-        // ── classifyDisconnect ──
-        let code = lastDisconnect?.error?.output?.statusCode;
+        const code = lastDisconnect?.error?.output?.statusCode;
         let classification = null;
         if (classifyDisconnect) {
           try { classification = classifyDisconnect(code); } catch (e) {}
@@ -924,19 +913,51 @@ async function connectBot() {
 
         if (entropyService) { try { entropyService.stop(); } catch (e) {} entropyService = null; }
 
+        // ── MANUAL-ONLY RECONNECT ──
+        // If we never got to `connected` state (waiting for QR scan), DO NOT auto-retry.
+        // The user must click Refresh QR / Reconnect manually.
+        const neverConnected = !botNumber;
+        const wasWaitingForScan = connectionStatus === 'qr' || connectionStatus === 'reconnecting' || neverConnected;
+        const isFatal = code === DisconnectReason.loggedOut;
+        const isTimeout = code === 408 || code === 428 || code === 440 || code === undefined;
+        const isManual = manualDisconnect;
+
+        if (isManual) {
+          connectionStatus = 'disconnected';
+          pushLog('warn', 'bot', 'Manual disconnect — waiting for user to reconnect');
+          return;
+        }
+
+        if (isFatal) {
+          connectionStatus = 'disconnected';
+          pushLog('error', 'bot', 'Logged out — click Refresh QR to rescan');
+          return;
+        }
+
+        if (wasWaitingForScan || isTimeout) {
+          connectionStatus = 'disconnected';
+          pushLog('warn', 'bot', 'QR session ended — click Refresh QR to start a new scan');
+          return;
+        }
+
+        // Mid-session drop (we were connected): auto-reconnect with backoff
         const shouldReconnect = classification
           ? classification.shouldReconnect
-          : code !== DisconnectReason.loggedOut;
+          : true;
 
         if (shouldReconnect && reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
           const delay = classification?.backoffMs || Math.min(5000 * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
           pushLog('warn', 'bot', `Retry in ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
-          setTimeout(() => { try { sock.end(undefined); } catch (e) {} sock = null; connectBot(); }, delay);
+          setTimeout(() => {
+            try { sock.end(undefined); } catch (e) {}
+            sock = null;
+            connectBot();
+          }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error', 'bot', classification?.category === 'fatal' || code === DisconnectReason.loggedOut ? 'Fatal — rescan QR' : 'Max retries');
+          pushLog('error', 'bot', 'Max retries reached — click Reconnect manually');
         }
       }
     });
@@ -945,7 +966,6 @@ async function connectBot() {
     sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const msg of messages || []) {
         try {
-          // Feed entropy service with recent contacts
           if (entropyService && msg.key?.remoteJid && !msg.key.fromMe) {
             try { entropyService.addRecentContact(msg.key.remoteJid, msg.key); } catch (e) {}
           }
@@ -961,11 +981,30 @@ async function connectBot() {
     connectionStatus = 'error';
   }
 }
+
 async function disconnectBot() {
+  manualDisconnect = true;
   if (entropyService) { try { entropyService.stop(); } catch (e) {} entropyService = null; }
-  if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; pushLog('warn', 'bot', 'Disconnected'); }
+  if (sock) {
+    try { sock.end(undefined); } catch (e) {}
+    sock = null;
+    connectionStatus = 'disconnected';
+    qrDataUri = null;
+    isConnecting = false;
+    botNumber = null;
+    pushLog('warn', 'bot', 'Disconnected manually');
+  }
 }
-function refreshQR() { qrDataUri = null; connectionStatus = 'disconnected'; disconnectBot(); setTimeout(connectBot, 1500); }
+function refreshQR() {
+  qrDataUri = null;
+  connectionStatus = 'disconnected';
+  manualDisconnect = true;
+  if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; }
+  isConnecting = false;
+  botNumber = null;
+  pushLog('info', 'bot', 'Manual QR refresh — starting new session');
+  setTimeout(() => connectBot(), 1500);
+}
 
 // ================================================================
 // MESSAGE HANDLER
@@ -1457,9 +1496,9 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v43</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v43.1</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v43</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Sched: <b id="schedStatus">—</b> · Antiban: <b id="antibanStatus">—</b></div>
+<h1>🥖 BreadBot v43.1</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Sched: <b id="schedStatus">—</b> · Antiban: <b id="antibanStatus">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
 <div class="card"><h2>🛡️ Anti-Ban</h2><div class="stat-row"><span>Antiban</span><span class="stat-val" id="antibanActive">—</span></div><div class="stat-row"><span>Entropy service</span><span class="stat-val" id="entropyRunning">—</span></div><div class="stat-row"><span>Typing sim</span><span class="stat-val" id="typingEnabled">—</span></div><div class="stat-row"><span>Bad MACs today</span><span class="stat-val" id="badMacsToday">—</span></div></div>
@@ -1509,6 +1548,7 @@ app.listen(PORT, () => {
   console.log(`Scheduler: concurrency=${TASK_CONCURRENCY}, minGap=${TASK_MIN_GAP_MS}ms`);
   console.log(`Antiban: ${wrapSocket ? 'ACTIVE' : 'OFF'}`);
   console.log(`Typing simulation: ${TYPING_ENABLED ? 'ON' : 'OFF'} (${TYPING_MIN_MS}-${TYPING_MAX_MS}ms)`);
+  console.log(`QR session timeout: 5 minutes`);
   pushLog('info', 'system', `Boot port ${PORT}`);
   pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
   pushLog('info', 'system', `Admin LIDs: ${[...adminLids].join(', ')}`);

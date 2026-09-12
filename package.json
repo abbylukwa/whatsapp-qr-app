@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "43.0.0",
-  "description": "WhatsApp bot — task scheduler + baileys-antiban human behavior",
+  "version": "43.1.0",
+  "description": "WhatsApp bot — manual QR refresh, task scheduler, baileys-antiban",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

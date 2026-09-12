@@ -1,8 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v43.1
-// Manual QR refresh only | baileys-antiban | Task scheduler
+// WHATSAPP BOT v43.2
+// Manual QR refresh | 515 handshake fix | baileys-antiban | Scheduler
 // ================================================================
 
 const express = require('express');
@@ -766,7 +766,7 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v43.1*
+const COMMAND_LIST = `🥖 *BreadBot v43.2*
 
 *Scheduler*
 Every send is queued. Max ${TASK_CONCURRENCY} in parallel, min ${TASK_MIN_GAP_MS/1000}s gap between sends.
@@ -800,7 +800,7 @@ Human typing indicators: ${TYPING_ENABLED ? 'ON' : 'OFF'} (${TYPING_MIN_MS}-${TY
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION — manual reconnect only when waiting for QR
+// CONNECTION — 515 handshake fix
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -879,7 +879,6 @@ async function connectBot() {
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success', 'bot', `✅ Connected as ${botNumber}`);
 
-        // ── Human Entropy Service ──
         if (createHumanEntropyService) {
           try {
             entropyService = createHumanEntropyService(sock, botJid, {
@@ -913,43 +912,46 @@ async function connectBot() {
 
         if (entropyService) { try { entropyService.stop(); } catch (e) {} entropyService = null; }
 
-        // ── MANUAL-ONLY RECONNECT ──
-        // If we never got to `connected` state (waiting for QR scan), DO NOT auto-retry.
-        // The user must click Refresh QR / Reconnect manually.
-        const neverConnected = !botNumber;
-        const wasWaitingForScan = connectionStatus === 'qr' || connectionStatus === 'reconnecting' || neverConnected;
-        const isFatal = code === DisconnectReason.loggedOut;
-        const isTimeout = code === 408 || code === 428 || code === 440 || code === undefined;
-        const isManual = manualDisconnect;
-
-        if (isManual) {
+        // ── Manual disconnect: never auto-retry ──
+        if (manualDisconnect) {
           connectionStatus = 'disconnected';
           pushLog('warn', 'bot', 'Manual disconnect — waiting for user to reconnect');
           return;
         }
 
-        if (isFatal) {
+        // ── Logged out: require QR rescan ──
+        if (code === DisconnectReason.loggedOut) {
           connectionStatus = 'disconnected';
           pushLog('error', 'bot', 'Logged out — click Refresh QR to rescan');
           return;
         }
 
-        if (wasWaitingForScan || isTimeout) {
+        // ── QR expired while waiting for scan (nobody scanned in time) ──
+        if (code === 408 && connectionStatus === 'qr' && !botNumber) {
           connectionStatus = 'disconnected';
-          pushLog('warn', 'bot', 'QR session ended — click Refresh QR to start a new scan');
+          pushLog('warn', 'bot', 'QR expired without scan — click Refresh QR to start a new scan');
           return;
         }
 
-        // Mid-session drop (we were connected): auto-reconnect with backoff
+        // ── 428/440 = precondition/conflict. Block and let user decide ──
+        if (code === 428 || code === 440) {
+          connectionStatus = 'disconnected';
+          pushLog('error', 'bot', `Session conflict (${code}) — click Refresh QR or Clear Session`);
+          return;
+        }
+
+        // ── Everything else (including 515 restart-required after QR scan): RECONNECT ──
+        // 515 is fired by WhatsApp immediately after the QR is scanned and needs a fresh socket.
         const shouldReconnect = classification
           ? classification.shouldReconnect
           : true;
 
         if (shouldReconnect && reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
-          const delay = classification?.backoffMs || Math.min(5000 * reconnectAttempts, 30000);
+          const baseDelay = code === 515 ? 2000 : 5000;
+          const delay = classification?.backoffMs || Math.min(baseDelay * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
-          pushLog('warn', 'bot', `Retry in ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
+          pushLog('warn', 'bot', `Retry in ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]${code === 515 ? ' (515 post-scan)' : ''}`);
           setTimeout(() => {
             try { sock.end(undefined); } catch (e) {}
             sock = null;
@@ -1003,7 +1005,7 @@ function refreshQR() {
   isConnecting = false;
   botNumber = null;
   pushLog('info', 'bot', 'Manual QR refresh — starting new session');
-  setTimeout(() => connectBot(), 1500);
+  setTimeout(() => { manualDisconnect = false; connectBot(); }, 1500);
 }
 
 // ================================================================
@@ -1447,7 +1449,7 @@ app.get('/admin/qr', async (req, res) => {
 });
 app.get('/admin/qr-data', (req, res) => res.json({ qr: qrDataUri, status: connectionStatus, botNumber }));
 app.post('/admin/connect', (req, res) => { if (!sock) connectBot(); res.json({ ok: true }); });
-app.post('/admin/reconnect', async (req, res) => { await disconnectBot(); setTimeout(connectBot, 1500); res.json({ ok: true }); });
+app.post('/admin/reconnect', async (req, res) => { await disconnectBot(); setTimeout(() => { manualDisconnect = false; connectBot(); }, 1500); res.json({ ok: true }); });
 app.post('/admin/disconnect', async (req, res) => { await disconnectBot(); res.json({ ok: true }); });
 app.post('/admin/refresh-qr', (req, res) => { refreshQR(); res.json({ ok: true }); });
 app.post('/admin/clear-session', (req, res) => {
@@ -1496,9 +1498,9 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v43.1</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v43.2</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v43.1</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Sched: <b id="schedStatus">—</b> · Antiban: <b id="antibanStatus">—</b></div>
+<h1>🥖 BreadBot v43.2</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Sched: <b id="schedStatus">—</b> · Antiban: <b id="antibanStatus">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
 <div class="card"><h2>🛡️ Anti-Ban</h2><div class="stat-row"><span>Antiban</span><span class="stat-val" id="antibanActive">—</span></div><div class="stat-row"><span>Entropy service</span><span class="stat-val" id="entropyRunning">—</span></div><div class="stat-row"><span>Typing sim</span><span class="stat-val" id="typingEnabled">—</span></div><div class="stat-row"><span>Bad MACs today</span><span class="stat-val" id="badMacsToday">—</span></div></div>

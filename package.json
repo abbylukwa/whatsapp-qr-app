@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "36.6.0",
-  "description": "WhatsApp bot — LID to phone translator for admin detection",
+  "version": "36.8.0",
+  "description": "WhatsApp bot — original phone detection + diagnostics",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

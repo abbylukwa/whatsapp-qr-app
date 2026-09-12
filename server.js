@@ -1,8 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v39.1
-// Working admin (broad candidate scan) | Casual roleplay | No photo desc
+// WHATSAPP BOT v40.0
+// Image broadcast via caption | Group auto-discovery | Admin working
 // ================================================================
 
 const express = require('express');
@@ -11,7 +11,7 @@ const path = require('path');
 const NodeCache = require('node-cache');
 const {
   makeWASocket, DisconnectReason, useMultiFileAuthState,
-  Browsers, fetchLatestBaileysVersion
+  Browsers, fetchLatestBaileysVersion, downloadMediaMessage
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -64,19 +64,16 @@ function saveAdminLids() {
 }
 
 // ================================================================
-// FORBIDDEN / FILLER FILTER  (expanded cat-bot filter)
+// FORBIDDEN / FILLER FILTER
 // ================================================================
 const FORBIDDEN_PATTERNS = [
-  // Refusals
   /\bcannot\b/i, /\bcan'?t\b/i, /\bunable to\b/i,
   /\bi refuse\b/i, /\bnot allowed\b/i,
   /\bagainst my guidelines\b/i, /\bas an ai\b/i, /\bi am an ai\b/i,
   /\blanguage model\b/i, /\bsorry,? i\b/i, /\bi apologize\b/i,
-  // Tech/debug leaks
   /\bapi[_ ]?key\b/i, /\bconsole\.log\b/i, /\berror:/i,
   /\bstack trace\b/i, /\btraceback\b/i, /\bdebug\b/i,
   /\bnode\.js\b/i, /\bnpm\b/i,
-  // Generic AI filler (the "weird conversations" to avoid)
   /how can i help you today\??/i, /how may i help you\??/i,
   /is there anything else/i, /anything else i can help/i,
   /let me know if/i, /feel free to/i,
@@ -208,7 +205,7 @@ let lastDailyReportDate = null;
 function resetDailyStats() {
   const today = new Date().toISOString().slice(0, 10);
   if (lastDailyReportDate !== today) {
-    dailyStats = { date: today, joined: 0, failed: 0, dmsReplied: 0, broadcastsSent: 0, greetingsSent: 0, scraperSearches: 0, scraperGifs: 0, picsSent: 0, videosSent: 0, aiErrors: 0, pendingCreated: 0, pendingResolved: 0 };
+    dailyStats = { date: today, joined: 0, failed: 0, dmsReplied: 0, broadcastsSent: 0, greetingsSent: 0, scraperSearches: 0, scraperGifs: 0, picsSent: 0, videosSent: 0, aiErrors: 0, pendingCreated: 0, pendingResolved: 0, discovered: 0, imageBroadcasts: 0 };
   }
 }
 resetDailyStats();
@@ -221,7 +218,10 @@ function loadState() {
   try {
     if (fs.existsSync(JOINED_GROUPS_FILE)) {
       const arr = JSON.parse(fs.readFileSync(JOINED_GROUPS_FILE, 'utf8')) || [];
-      for (const g of arr) joinedGroups.set(g.jid, { name: g.name, joinedAt: g.joinedAt });
+      for (const g of arr) {
+        joinedGroups.set(g.jid, { name: g.name, joinedAt: g.joinedAt, discovered: g.discovered || false });
+        if (g.lastGreetedAt) lastGreetingAt.set(g.jid, g.lastGreetedAt);
+      }
     }
   } catch (e) {}
   try {
@@ -234,11 +234,42 @@ function loadState() {
   pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size}`);
 }
 function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue, null, 2)); } catch (e) {} }
-function saveGroups() { try { fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify([...joinedGroups.entries()].map(([jid, v]) => ({ jid, ...v })), null, 2)); } catch (e) {} }
+function saveGroups() {
+  try {
+    const arr = [...joinedGroups.entries()].map(([jid, v]) => ({
+      jid,
+      name: v.name,
+      joinedAt: v.joinedAt,
+      discovered: v.discovered || false,
+      lastGreetedAt: lastGreetingAt.get(jid) || null
+    }));
+    fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify(arr, null, 2));
+  } catch (e) {}
+}
 function savePending() { try { fs.writeFileSync(PENDING_FILE, JSON.stringify([...pendingRequests.values()], null, 2)); } catch (e) {} }
 
 // ================================================================
-// ADMIN DETECTION — v36.0 style (broad candidate scan)
+// GROUP AUTO-DISCOVERY
+// ================================================================
+function discoverGroup(jid, groupName) {
+  if (!jid || !jid.endsWith('@g.us')) return false;
+  if (joinedGroups.has(jid)) return false;
+
+  joinedGroups.set(jid, {
+    name: groupName || null,
+    joinedAt: Date.now(),
+    discovered: true
+  });
+  lastGreetingAt.set(jid, Date.now());
+  saveGroups();
+  resetDailyStats();
+  dailyStats.discovered++;
+  pushLog('success', 'group', `Discovered group ${jid}${groupName ? ' (' + groupName + ')' : ''}`);
+  return true;
+}
+
+// ================================================================
+// ADMIN DETECTION
 // ================================================================
 function extractAllPhoneCandidates(msg, senderJid) {
   const phones = new Set();
@@ -265,14 +296,12 @@ function extractLidFromMsg(msg, senderJid) {
   return null;
 }
 function isAdminSender(msg, senderJid) {
-  // 1. Any field with admin phone digits
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   if (candidates.includes(ADMIN_PHONE)) {
     const lid = extractLidFromMsg(msg, senderJid);
     if (lid && !adminLids.has(lid)) { adminLids.add(lid); saveAdminLids(); pushLog('success', 'admin', `Registered admin LID ${lid}`); }
     return true;
   }
-  // 2. Hardcoded or cached LID
   const lid = extractLidFromMsg(msg, senderJid);
   if (lid && adminLids.has(lid)) return true;
   return false;
@@ -313,7 +342,13 @@ async function processJoinQueue() {
     pushLog('info', 'join', `Joining ${item.code}...`);
     const res = await sock.groupAcceptInvite(item.code);
     lastJoinAt = Date.now();
-    if (res) { joinedGroups.set(res, { name: null, joinedAt: Date.now() }); saveGroups(); dailyStats.joined++; pushLog('success', 'join', `✅ Joined ${res}`); }
+    if (res) {
+      joinedGroups.set(res, { name: null, joinedAt: Date.now(), discovered: false });
+      lastGreetingAt.set(res, Date.now());
+      saveGroups();
+      dailyStats.joined++;
+      pushLog('success', 'join', `✅ Joined ${res}`);
+    }
   } catch (e) {
     dailyStats.failed++;
     pushLog('error', 'join', `Failed ${item.code}: ${e.message}`);
@@ -491,7 +526,6 @@ async function resolvePending(id, action, payload, adminChatJid) {
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      // Send image with NO caption
       await sock.sendMessage(p.userJid, { image: { url: r.images[0] } });
       resetDailyStats(); dailyStats.picsSent++;
     }
@@ -541,6 +575,7 @@ function scheduleGreetings() {
         await new Promise(r => setTimeout(r, 3000 + Math.random() * 4000));
       } catch (e) { pushLog('warn', 'greeting', `Failed ${jid}: ${e.message}`); }
     }
+    saveGroups();
   }, 15 * 60 * 1000);
 }
 
@@ -562,10 +597,12 @@ function scheduleDailyReport() {
       `📋 Queue: *${joinQueue.length}*`,
       `⏳ Pending: *${pendingRequests.size}*`, ``,
       `✅ Joined: *${s.joined || 0}*`,
+      `🔍 Discovered: *${s.discovered || 0}*`,
       `❌ Failed: *${s.failed || 0}*`,
       `💌 DM replies: *${s.dmsReplied || 0}*`,
       `🖼️ Pics/Videos: *${(s.picsSent || 0) + (s.videosSent || 0)}*`,
       `📢 Broadcasts: *${s.broadcastsSent || 0}*`,
+      `📸 Image broadcasts: *${s.imageBroadcasts || 0}*`,
       `👋 Greetings: *${s.greetingsSent || 0}*`,
       `🤖 AI errors: *${s.aiErrors || 0}*`,
       `❓ Pending: *${s.pendingCreated || 0}/${s.pendingResolved || 0}*`, ``,
@@ -580,16 +617,17 @@ function scheduleDailyReport() {
 // BROADCAST
 // ================================================================
 function randomBcDelay() { return BC_DELAY_MIN_MS + Math.floor(Math.random() * (BC_DELAY_MAX_MS - BC_DELAY_MIN_MS)); }
-async function broadcast({ message, imageUrl = null, gifUrl = null, mode = 'all' }) {
+async function broadcast({ message, imageUrl = null, gifUrl = null, imageBuffer = null, mode = 'all' }) {
   const targets = [];
   if (mode === 'all' || mode === 'groups') for (const jid of joinedGroups.keys()) targets.push({ jid, type: 'group' });
   if (mode === 'all' || mode === 'dms') for (const jid of activeDMs) targets.push({ jid, type: 'dm' });
   const results = { sent: 0, failed: 0, total: targets.length, errors: [], mode };
-  pushLog('info', 'broadcast', `Broadcasting to ${targets.length} (${mode})`);
+  pushLog('info', 'broadcast', `Broadcasting to ${targets.length} (${mode})${imageBuffer ? ' [IMAGE]' : ''}`);
   for (let i = 0; i < targets.length; i++) {
     const t = targets[i];
     try {
       if (gifUrl) await sock.sendMessage(t.jid, { video: { url: gifUrl }, gifPlayback: true, caption: message || '' });
+      else if (imageBuffer) await sock.sendMessage(t.jid, { image: imageBuffer, caption: message || '' });
       else if (imageUrl) await sock.sendMessage(t.jid, { image: { url: imageUrl }, caption: message || '' });
       else await sock.sendMessage(t.jid, { text: message });
       results.sent++;
@@ -622,7 +660,16 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v39.1*
+const COMMAND_LIST = `🥖 *BreadBot v40*
+
+*Image broadcast* (send an image with a caption)
+• Send image + caption \`!bcdm Buy this product\` → DMs
+• Send image + caption \`!bcgroup Check this\` → Groups
+• Send image + caption \`!all Offer inside\` → Everyone
+
+*Text broadcast*
+!bcdm <msg> · !bcgroup <msg> · !all <msg>
+!allimg <url> | <caption>
 
 *Test*
 !whoami · !aitest · !scraperstatus
@@ -634,15 +681,12 @@ const COMMAND_LIST = `🥖 *BreadBot v39.1*
 *Group joins*
 !join <link> · !joinall <links...> · !queue · !clearsqueue · !groups · !leave <jid>
 
-*Scraper*
+*Scraper preview*
 !pic <q> · !nextpic · !gif <q> · !nextgif
 !bcastpic <caption> · !bcastpicdm · !bcastpicgroup · !bcastgif <caption>
 
-*Broadcast*
-!all <msg> · !bcgroup <msg> · !bcdm <msg> · !allimg <url> | <caption>
-!ad <title> | <body> | [cta] | [link] | [style] · !bcad
-
 *Other*
+!ad <title> | <body> | [cta] | [link] | [style] · !bcad
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
@@ -729,7 +773,7 @@ async function handleMessage(msg) {
 
   lastRawMsg = { ts: new Date().toISOString(), key: msg.key, pushName: msg.pushName };
 
-  // Unwrap message content
+  // Unwrap
   let m = msg.message;
   let guard = 0;
   while (m && guard++ < 10) {
@@ -751,7 +795,15 @@ async function handleMessage(msg) {
   const pushName = msg.pushName || 'Unknown';
   const chatType = isGroup ? 'group' : 'dm';
 
-  if (!isGroup) activeDMs.add(chatJid);
+  // ── GROUP AUTO-DISCOVERY ──
+  if (isGroup) {
+    const discovered = discoverGroup(chatJid, null);
+    if (discovered) {
+      pushLog('success', 'group', `Now tracking: ${chatJid}`);
+    }
+  } else {
+    activeDMs.add(chatJid);
+  }
 
   pushLiveMessage({
     id: msgId, ts: new Date().toISOString(), chatJid, chatType, senderJid,
@@ -761,6 +813,56 @@ async function handleMessage(msg) {
 
   const isAdmin = isAdminSender(msg, senderJid);
 
+  // ── ADMIN IMAGE BROADCAST VIA CAPTION ──
+  if (!isGroup && isAdmin && mediaType === 'image' && text.startsWith('!')) {
+    const args = text.slice(1).trim().split(/\s+/);
+    const cmd = args[0].toLowerCase();
+
+    if (['bcdm', 'bcgroup', 'all'].includes(cmd)) {
+      const caption = args.slice(1).join(' ').trim();
+      pushLog('info', 'broadcast', `Image broadcast via caption (${cmd}): "${caption}"`);
+      await sock.sendMessage(chatJid, { text: `⏳ Downloading your image and preparing broadcast...` });
+
+      try {
+        const buffer = await downloadMediaMessage(
+          msg,
+          'buffer',
+          {},
+          { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+        );
+
+        if (!buffer) {
+          await sock.sendMessage(chatJid, { text: '❌ Could not download the image.' });
+          return;
+        }
+
+        const mode = cmd === 'bcdm' ? 'dms' : cmd === 'bcgroup' ? 'groups' : 'all';
+        const count = mode === 'all'
+          ? (joinedGroups.size + activeDMs.size)
+          : mode === 'groups'
+            ? joinedGroups.size
+            : activeDMs.size;
+
+        if (count === 0) {
+          await sock.sendMessage(chatJid, { text: `📭 No ${mode} targets.` });
+          return;
+        }
+
+        await sock.sendMessage(chatJid, { text: `📸 Broadcasting to ${count} ${mode}...\nCaption: "${caption || '(none)'}"` });
+
+        const r = await broadcast({ message: caption, imageBuffer: buffer, mode });
+
+        resetDailyStats(); dailyStats.imageBroadcasts++;
+        await sock.sendMessage(chatJid, { text: `✅ *Image broadcast done*\n✅ Sent: *${r.sent}*\n❌ Failed: *${r.failed}*` });
+      } catch (e) {
+        pushLog('error', 'broadcast', `Image broadcast failed: ${e.message}`);
+        await sock.sendMessage(chatJid, { text: `❌ ${e.message}` });
+      }
+      return;
+    }
+  }
+
+  // ── NON-ADMIN TRACKING ──
   if (!isGroup && !isAdmin && text) {
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
     const h = userHistories.get(senderJid);
@@ -768,6 +870,7 @@ async function handleMessage(msg) {
     if (h.length > USER_HISTORY_SIZE * 2) h.shift();
   }
 
+  // Invite links → queue
   const codes = extractAllInviteCodes(text);
   if (codes.length > 0) {
     let added = 0;
@@ -779,24 +882,27 @@ async function handleMessage(msg) {
     }
   }
 
+  // Admin text commands in DM
   if (!isGroup && isAdmin && text.startsWith('!')) {
     pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone || '—'} lid ${lid || '—'})`);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
 
+  // Groups silent
   if (isGroup) return;
 
+  // Admin DM without command → ignore
   if (isAdmin) {
     pushLog('info', 'admin', `Admin DM ignored (no command): "${text.slice(0, 60)}"`);
     return;
   }
 
+  // ── NON-ADMIN DM ──
   if (!isGroup && !isAdmin) {
     const lang = detectLanguage(text);
     const langName = LANG_NAMES[lang] || 'English';
 
-    // Ignore violation messages (cat bot filter)
     if (containsForbidden(text)) {
       pushLog('info', 'filter', `Message from ${pushName} ignored (forbidden)`);
       return;
@@ -810,7 +916,6 @@ async function handleMessage(msg) {
         if (intent.type === 'video' || intent.type === 'gif') {
           const r = await scraperGif(intent.query);
           if (r.ok && r.gifs.length > 0) {
-            // NO caption on video
             try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true }, { quoted: msg }); }
             catch (e) { await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
             resetDailyStats();
@@ -820,7 +925,6 @@ async function handleMessage(msg) {
         } else {
           const r = await scraperSearch(intent.query);
           if (r.ok && r.images.length > 0) {
-            // NO caption on image
             try { await sock.sendMessage(chatJid, { image: { url: r.images[0] } }, { quoted: msg }); }
             catch (e) { await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg }); }
             resetDailyStats(); dailyStats.picsSent++;
@@ -853,9 +957,7 @@ RULES:
 - NEVER ask "how can I help you" or offer assistance.
 - NEVER use filler phrases like "I understand", "based on your message", "I hope this helps".
 - NEVER explain yourself. Just respond like a friend would.
-- If the message is weird or something you wouldn't answer, reply very briefly or just with "😂" or "???" or something casual.
-- No technical terms, no code, no URLs, no formal language.
-- Text like a real person on WhatsApp.`;
+- No technical terms, no code, no URLs, no formal language.`;
 
     const aiReply = await askRewind(text, systemPrompt);
     if (!aiReply) { pushLog('warn', 'ai', `No reply for ${pushName}`); return; }
@@ -921,7 +1023,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'testall': { await reply('🧪 Testing...'); const r = await runFullTestSuite(); await reply(r); break; }
     case 'stats': {
       const s = (resetDailyStats(), dailyStats);
-      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}* / Failed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Stats*\n\n*Now*\nDMs: *${activeDMs.size}*\nGroups: *${joinedGroups.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*\n\n*Today*\nJoined: *${s.joined}*\nDiscovered: *${s.discovered}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}* / Videos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nImage broadcasts: *${s.imageBroadcasts}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     case 'scraperstats': await reply(`🔎 *Scraper Stats*\n\nSearches: *${scraperStats.searchSuccess}* ok / *${scraperStats.searchFail}* fail\nGIFs: *${scraperStats.gifSuccess}* ok / *${scraperStats.gifFail}* fail\nLast search: *${scraperStats.lastSearchQuery || '—'}*\nLast GIF: *${scraperStats.lastGifQuery || '—'}*`); break;
@@ -962,7 +1064,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     case 'groups': {
       if (joinedGroups.size === 0) { await reply('📭 No groups.'); return; }
       const list = [...joinedGroups.keys()].slice(0, 30).map((j, i) => `${i + 1}. ${j}`).join('\n');
-      await reply(`👥 *Joined (${joinedGroups.size})*\n${list}`);
+      await reply(`👥 *Joined/Discovered (${joinedGroups.size})*\n${list}`);
       break;
     }
     case 'leave': {
@@ -1016,7 +1118,7 @@ async function handleAdminCommand(text, chatJid, msg) {
 
     case 'all': case 'bcgroup': case 'bcdm': {
       const message = args.slice(1).join(' ');
-      if (!message) { await reply(`❌ Usage: \`!${cmd} <message>\``); return; }
+      if (!message) { await reply(`❌ Usage: \`!${cmd} <message>\`\n\n_Or send an image with \`!${cmd} <caption>\`_`); return; }
       const mode = cmd === 'all' ? 'all' : (cmd === 'bcgroup' ? 'groups' : 'dms');
       const count = mode === 'all' ? (joinedGroups.size + activeDMs.size) : mode === 'groups' ? joinedGroups.size : activeDMs.size;
       if (count === 0) { await reply(`📭 No ${mode} targets.`); return; }
@@ -1078,7 +1180,7 @@ async function handleAdminCommand(text, chatJid, msg) {
     }
     case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply(`📊 *Today (${s.date})*\nJoined: *${s.joined}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}*\nVideos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
+      await reply(`📊 *Today (${s.date})*\nJoined: *${s.joined}*\nDiscovered: *${s.discovered}*\nFailed: *${s.failed}*\nDM replies: *${s.dmsReplied}*\nPics: *${s.picsSent}*\nVideos: *${s.videosSent}*\nBroadcasts: *${s.broadcastsSent}*\nImage broadcasts: *${s.imageBroadcasts}*\nGreetings: *${s.greetingsSent}*\nAI errors: *${s.aiErrors}*\nPending: *${s.pendingCreated}* / *${s.pendingResolved}*`);
       break;
     }
     default: await reply(`❓ Unknown: *!${cmd}*`);
@@ -1165,14 +1267,14 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v39.1</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v40</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v39.1</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v40</h1><div class="sub">Admin phone: <b id="adminPhone">—</b> · Admin LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:200px;overflow:auto"></pre></div>
-<div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
+<div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined/Discovered</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
 <div class="card"><h2>Scraper Usage</h2><div class="stat-row"><span>Searches (ok/fail)</span><span class="stat-val" id="scSearch">—</span></div><div class="stat-row"><span>GIFs (ok/fail)</span><span class="stat-val" id="scGif">—</span></div><div class="stat-row"><span>Last search</span><span class="stat-val" id="scLastSearch">—</span></div><div class="stat-row"><span>Last GIF</span><span class="stat-val" id="scLastGif">—</span></div></div>
-<div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Failed</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div><div class="stat-row"><span>Pending (new/done)</span><span class="stat-val" id="dayPending">—</span></div></div>
+<div class="card"><h2>Today</h2><div class="stat-row"><span>Joined / Discovered</span><span class="stat-val" id="dayJoined">—</span></div><div class="stat-row"><span>DM replies</span><span class="stat-val" id="dayDMs">—</span></div><div class="stat-row"><span>Pics / Videos</span><span class="stat-val" id="dayPics">—</span></div><div class="stat-row"><span>Broadcasts</span><span class="stat-val" id="dayBC">—</span></div><div class="stat-row"><span>Image broadcasts</span><span class="stat-val" id="dayImgBC">—</span></div><div class="stat-row"><span>Greetings</span><span class="stat-val" id="dayGreet">—</span></div><div class="stat-row"><span>AI errors</span><span class="stat-val" id="dayAiErr">—</span></div><div class="stat-row"><span>Pending (new/done)</span><span class="stat-val" id="dayPending">—</span></div></div>
 <div class="card full-width"><h2>⏳ Pending Requests</h2><div id="pending"></div></div>
 <div class="card full-width"><h2>📨 Live Messages</h2><div id="msgs"></div></div>
 <div class="card full-width"><h2>📜 Logs</h2><div id="logs"></div></div>
@@ -1185,7 +1287,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.adminLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.adminLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.discovered||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayImgBC').textContent=s.imageBroadcasts||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}

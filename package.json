@@ -1,13 +1,14 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "41.0.0",
-  "description": "WhatsApp bot — fromMe fix + admin + groups + image broadcast",
+  "version": "43.0.0",
+  "description": "WhatsApp bot — task scheduler + baileys-antiban human behavior",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.18",
     "axios": "^1.7.0",
+    "baileys-antiban": "^4.10.0",
     "express": "^4.21.0",
     "node-cache": "^5.1.2",
     "pino": "^9.5.0",

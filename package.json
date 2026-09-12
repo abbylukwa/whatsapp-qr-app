@@ -1,14 +1,10 @@
 {
-  "name": "whatsapp-bot-fixed",
-  "version": "28.0.0",
-  "description": "WhatsApp Bot — Ollama for Groups, Rewind for DMs, Scraper bridge",
+  "name": "whatsapp-qr-app",
+  "version": "34.0.0",
+  "description": "WhatsApp bot — any-link join, scraper preview broadcast, full GUI",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18.0.0" },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.7.0",

@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "36.1.0",
-  "description": "WhatsApp bot — fixed message delivery + AI test",
+  "version": "36.2.0",
+  "description": "WhatsApp bot — 428 fix + scraper test commands",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

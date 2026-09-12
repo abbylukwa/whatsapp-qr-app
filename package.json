@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "36.4.0",
-  "description": "WhatsApp bot — minimal connection config that works",
+  "version": "36.5.0",
+  "description": "WhatsApp bot — admin LID, Shona in AI replies",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },

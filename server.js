@@ -1,7 +1,8 @@
 'use strict';
 
 // ================================================================
-// WHATSAPP BOT v36.4 — Minimal connection config (back to working)
+// WHATSAPP BOT v36.5
+// Admin LID detection | Shona in AI replies | Minimal connection
 // ================================================================
 
 const express = require('express');
@@ -24,6 +25,14 @@ const AUTH_FOLDER = 'auth_info';
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g, '');
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_FILE = path.join(__dirname, 'admin_lids.json');
+
+// Hardcoded admin LIDs (WhatsApp sends only LID now, not phone)
+const ADMIN_LIDS = new Set(
+  (process.env.ADMIN_LIDS || '115110005706891')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 
 const REWIND_KEY = process.env.REWIND_KEY || 'sk-rewind-31c3a65acc981512de959195485deec0';
 const SCRAPER_URL = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/, '');
@@ -210,7 +219,7 @@ function loadState() {
       for (const p of arr) if (now - p.requestedAt < PENDING_EXPIRY_MS) pendingRequests.set(p.id, p);
     }
   } catch (e) {}
-  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size}`);
+  pushLog('info', 'state', `queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} hardcoded=${ADMIN_LIDS.size}`);
 }
 function saveQueue() { try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue, null, 2)); } catch (e) {} }
 function saveGroups() { try { fs.writeFileSync(JOINED_GROUPS_FILE, JSON.stringify([...joinedGroups.entries()].map(([jid, v]) => ({ jid, ...v })), null, 2)); } catch (e) {} }
@@ -236,14 +245,24 @@ function extractLidFromMsg(msg, senderJid) {
   return null;
 }
 function isAdminSender(msg, senderJid) {
+  // 1. Check hardcoded/env admin LIDs first (WhatsApp sends only LID now)
+  const lid = extractLidFromMsg(msg, senderJid);
+  if (lid && ADMIN_LIDS.has(lid)) return true;
+
+  // 2. Check any phone candidate against admin phone
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   if (candidates.includes(ADMIN_PHONE)) {
-    const lid = extractLidFromMsg(msg, senderJid);
-    if (lid && !adminLids.has(lid)) { adminLids.add(lid); saveAdminLids(); pushLog('success', 'admin', `Registered admin LID ${lid}`); }
+    if (lid && !adminLids.has(lid)) {
+      adminLids.add(lid);
+      saveAdminLids();
+      pushLog('success', 'admin', `Registered admin LID ${lid}`);
+    }
     return true;
   }
-  const lid = extractLidFromMsg(msg, senderJid);
+
+  // 3. Check cached LIDs
   if (lid && adminLids.has(lid)) return true;
+
   return false;
 }
 function extractPhone(msg, senderJid) { const c = extractAllPhoneCandidates(msg, senderJid); return c.length > 0 ? c[0] : null; }
@@ -435,7 +454,7 @@ async function resolvePending(id, action, payload, adminChatJid) {
   const reply = (t) => sock.sendMessage(adminChatJid, { text: t });
   try {
     if (action === 'skip') {
-      const casual = await askRewind(`User said: "${p.userHistory.map(h => h.text).join(' / ')}". Reply casually and warmly. No filler. 1 short sentence.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Warm, casual WhatsApp tone.`);
+      const casual = await askRewind(`User said: "${p.userHistory.map(h => h.text).join(' / ')}". Reply casually and warmly. No filler. 1 short sentence.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Warm, casual WhatsApp tone with light Shona sprinkled in.`);
       const fallback = casual || 'Sorry, couldn\'t find that right now 😅';
       await sock.sendMessage(p.userJid, { text: fallback });
       pendingRequests.delete(id); savePending();
@@ -460,7 +479,7 @@ async function resolvePending(id, action, payload, adminChatJid) {
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || r.images.length === 0) { await reply(`❌ No results for "${query}".`); return { ok: false }; }
-      const caption = await askRewind(`User asked for "${query}". Short casual reply (max 8 words) with emoji. No filler.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp.`);
+      const caption = await askRewind(`User asked for "${query}". Short casual reply (max 8 words) with emoji. Optionally 1 light Shona word like "sharp", "hezvoka", "eish", "zvakanaka". No filler.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona.`);
       const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
       await sock.sendMessage(p.userJid, { image: { url: r.images[0] }, caption: finalCaption });
       resetDailyStats(); dailyStats.picsSent++;
@@ -592,7 +611,7 @@ class AdBuilder {
 // ================================================================
 // COMMAND LIST
 // ================================================================
-const COMMAND_LIST = `🥖 *BreadBot v36.4*
+const COMMAND_LIST = `🥖 *BreadBot v36.5*
 
 *Test*
 !aitest · !scraperstatus · !scrapersearch <q> · !scrapergif <q>
@@ -616,7 +635,7 @@ const COMMAND_LIST = `🥖 *BreadBot v36.4*
 !stats · !ping · !summary · !scraperstats`;
 
 // ================================================================
-// CONNECTION — MINIMAL CONFIG (the one that worked in v24)
+// CONNECTION — MINIMAL CONFIG (working)
 // ================================================================
 async function connectBot() {
   if (isConnecting) return;
@@ -738,6 +757,7 @@ async function handleMessage(msg) {
 
   const isAdmin = isAdminSender(msg, senderJid);
 
+  // Track user history (non-admin DMs only)
   if (!isGroup && !isAdmin && text) {
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
     const h = userHistories.get(senderJid);
@@ -745,6 +765,7 @@ async function handleMessage(msg) {
     if (h.length > USER_HISTORY_SIZE * 2) h.shift();
   }
 
+  // Invite links → queue
   const codes = extractAllInviteCodes(text);
   if (codes.length > 0) {
     let added = 0;
@@ -756,14 +777,23 @@ async function handleMessage(msg) {
     }
   }
 
+  // Admin commands in DM
   if (!isGroup && isAdmin && text.startsWith('!')) {
-    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (phone ${phone})`);
+    pushLog('info', 'admin', `Admin cmd: ${text.split(' ')[0]} (lid ${lid})`);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
 
+  // Groups: silent (greetings handled by scheduler). Admin is ignored here too.
   if (isGroup) return;
 
+  // Admin in DM without command → ignore (don't AI-reply to admin)
+  if (isAdmin) {
+    pushLog('info', 'admin', `Admin DM ignored (no command): "${text.slice(0, 60)}"`);
+    return;
+  }
+
+  // ─── NON-ADMIN DM ───
   if (!isGroup && !isAdmin) {
     const lang = detectLanguage(text);
     const langName = LANG_NAMES[lang] || 'English';
@@ -776,7 +806,10 @@ async function handleMessage(msg) {
         if (intent.type === 'video' || intent.type === 'gif') {
           const r = await scraperGif(intent.query);
           if (r.ok && r.gifs.length > 0) {
-            const caption = await askRewind(`User asked for a ${intent.type} of "${intent.query}". Short casual reply (max 8 words) with emoji. No filler.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp. Reply in ${langName}. Max 8 words.`);
+            const caption = await askRewind(
+              `User asked for a ${intent.type} of "${intent.query}". Short casual reply (max 8 words) with emoji. Optionally 1 light Shona word like "sharp", "hezvoka", "eish", "zvakanaka". No filler.`,
+              `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona sprinkled in. Reply in ${langName}.`
+            );
             const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
             try { await sock.sendMessage(chatJid, { video: { url: r.gifs[0] }, gifPlayback: true, caption: finalCaption }, { quoted: msg }); }
             catch (e) { await sock.sendMessage(chatJid, { text: r.gifs[0] }, { quoted: msg }); }
@@ -787,7 +820,10 @@ async function handleMessage(msg) {
         } else {
           const r = await scraperSearch(intent.query);
           if (r.ok && r.images.length > 0) {
-            const caption = await askRewind(`User asked for a picture of "${intent.query}". Short casual reply (max 8 words) with emoji. No filler.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp. Reply in ${langName}. Max 8 words.`);
+            const caption = await askRewind(
+              `User asked for a picture of "${intent.query}". Short casual reply (max 8 words) with emoji. Optionally 1 light Shona word like "sharp", "hezvoka", "eish", "zvakanaka". No filler.`,
+              `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona sprinkled in. Reply in ${langName}.`
+            );
             const finalCaption = (caption && !containsForbidden(caption)) ? caption : '';
             try { await sock.sendMessage(chatJid, { image: { url: r.images[0] }, caption: finalCaption }, { quoted: msg }); }
             catch (e) { await sock.sendMessage(chatJid, { text: r.images[0] }, { quoted: msg }); }
@@ -796,10 +832,14 @@ async function handleMessage(msg) {
           }
         }
       }
+      // No results OR vague → pending request + ask admin
       const history = userHistories.get(senderJid) || [];
       const id = createPendingRequest(senderJid, pushName, phone, history, intent);
       pushLog('warn', 'ai', `Pending ${id} for ${pushName}`);
-      const ack = await askRewind(`User asked for something. Reply casually that you're checking and will send shortly (max 8 words). No filler.`, `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp.`);
+      const ack = await askRewind(
+        `User asked for something. Reply casually that you're checking and will send shortly (max 8 words). Optionally 1 light Shona word. No filler.`,
+        `You are Abby Faith Sithole, 23, Harare Zimbabwe. Casual WhatsApp with light Shona.`
+      );
       const finalAck = (ack && !containsForbidden(ack)) ? ack : 'Checking for you... one sec 😊';
       try { await sock.sendMessage(chatJid, { text: finalAck }, { quoted: msg }); } catch (e) {}
       const pending = pendingRequests.get(id);
@@ -807,7 +847,9 @@ async function handleMessage(msg) {
       return;
     }
 
-    const systemPrompt = `You are Abby Faith Sithole, 23, from Harare, Zimbabwe. Friendly, warm, playful. Reply ONLY in ${langName}. Casual WhatsApp tone. No technical terms, no code, no logs, no URLs. 1-2 sentences. Never ask "how can I help you". Never offer assistance. Just respond naturally like a friend.`;
+    // ── Shona-infused AI reply ──
+    const systemPrompt = `You are Abby Faith Sithole, 23, from Harare, Zimbabwe. Friendly, warm, playful. Reply in ${langName}. Sprinkle in LIGHT Shona naturally — words like "mhoro", "sei uri", "ndiri right", "sharp", "eish", "aiwa", "hezvoka", "zvakanaka", "ndoda", "uri bho", "zvinei", "ndizvo". Don't overdo it — at most one Shona word or short phrase per reply, sometimes zero. Casual WhatsApp tone. No technical terms, no code, no logs, no URLs. 1-2 sentences max. Never ask "how can I help you". Never offer assistance. Just respond naturally like a friend.`;
+
     const aiReply = await askRewind(text, systemPrompt);
     if (!aiReply) { pushLog('warn', 'ai', `No reply for ${pushName}`); return; }
     if (containsForbidden(aiReply)) { pushLog('warn', 'ai', `Dropped (forbidden): ${aiReply.slice(0, 80)}`); return; }
@@ -830,10 +872,10 @@ async function handleAdminCommand(text, chatJid, msg) {
   switch (cmd) {
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*`); break;
+    case 'test': await reply(`✅ *Test*\nBot: *${botNumber}*\nStatus: *${connectionStatus}*\nAdmin: *${ADMIN_PHONE}*\nAdmin LIDs: *${[...ADMIN_LIDS].join(', ')}*\nGroups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*`); break;
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
-      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${extractLid(msg, chatJid) || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected: *${ADMIN_PHONE}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*\nCached LIDs: *${[...adminLids].join(', ') || 'none'}*`);
+      await reply(`🔍 *Diagnostics*\n\nJID: *${msg.key.participant || msg.key.remoteJid}*\nLID: *${extractLid(msg, chatJid) || '—'}*\nPhone candidates: *${c.join(', ') || 'none'}*\nExpected phone: *${ADMIN_PHONE}*\nHardcoded LIDs: *${[...ADMIN_LIDS].join(', ')}*\nCached LIDs: *${[...adminLids].join(', ') || 'none'}*\nIs admin: *${isAdminSender(msg, chatJid) ? 'YES ✅' : 'NO ❌'}*`);
       break;
     }
     case 'aitest': {
@@ -1118,15 +1160,15 @@ app.get('/admin/stats', (req, res) => {
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
     lastJoinAt: lastJoinAt || null,
     dailyStats, scraperStats,
-    adminLids: [...adminLids], adminPhone: ADMIN_PHONE,
+    adminLids: [...adminLids], adminPhone: ADMIN_PHONE, hardcodedLids: [...ADMIN_LIDS],
     pendingCount: pendingRequests.size,
     pendingList: [...pendingRequests.values()].map(p => ({ id: p.id, userName: p.userName, userPhone: p.userPhone, type: p.intent.type, query: p.intent.query }))
   });
 });
 
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.4</title>
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v36.5</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v36.4</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Scraper: <b id="scraperUrl">—</b></div>
+<h1>🥖 BreadBot v36.5</h1><div class="sub">Admin: <b id="adminPhone">—</b> · LIDs: <b id="adminLids">—</b> · Scraper: <b id="scraperUrl">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap"></pre></div>
 <div class="card"><h2>Groups & Queue</h2><div class="stat-row"><span>Joined groups</span><span class="stat-val" id="statGroups">—</span></div><div class="stat-row"><span>DM chats</span><span class="stat-val" id="statDMs">—</span></div><div class="stat-row"><span>Queue</span><span class="stat-val" id="statQueue">—</span></div><div class="stat-row"><span>Pending</span><span class="stat-val" id="statPending">—</span></div></div>
@@ -1144,7 +1186,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing AI...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing scraper...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('scraperUrl').textContent=d.scraperUrl||'—';$('adminPhone').textContent=d.adminPhone||'—';$('adminLids').textContent=(d.hardcodedLids||[]).join(', ')||'—';const ss=d.scraperStats||{};$('scSearch').textContent=(ss.searchSuccess||0)+'/'+(ss.searchFail||0);$('scGif').textContent=(ss.gifSuccess||0)+'/'+(ss.gifFail||0);$('scLastSearch').textContent=ss.lastSearchQuery||'—';$('scLastGif').textContent=ss.lastGifQuery||'—';const s=d.dailyStats||{};$('dayJoined').textContent=(s.joined||0)+' / '+(s.failed||0);$('dayDMs').textContent=s.dmsReplied||0;$('dayPics').textContent=(s.picsSent||0)+' / '+(s.videosSent||0);$('dayBC').textContent=s.broadcastsSent||0;$('dayGreet').textContent=s.greetingsSent||0;$('dayAiErr').textContent=s.aiErrors||0;$('dayPending').textContent=(s.pendingCreated||0)+' / '+(s.pendingResolved||0);
 const pendBox=$('pending');pendBox.innerHTML='';for(const p of (d.pendingList||[])){const div=document.createElement('div');div.className='msg-row';div.innerHTML='<div class="msg-meta">ID: '+esc(p.id)+' · '+esc(p.type)+' · query "'+esc(p.query)+'"</div><div><span class="msg-name">'+esc(p.userName)+'</span> · 📱 '+esc(p.userPhone||'—')+'</div>';pendBox.appendChild(div);}if(!d.pendingList||d.pendingList.length===0)pendBox.innerHTML='<div style="color:#8b949e;font-size:12px">No pending.</div>';
 const q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}else{$('qrImg').style.display='none';}}catch(e){}}
 async function doAction(a){await api(a,'POST');setTimeout(refreshStats,1000);}
@@ -1170,9 +1212,11 @@ loadAdminLids();
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Admin phone (digits): ${ADMIN_PHONE}`);
-  console.log(`Admin LIDs cached: ${[...adminLids].join(', ') || 'none'}`);
+  console.log(`Hardcoded admin LIDs: ${[...ADMIN_LIDS].join(', ')}`);
+  console.log(`Cached admin LIDs: ${[...adminLids].join(', ') || 'none'}`);
   pushLog('info', 'system', `Boot port ${PORT}`);
   pushLog('info', 'system', `Admin phone: ${ADMIN_PHONE}`);
+  pushLog('info', 'system', `Admin LIDs (hardcoded): ${[...ADMIN_LIDS].join(', ')}`);
   pushLog('info', 'system', `Scraper: ${SCRAPER_URL}`);
   scheduleGreetings();
   scheduleDailyReport();

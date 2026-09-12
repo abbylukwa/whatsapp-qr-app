@@ -1,12 +1,12 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "36.0.0",
-  "description": "WhatsApp bot — AI fallback fixed, video support, learn-from-admin",
+  "version": "36.1.0",
+  "description": "WhatsApp bot — fixed message delivery + AI test",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18.0.0" },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.8",
+    "@whiskeysockets/baileys": "^6.7.18",
     "axios": "^1.7.0",
     "express": "^4.21.0",
     "node-cache": "^5.1.2",

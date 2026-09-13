@@ -1,14 +1,16 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v63 — LID-aware admin detection + all v62 fixes
+ *  BreadBot v64 — Full fix release
+ *  - Fixed: markBotSent is not defined
+ *  - Fixed: Bot LID extraction (lazy learn)
+ *  - Fixed: getSelfLid() defined
+ *  - Fixed: isBotSender refreshes LID
  *  - Fixed: extractInviteCodes undefined crash
  *  - Fixed: protocol frames flooding Live Messages
  *  - Fixed: fromMe echoes appearing as "You" messages
- *  - Added: LID-aware admin detection (checks id, phoneNumber, lid)
- *  - Added: participantAlt/remoteJidAlt for sender resolution
- *  - Added: bot self-detection in LID groups
- *  - Main group starts as NULL (admin must !setmain)
+ *  - LID-aware admin detection (id, phoneNumber, lid)
+ *  - Main group starts NULL (admin must !setmain)
  * ============================================================ */
 
 const express = require('express');
@@ -89,11 +91,8 @@ const DOWNLOAD_MAX_PICKS = 8;
 
 const ADMIN_ACTIVE_MS = 45000;
 let adminActiveUntil = 0;
-
 function isAdminActive(){ return Date.now() < adminActiveUntil; }
-function touchAdminActive(){
-  adminActiveUntil = Date.now() + ADMIN_ACTIVE_MS;
-}
+function touchAdminActive(){ adminActiveUntil = Date.now() + ADMIN_ACTIVE_MS; }
 
 let botPaused = false;
 let botOfflineUntil = 0;
@@ -490,6 +489,39 @@ function resetDailyStats(){
 resetDailyStats();
 
 /* ══════════════════════════════════════════════════════════════
+ *  FIX: markBotSent — was missing in v63
+ * ══════════════════════════════════════════════════════════════ */
+function markBotSent(id){
+  if (!id) return;
+  botSentIds.add(id);
+  if (botSentIds.size > 5000){
+    const a = [...botSentIds];
+    botSentIds.clear();
+    for (const i of a.slice(-2500)) botSentIds.add(i);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  FIX: getSelfLid — was called but never defined in v63
+ * ══════════════════════════════════════════════════════════════ */
+function getSelfLid(){
+  try {
+    const candidates = [
+      sock?.user?.lid,
+      sock?.authState?.creds?.me?.lid,
+      sock?.creds?.me?.lid,
+      sock?.user?.id?.includes('@lid') ? sock.user.id : null
+    ];
+    for (const c of candidates){
+      if (typeof c === 'string' && c.includes('@lid')){
+        return c.split('@')[0].split(':')[0];
+      }
+    }
+  } catch(e){}
+  return null;
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  DUAL QUEUE
  * ══════════════════════════════════════════════════════════════ */
 class DualQueue {
@@ -536,9 +568,7 @@ class DualQueue {
           continue;
         }
       }
-
       const job = this.slow.shift();
-
       const rotated = pickRotationSlot(job.taskType || 'group');
       if (rotated === null){
         const altIdx = this.slow.findIndex(j => (j.taskType||'group') !== job.taskType);
@@ -551,10 +581,8 @@ class DualQueue {
           continue;
         }
       }
-
       try { await job.fn(); this.slowRun++; }
       catch(e){ this.slowFail++; pushLog('error','slowlane',`${job.name}: ${e.message}`); }
-
       await new Promise(r=>setTimeout(r, nextFibDelayMs(job.taskType || 'group')));
     }
     this.slowRunning = false;
@@ -598,10 +626,8 @@ class FocusPipeline {
 const focus = new FocusPipeline();
 
 /* ══════════════════════════════════════════════════════════════
- *  HELPERS — LID/PN aware extraction
+ *  HELPERS — LID/PN aware
  * ══════════════════════════════════════════════════════════════ */
-
-/** Extract all possible phone candidates from a message (PN + LID + Alt fields) */
 function extractAllPhoneCandidates(msg, senderJid){
   const s = new Set();
   const c = [
@@ -622,7 +648,6 @@ function extractAllPhoneCandidates(msg, senderJid){
   return [...s];
 }
 
-/** Extract the LID from a message */
 function extractLidFromMsg(msg, senderJid){
   const c = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
   for (const x of c){
@@ -631,16 +656,13 @@ function extractLidFromMsg(msg, senderJid){
   return null;
 }
 
-/** Extract the PN (phone number) from a message */
 function extractPnFromMsg(msg, senderJid){
-  // Try alt fields first (Baileys 6.8.0+)
   if (msg.key?.participantAlt && msg.key.participantAlt.includes('@s.whatsapp.net')){
     return msg.key.participantAlt.split('@')[0];
   }
   if (msg.key?.remoteJidAlt && msg.key.remoteJidAlt.includes('@s.whatsapp.net')){
     return msg.key.remoteJidAlt.split('@')[0];
   }
-  // Fallback: senderJid or remoteJid
   const c = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
   for (const x of c){
     if (typeof x === 'string' && x.includes('@s.whatsapp.net')){
@@ -672,7 +694,6 @@ function isAdminSender(msg, senderJid){
   const lid = extractLidFromMsg(msg, senderJid);
   const pn = extractPnFromMsg(msg, senderJid);
 
-  // 1. Check if any candidate matches ADMIN_PHONE
   if (candidates.includes(ADMIN_PHONE)){
     if (lid && !adminLids.has(lid)){
       adminLids.add(lid);
@@ -682,24 +703,15 @@ function isAdminSender(msg, senderJid){
     }
     return true;
   }
-
-  // 2. Check if LID matches known admin LIDs
   if (lid && adminLids.has(lid)) return true;
-
-  // 3. Check if PN matches
   if (pn && pn === ADMIN_PHONE) return true;
   if (pn && adminLids.has(pn)) return true;
-
-  // 4. Check sender JID directly
   if (typeof senderJid === 'string'){
     const base = senderJid.split('@')[0].split(':')[0];
     if (base === ADMIN_PHONE) return true;
     if (adminLids.has(base)) return true;
   }
-
-  // 5. Check any candidate against known LIDs
   for (const c of candidates) if (adminLids.has(c)) return true;
-
   return false;
 }
 
@@ -710,52 +722,41 @@ function extractPhone(msg, senderJid){
 function extractLid(msg, senderJid){ return extractLidFromMsg(msg, senderJid); }
 
 /* ══════════════════════════════════════════════════════════════
- *  BOT SELF-DETECTION — LID-aware
+ *  BOT SELF-DETECTION — LID-aware + lazy refresh
  * ══════════════════════════════════════════════════════════════ */
 function isBotSender(msg, senderJid){
+  if (!botLid){
+    const fresh = getSelfLid();
+    if (fresh){ botLid = fresh; pushLog('success','bot','Bot LID learned: '+botLid); }
+  }
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   const lid = extractLidFromMsg(msg, senderJid);
   const pn = extractPnFromMsg(msg, senderJid);
 
-  // Check bot's phone number
   if (botNumber && candidates.includes(botNumber)) return true;
-
-  // Check bot's LID (from sock.user.lid)
   if (botLid && lid === botLid) return true;
   if (botLid && candidates.includes(botLid)) return true;
-
-  // Check bot's PN
   if (botNumber && pn === botNumber) return true;
-
-  // Check bot's JID directly
   if (botJid){
     const botBase = botJid.split('@')[0].split(':')[0];
     if (senderJid && senderJid.includes(botBase)) return true;
     if (candidates.includes(botBase)) return true;
   }
-
   return false;
 }
 
-/** Check if the bot itself is admin in a group (LID-aware) */
 async function botIsAdminIn(jid){
   const c = groupAdminCache.get(jid);
   if (c && Date.now() - c.ts < 60000) return c.botIsAdmin;
-
   try {
     const meta = await sock.groupMetadata(jid);
     const me = meta.participants.find(p => {
-      // Check by id
       if (p.id && p.id.split('@')[0].split(':')[0] === botNumber) return true;
-      // Check by phoneNumber (LID participants)
       if (p.phoneNumber && p.phoneNumber.split('@')[0] === botNumber) return true;
-      // Check by lid
       if (p.lid && botLid && p.lid === botLid) return true;
-      // Check by botJid
       if (botJid && p.id && p.id === botJid) return true;
       return false;
     });
-
     const isAdmin = !!(me && (me.admin === 'admin' || me.admin === 'superadmin'));
     groupAdminCache.set(jid, { botIsAdmin: isAdmin, ts: Date.now() });
     return isAdmin;
@@ -765,7 +766,6 @@ async function botIsAdminIn(jid){
   }
 }
 
-/** Get admin list for a group (LID-aware) */
 async function getGroupAdmins(jid){
   try {
     const meta = await sock.groupMetadata(jid);
@@ -781,27 +781,6 @@ async function getGroupAdmins(jid){
   }
 }
 
-/** Check if a specific user is admin in a group (LID-aware) */
-async function isUserAdminInGroup(groupJid, userJid){
-  try {
-    const meta = await sock.groupMetadata(groupJid);
-    const participant = meta.participants.find(p => {
-      if (p.id === userJid) return true;
-      if (p.phoneNumber && p.phoneNumber === userJid) return true;
-      if (p.lid && p.lid === userJid) return true;
-      // Match by base number
-      const userBase = userJid.split('@')[0].split(':')[0];
-      if (p.id && p.id.split('@')[0].split(':')[0] === userBase) return true;
-      if (p.phoneNumber && p.phoneNumber.split('@')[0] === userBase) return true;
-      if (p.lid && p.lid.split('@')[0] === userBase) return true;
-      return false;
-    });
-    return !!(participant && (participant.admin === 'admin' || participant.admin === 'superadmin'));
-  } catch(e){
-    return false;
-  }
-}
-
 /* ══════════════════════════════════════════════════════════════
  *  READ + TYPING
  * ══════════════════════════════════════════════════════════════ */
@@ -812,21 +791,9 @@ async function markRead(msg){
     resetDailyStats(); dailyStats.readsSent++;
   } catch(e){}
 }
-async function showTyping(jid){
-  if (!ENABLE_TYPING || !sock || !jid) return 0;
-  try {
-    await sock.sendPresenceUpdate('composing', jid);
-    const ms = 1500 + Math.random() * 4500;
-    await new Promise(r => setTimeout(r, ms));
-    try { await sock.sendPresenceUpdate('paused', jid); } catch(e){}
-    await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
-    resetDailyStats(); dailyStats.typingsSent++;
-    return ms;
-  } catch(e){ return 0; }
-}
 
 /* ══════════════════════════════════════════════════════════════
- *  INVITE RESOLUTION — FIXED (plural)
+ *  INVITE RESOLUTION
  * ══════════════════════════════════════════════════════════════ */
 function extractInviteCodes(text){
   if (!text) return [];
@@ -888,7 +855,7 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskTy
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SEND
+ *  SEND — per-JID lock + admin preemption
  * ══════════════════════════════════════════════════════════════ */
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false){
   if (priority >= 2){
@@ -928,7 +895,6 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
             await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
             resetDailyStats(); dailyStats.typingsSent++;
           }
-
           try {
             const sent = await sock.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
@@ -1370,8 +1336,6 @@ async function probeMainGroup(){
       try {
         const meta = await sock.groupMetadata(mainGroupJid);
         pushLog('info','main',`Main group: ${meta.subject || '?'} (${meta.participants?.length || 0} members)`);
-
-        // Cache LIDs and phones (LID-aware)
         for (const p of meta.participants || []){
           if (p.id && p.id.includes('@lid')) recentGroupLids.set(p.id.split('@')[0], Date.now());
           if (p.id && p.id.includes('@s.whatsapp.net')) recentGroupPhones.set(p.id.split('@')[0], Date.now());
@@ -1379,8 +1343,6 @@ async function probeMainGroup(){
           if (p.lid) recentGroupLids.set(p.lid, Date.now());
         }
         pushLog('success','main',`Cached ${recentGroupLids.size} LIDs, ${recentGroupPhones.size} phones`);
-
-        // Log admin count
         const admins = meta.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin');
         pushLog('info','main',`Group has ${admins.length} admin(s)`);
       } catch(e){ pushLog('warn','main','metadata: '+e.message); }
@@ -1391,7 +1353,7 @@ async function probeMainGroup(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  WELCOME / GOODBYE — MAIN GROUP ONLY
+ *  WELCOME / GOODBYE
  * ══════════════════════════════════════════════════════════════ */
 async function generateWelcome(userName){
   const ai = await askAI(
@@ -1431,7 +1393,7 @@ async function handleParticipants(update){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  ANTI-LINK — MAIN GROUP ONLY, BOT MUST BE ADMIN
+ *  ANTI-LINK
  * ══════════════════════════════════════════════════════════════ */
 async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
   if (!mainGroupJid || jid !== mainGroupJid) return false;
@@ -1681,7 +1643,7 @@ const replyCache = new NodeCache({ stdTTL:600 });
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v63 — Admin
+const COMMAND_LIST = `BreadBot v64 — Admin
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -2316,6 +2278,16 @@ function enqueueDM(item){
  * ══════════════════════════════════════════════════════════════ */
 async function handleMessage(msg){
   if (!sock) return;
+
+  /* ═══ Refresh bot LID if still unknown ═══ */
+  if (!botLid){
+    const fresh = getSelfLid();
+    if (fresh){
+      botLid = fresh;
+      pushLog('success','bot','Bot LID learned: '+botLid);
+    }
+  }
+
   if (checkFlood()){ resetDailyStats(); dailyStats.messagesDropped++; return; }
   if (Date.now() < floodIgnoreUntil) return;
 
@@ -2332,9 +2304,7 @@ async function handleMessage(msg){
   }
   if (botSentIds.has(msgId)) return;
 
-  /* ═══════════════════════════════════════════════════════════
-   *  FILTER 1: Skip protocol-only frames
-   * ═══════════════════════════════════════════════════════════ */
+  /* ═══ FILTER 1: Protocol frames ═══ */
   const rawMsg = msg.message;
   if (!rawMsg) return;
   if (rawMsg.protocolMessage) return;
@@ -2363,9 +2333,7 @@ async function handleMessage(msg){
                 || m?.contactMessage || m?.locationMessage);
   if (!hasText) return;
 
-  /* ═══════════════════════════════════════════════════════════
-   *  FILTER 2: Skip echoes of our own sends
-   * ═══════════════════════════════════════════════════════════ */
+  /* ═══ FILTER 2: fromMe echoes ═══ */
   if (msg.key.fromMe) return;
 
   const text = m?.conversation || m?.extendedTextMessage?.text
@@ -2387,12 +2355,8 @@ async function handleMessage(msg){
   recordReply(chatJid);
   markRead(msg).catch(()=>{});
 
-  // LID-AWARE ADMIN DETECTION
   const isAdmin = isAdminSender(msg, senderJid);
-
-  // Skip if this is the bot's own message (LID-aware)
   if (isBotSender(msg, senderJid)) return;
-
   if (isAdmin) touchAdminActive();
 
   pushLiveMessage({
@@ -2401,7 +2365,7 @@ async function handleMessage(msg){
     text:text.slice(0,200)||'['+mediaType+']', mediaType, isAdmin
   });
 
-  /* ═══ 1. ADMIN COMMANDS ═══ */
+  /* ═══ ADMIN COMMANDS ═══ */
   if (isAdmin && text.startsWith('!')){
     const inDM = !isGroup;
     const inMainGroup = mainGroupJid && chatJid === mainGroupJid;
@@ -2421,16 +2385,16 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ 2. NO MAIN GROUP → IGNORE GROUP ═══ */
+  /* ═══ NO MAIN GROUP → IGNORE ALL GROUPS ═══ */
   if (isGroup && !mainGroupJid) return;
 
-  /* ═══ 3. NOT MAIN GROUP → IGNORE GROUP ═══ */
+  /* ═══ NOT MAIN GROUP → IGNORE ═══ */
   if (isGroup && chatJid !== mainGroupJid) return;
 
   if (botPaused && !isAdmin) return;
   if (Date.now() < botOfflineUntil && !isAdmin) return;
 
-  /* ═══ 4. ADMIN IMAGE BROADCAST ═══ */
+  /* ═══ ADMIN IMAGE BROADCAST ═══ */
   if (!isGroup && isAdmin && mediaType === 'image' && text.startsWith('!')){
     const args = text.slice(1).trim().split(/\s+/);
     const cmd  = args[0].toLowerCase();
@@ -2479,7 +2443,7 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ GROUP MESSAGES — MAIN GROUP ONLY ═══ */
+  /* ═══ GROUP MESSAGES — MAIN ONLY ═══ */
   if (isGroup){
     await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
 
@@ -2531,10 +2495,7 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ ADMIN DM WITHOUT COMMAND — ignored ═══ */
   if (isAdmin) return;
-
-  /* ═══ NON-ADMIN DM ═══ */
   if (!isDmAiWindow()) return;
   enqueueDM({ msg, text, chatJid, senderJid, pushName, phone,
     intent: detectMediaIntent(text), lang: detectLanguage(text) });
@@ -2594,11 +2555,11 @@ async function connectBot(){
         reconnectAttempts = 0; botStartTime = Date.now();
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
-        // Extract bot LID if available (LID-aware)
-        botLid = sock.user?.lid ? sock.user.lid.split('@')[0].split(':')[0] : null;
+        botLid = getSelfLid();
         consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0;
         pushLog('success','bot','Connected as '+botNumber);
         if (botLid) pushLog('info','bot','Bot LID: '+botLid);
+        else pushLog('info','bot','Bot LID: unknown — will learn on first message');
         pushLog('info','time',describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm());
         pushLog('info','main',`Main group: ${mainGroupJid || 'NOT SET — use !setmain'}`);
 
@@ -2625,9 +2586,9 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v63 ONLINE\n' +
+            'BreadBot v64 ONLINE\n' +
             'Bot: ' + botNumber + '\n' +
-            'Bot LID: ' + (botLid || 'unknown') + '\n' +
+            'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
             'Main group: ' + (mainGroupJid || 'NOT SET — send !setmain <link>') + '\n' +
             'Groups: ' + joinedGroups.size + '\n' +
@@ -2727,7 +2688,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v63</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v64</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -2747,7 +2708,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v63</h1>
+<h1>BreadBot v64</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — bot ignores all group messages. Send <b>!setmain &lt;link&gt;</b> from DM.</div>
 <div class="sub">Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b></div>
 <div class="grid">

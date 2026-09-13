@@ -1,18 +1,10 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v60 — Full
- *  - No dotenv (Render injects env vars directly)
- *  - 15 joins/day spread across 08:00-22:00
- *  - Main group probe at boot
- *  - Fibonacci per-task delays + task rotation
- *  - Reply-rate monitor
- *  - Policy: cooldowns, caps, warm-up ramp
- *  - Delete rate cap
- *  - Presence cycle + hidden privacy
- *  - Multi-host y2mate
- *  - Content block OFF by default
+ *  BreadBot v60 — Option B (dotenv enabled)
  * ============================================================ */
+
+require('dotenv').config();
 
 const express = require('express');
 const fs      = require('fs');
@@ -94,7 +86,8 @@ let botOfflineUntil = 0;
 let nsfwRoleplayEnabled = true;
 
 /* ══════════════════════════════════════════════════════════════
- *  ENV KEYS
+ *  ENV KEYS  — dotenv loads them from .env on local, from Render
+ *  dashboard on cloud. Both paths put them in process.env.
  * ══════════════════════════════════════════════════════════════ */
 const REWIND_KEY_ENV = process.env.REWIND_KEY;
 const OPENAI_KEY_ENV = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
@@ -2821,12 +2814,14 @@ app.listen(PORT, async function(){
   console.log('NSFW DL: '+(RedgifsDownloader?'enabled':'not installed'));
   console.log('Content block: '+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
   console.log('Policy: account age '+getAccountAgeDays()+'d, limit '+dailyRecipientLimit(getAccountAgeDays())+'/day, joins '+dailyJoinLimit(getAccountAgeDays())+'/night');
+  console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING')+' OPENAI='+(OPENAI_KEY_ENV?'set':'MISSING')+' VENICE='+(VENICE_KEY_ENV?'set':'MISSING')+' GEMINI='+(GEMINI_KEY_ENV?'set':'MISSING'));
 
   pushLog('info','system','Boot port '+PORT);
   pushLog('info','system','Admin: '+ADMIN_PHONE+' LIDs: '+([...adminLids].join(', ')||'none'));
   pushLog('info','system','Main: '+(mainGroupJid||'not set'));
   pushLog('info','policy','Age '+getAccountAgeDays()+'d — limit '+dailyRecipientLimit(getAccountAgeDays())+' rec/day, '+dailyJoinLimit(getAccountAgeDays())+' joins/night');
   pushLog('info','policy','Content block: '+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
+  pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING')+' OPENAI='+(OPENAI_KEY_ENV?'set':'MISSING')+' VENICE='+(VENICE_KEY_ENV?'set':'MISSING')+' GEMINI='+(GEMINI_KEY_ENV?'set':'MISSING'));
 
   findWorkingY2MateHost().then(h => {
     if (h) pushLog('success','yt','y2mate host: '+h);

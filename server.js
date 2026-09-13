@@ -1,17 +1,13 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v53 — Full & Fixed
- *  - Admin identity + credentials shown in LIVE MESSAGES on boot
- *  - Admin detection fires a live-log entry the first time
- *  - AI uses REWIND_KEY from env (no other API)
- *  - FIXED: circuitBreaker config (admin replies)
- *  - FIXED: entropy crash guard
- *  - FIXED: conversation memory (last 5)
- *  - FIXED: join queue spam (midnight-only, per-code cooldown)
- *  - FIXED: anti-link warn spam
- *  - 34 MB enforced on EVERY file
- *  - Main group hardcoded (join link)
+ *  BreadBot v54 — Multi-AI + Raw Socket
+ *  - Drops baileys-antiban wrapper (fixes circuitBreaker crash)
+ *  - Drops entropy service (fixes this.wasp.on crash)
+ *  - Auto-detects working AI key from: Rewind, OpenAI, Venice, Gemini
+ *  - Falls back to next provider if active one fails at runtime
+ *  - Notifies admin if no AI backend works
+ *  - All admin commands work
  * ============================================================ */
 
 const express = require('express');
@@ -23,15 +19,6 @@ const {
   Browsers, fetchLatestBaileysVersion, downloadMediaMessage
 } = require('@whiskeysockets/baileys');
 
-let wrapSocket=null, createHumanEntropyService=null, classifyDisconnect=null, SessionHealthMonitor=null;
-try {
-  const ab = require('baileys-antiban');
-  wrapSocket                = ab.wrapSocket || null;
-  createHumanEntropyService = ab.createHumanEntropyService || null;
-  classifyDisconnect        = ab.classifyDisconnect || null;
-  SessionHealthMonitor      = ab.SessionHealthMonitor || null;
-} catch (e) {}
-
 let RedgifsDownloader = null;
 try { RedgifsDownloader = require('redgifs-downloader'); } catch(e){}
 
@@ -42,21 +29,19 @@ const axios  = require('axios');
 /* ══════════════════════════════════════════════════════════════
  *  CONFIG
  * ══════════════════════════════════════════════════════════════ */
-const PORT          = process.env.PORT || 10000;
-const AUTH_FOLDER   = 'auth_info';
+const PORT        = process.env.PORT || 10000;
+const AUTH_FOLDER = 'auth_info';
 
-const ADMIN_PHONE   = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g,'');
-const ADMIN_JID     = `${ADMIN_PHONE}@s.whatsapp.net`;
+const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g,'');
+const ADMIN_JID   = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_FILE         = path.join(__dirname,'admin_lids.json');
 const HARDCODED_ADMIN_LIDS   = ['115110005706891'];
 const MAIN_GROUP_FILE        = path.join(__dirname,'main_group_jid.json');
 const ADMIN_GROUP_LINK       = 'https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7?s=sw&p=a&mlu=4&ilr=4';
-
-/* Hardcoded main group (your group) */
 const HARDCODED_MAIN_GROUP_JID = '120363252134990834@g.us';
 
 const JOIN_INTERVAL_MS   = parseInt(process.env.JOIN_INTERVAL_MS || '900000', 10);
-const JOIN_HOUR          = 0;   // midnight
+const JOIN_HOUR          = 0;
 const JOIN_QUEUE_FILE    = path.join(__dirname,'join_queue.json');
 const JOINED_GROUPS_FILE = path.join(__dirname,'joined_groups.json');
 const PENDING_FILE       = path.join(__dirname,'pending_requests.json');
@@ -81,26 +66,13 @@ const NSFW_START = 21, NSFW_END = 8;
 const DM_AI_START_HOUR = 21, DM_AI_END_HOUR = 8;
 const AMBIENT_CHANCE = 0.02;
 
-/* ══════════════════════════════════════════════════════════════
- *  AI  — uses REWIND_KEY from your env
- *  No other API. Falls through env vars in priority order.
- * ══════════════════════════════════════════════════════════════ */
-const AI_KEY      = process.env.REWIND_KEY || process.env.OPENAI_API_KEY || process.env.AI_API_KEY || '';
-const AI_ENDPOINT = process.env.REWIND_ENDPOINT || process.env.AI_ENDPOINT || 'https://api.openai.com/v1/chat/completions';
-const AI_MODEL    = process.env.REWIND_MODEL    || process.env.AI_MODEL    || 'gpt-4o-mini';
-
-/* Scraper */
 const SCRAPER_URL       = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
 const SCRAPER_SFW_SITE  = process.env.SCRAPER_SFW_SITE  || 'darknaija';
 const SCRAPER_NSFW_SITE = process.env.SCRAPER_NSFW_SITE || 'nsfw';
 
-/* Lanes */
-const FAST_LANE_GAP_MIN_MS = 150;
-const FAST_LANE_GAP_MAX_MS = 600;
-const SLOW_LANE_GAP_MIN_MS = 800;
-const SLOW_LANE_GAP_MAX_MS = 15000;
-const FAST_LANE_MAX = 5000;
-const SLOW_LANE_MAX = 5000;
+const FAST_LANE_GAP_MIN_MS = 150,  FAST_LANE_GAP_MAX_MS = 600;
+const SLOW_LANE_GAP_MIN_MS = 800,  SLOW_LANE_GAP_MAX_MS = 15000;
+const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
 
 const DOWNLOAD_PICK_TTL  = 10 * 60 * 1000;
 const DOWNLOAD_MAX_PICKS = 8;
@@ -110,12 +82,13 @@ let botOfflineUntil = 0;
 let nsfwRoleplayEnabled = true;
 
 /* ══════════════════════════════════════════════════════════════
- *  getDisconnectStatusCode (hoisted — fixes ReferenceError)
+ *  getDisconnectStatusCode (hoisted)
  * ══════════════════════════════════════════════════════════════ */
 function getDisconnectStatusCode(lastDisconnect) {
   if (!lastDisconnect) return undefined;
   if (lastDisconnect.error?.output?.statusCode) return lastDisconnect.error.output.statusCode;
   if (lastDisconnect.error?.output?.payload?.statusCode) return lastDisconnect.error.output.payload.statusCode;
+  if (lastDisconnect.error?.data?.statusCode) return lastDisconnect.error.data.statusCode;
   if (lastDisconnect.error?.statusCode) return lastDisconnect.error.statusCode;
   if (lastDisconnect.statusCode) return lastDisconnect.statusCode;
   return undefined;
@@ -156,9 +129,188 @@ function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLO
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
+ *  AI PROVIDER SYSTEM — auto-detect working backend
+ * ══════════════════════════════════════════════════════════════ */
+const PROVIDERS = {
+  rewind: {
+    name: 'rewind',
+    keys: ['REWIND_KEY'],
+    call: async (key, prompt, system) => {
+      const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: 'gpt-4o-mini',
+        messages: [
+          { role:'system', content: system },
+          { role:'user',   content: prompt }
+        ],
+        max_tokens: 250, temperature: 0.95
+      }, {
+        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' },
+        timeout: 25000
+      });
+      return r.data?.choices?.[0]?.message?.content || null;
+    }
+  },
+  openai: {
+    name: 'openai',
+    keys: ['OPENAI_API_KEY','OPENAI_KEY'],
+    call: async (key, prompt, system) => {
+      const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        messages: [
+          { role:'system', content: system },
+          { role:'user',   content: prompt }
+        ],
+        max_tokens: 250, temperature: 0.95
+      }, {
+        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' },
+        timeout: 25000
+      });
+      return r.data?.choices?.[0]?.message?.content || null;
+    }
+  },
+  venice: {
+    name: 'venice',
+    keys: ['VENICE_KEY','VENICE_API_KEY'],
+    call: async (key, prompt, system) => {
+      const r = await axios.post('https://api.venice.ai/api/v1/chat/completions', {
+        model: process.env.VENICE_MODEL || 'llama-3.3-70b',
+        messages: [
+          { role:'system', content: system },
+          { role:'user',   content: prompt }
+        ],
+        max_tokens: 250, temperature: 0.9
+      }, {
+        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' },
+        timeout: 25000
+      });
+      return r.data?.choices?.[0]?.message?.content || null;
+    }
+  },
+  gemini: {
+    name: 'gemini',
+    keys: ['GEMINI_KEY','GEMINI_API_KEY','GOOGLE_API_KEY'],
+    call: async (key, prompt, system) => {
+      const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const r = await axios.post(url, {
+        contents: [{ role:'user', parts:[{ text: prompt }] }],
+        systemInstruction: { parts:[{ text: system }] },
+        generationConfig: { maxOutputTokens: 250, temperature: 0.9 }
+      }, {
+        headers: { 'Content-Type':'application/json' },
+        timeout: 25000
+      });
+      return r.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    }
+  }
+};
+
+const PROVIDER_ORDER = ['rewind', 'openai', 'venice', 'gemini'];
+
+let activeProvider = null;   // 'rewind' | 'openai' | 'venice' | 'gemini' | null
+let activeKey      = null;
+let providerReport = {};     // { rewind: { ok, error, ms }, ... }
+
+async function testProvider(name, key) {
+  const p = PROVIDERS[name];
+  if (!p) return { ok: false, error: 'unknown provider' };
+  const t0 = Date.now();
+  try {
+    const reply = await p.call(key, 'Reply with exactly: OK', 'You are a test bot.');
+    const ms = Date.now() - t0;
+    if (reply && reply.trim().length > 0) {
+      return { ok: true, ms, sample: reply.trim().slice(0, 40) };
+    }
+    return { ok: false, error: 'empty response', ms };
+  } catch(e) {
+    return {
+      ok: false,
+      ms: Date.now() - t0,
+      status: e.response?.status,
+      error: e.response?.data?.error?.message || e.message
+    };
+  }
+}
+
+async function detectAIBackend() {
+  pushLog('info','ai','Testing all AI providers...');
+  providerReport = {};
+  let found = null;
+
+  for (const name of PROVIDER_ORDER) {
+    const p = PROVIDERS[name];
+    const key = p.keys.map(k => process.env[k]).find(v => v && v.trim());
+    if (!key) {
+      providerReport[name] = { ok: false, error: 'no key in env', skipped: true };
+      pushLog('info','ai',`${name}: skipped (no key)`);
+      continue;
+    }
+    const result = await testProvider(name, key);
+    providerReport[name] = result;
+    if (result.ok) {
+      pushLog('success','ai',`${name}: ✅ WORKS (${result.ms}ms)`);
+      if (!found) { found = { name, key }; }
+    } else {
+      pushLog('warn','ai',`${name}: ❌ ${result.status || ''} ${result.error}`);
+    }
+  }
+
+  if (found) {
+    activeProvider = found.name;
+    activeKey = found.key;
+    pushLog('success','ai',`Active AI: ${activeProvider}`);
+  } else {
+    activeProvider = null;
+    activeKey = null;
+    pushLog('error','ai','❌ No AI backend works — check env');
+  }
+  return activeProvider;
+}
+
+async function askAI(prompt, system) {
+  if (!activeProvider || !activeKey) return null;
+  const p = PROVIDERS[activeProvider];
+  try {
+    const raw = await p.call(activeKey, prompt, system);
+    if (!raw) return null;
+    const c = humanize(raw);
+    return (c && !containsForbidden(c)) ? c : null;
+  } catch(e) {
+    pushLog('error','ai',`${activeProvider}: ${e.response?.status || ''} ${e.message}`);
+    resetDailyStats(); dailyStats.aiErrors++;
+    // Try to auto-switch to next working provider
+    try {
+      const next = PROVIDER_ORDER.find(n => n !== activeProvider && providerReport[n]?.ok);
+      if (next) {
+        pushLog('warn','ai',`Switching to ${next} after failure on ${activeProvider}`);
+        activeProvider = next;
+        activeKey = PROVIDERS[next].keys.map(k => process.env[k]).find(v => v && v.trim());
+        const raw2 = await PROVIDERS[next].call(activeKey, prompt, system);
+        if (raw2) {
+          const c2 = humanize(raw2);
+          return (c2 && !containsForbidden(c2)) ? c2 : null;
+        }
+      }
+    } catch(_){}
+    return null;
+  }
+}
+
+async function testAllProviders() {
+  const results = {};
+  for (const name of PROVIDER_ORDER) {
+    const p = PROVIDERS[name];
+    const key = p.keys.map(k => process.env[k]).find(v => v && v.trim());
+    if (!key) { results[name] = { ok: false, error: 'no key' }; continue; }
+    results[name] = await testProvider(name, key);
+  }
+  return results;
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  STATE
  * ══════════════════════════════════════════════════════════════ */
-let sock=null, entropyService=null, healthMonitor=null, qrDataUri=null;
+let sock=null, qrDataUri=null;
 let connectionStatus='disconnected', botStartTime=Date.now(), botNumber=null, botJid=null;
 let isConnecting=false, manualDisconnect=false;
 let reconnectAttempts=0; const MAX_RECONNECT=10;
@@ -243,14 +395,6 @@ class DualQueue {
     this.slowRunning = true;
     while (this.slow.length){
       const job = this.slow.shift();
-      if (this.slow.length > 1 && Math.random() < 0.05){
-        const idx = this.slow.findIndex(j => j.priority >= 2);
-        if (idx >= 0){
-          const d = this.slow.splice(idx,1)[0];
-          try { await d.fn(); this.slowRun++; } catch(e) { this.slowFail++; }
-          await new Promise(r=>setTimeout(r,200+Math.random()*600));
-        }
-      }
       try { await job.fn(); this.slowRun++; }
       catch(e){ this.slowFail++; pushLog('error','slowlane',`${job.name}: ${e.message}`); }
       const base = SLOW_LANE_GAP_MIN_MS + Math.random()*(SLOW_LANE_GAP_MAX_MS-SLOW_LANE_GAP_MIN_MS);
@@ -325,73 +469,45 @@ function extractLidFromMsg(msg, senderJid){
   for (const x of c) if (typeof x==='string' && x.includes('@lid')) return x.split('@')[0];
   return null;
 }
-
-/* ══════════════════════════════════════════════════════════════
- *  ADMIN DETECTION  — fires a Live Log entry the first time
- * ══════════════════════════════════════════════════════════════ */
 function announceAdminToLive(reason, extraLid){
   const lidList = [...adminLids];
   pushLiveMessage({
-    id: 'admin-' + Date.now(),
-    ts: new Date().toISOString(),
-    chatJid: ADMIN_JID,
-    chatType: 'system',
-    senderJid: ADMIN_JID,
-    senderName: 'ADMIN',
+    id: 'admin-' + Date.now(), ts: new Date().toISOString(),
+    chatJid: ADMIN_JID, chatType: 'system',
+    senderJid: ADMIN_JID, senderName: 'ADMIN',
     phone: ADMIN_PHONE,
     lid: extraLid ? `${extraLid}${lidList.length>1?' (+'+(lidList.length-1)+' more)':''}` : (lidList.join(', ')||'—'),
     text: `👑 Admin ${reason}\n📱 ${ADMIN_PHONE}\n🆔 ${lidList.join(', ')||'none'}`,
-    mediaType: 'system',
-    isAdmin: true
+    mediaType: 'system', isAdmin: true
   });
   pushLog('success','admin',`Live-log: ${reason} — LIDs [${lidList.join(', ')||'none'}]`);
 }
-
 function isAdminSender(msg, senderJid){
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   const lid = extractLidFromMsg(msg, senderJid);
-
-  // 1. Phone match in any candidate
   if (candidates.includes(ADMIN_PHONE)){
     if (lid && !adminLids.has(lid)){
       adminLids.add(lid);
       saveAdminLids();
       pushLog('success','admin',`Saved new admin LID: ${lid}`);
       announceAdminToLive('identified (first time)', lid);
-      if (sock){
-        setTimeout(()=>{
-          sock.sendMessage(ADMIN_JID, {
-            text: `👑 *Admin identified*\n📱 Phone: ${ADMIN_PHONE}\n🆔 New LID saved: ${lid}\n💾 ${adminLids.size} LID(s) total\n\nFull admin commands enabled.`
-          }).then(sent => { if (sent?.key?.id) markBotSent(sent.key.id); })
-            .catch(()=>{});
-        }, 800);
-      }
     }
     return true;
   }
-
-  // 2. LID match
   if (lid && adminLids.has(lid)) return true;
-
-  // 3. Direct JID match
   if (typeof senderJid === 'string'){
     const base = senderJid.split('@')[0].split(':')[0];
     if (base === ADMIN_PHONE) return true;
     if (adminLids.has(base)) return true;
   }
-
-  // 4. Any candidate matches any saved LID
   for (const c of candidates) if (adminLids.has(c)) return true;
-
   return false;
 }
-
 function extractPhone(msg, senderJid){
   const c = extractAllPhoneCandidates(msg, senderJid); return c[0] || null;
 }
 function extractLid(msg, senderJid){ return extractLidFromMsg(msg, senderJid); }
 
-/* Filters */
 const FORBIDDEN = [
   /\bas an ai\b/i, /\bi am an ai\b/i, /\blanguage model\b/i, /\bas an assistant\b/i,
   /\bi cannot\b/i, /how can i help you today/i, /is there anything else/i,
@@ -412,7 +528,6 @@ function informalize(t){
   if (Math.random()<0.05) t += ' ' + ['😊','😅','👀','🙂','😂'][Math.floor(Math.random()*5)];
   return t;
 }
-
 const SHONA_MARKERS = ['ndi','uri','kuti','here','izvi','zvakanaka','sei','ndoda','unoda',
   'mhoro','mangwanani','masikati','manheru','ndapota','zvinhu','vanhu','kuita','kuenda','kuuya'];
 const LANG_NAMES = { sn:'Shona', en:'English' };
@@ -422,67 +537,17 @@ function detectLanguage(t){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI (Rewind or any OpenAI-compatible endpoint)
- * ══════════════════════════════════════════════════════════════ */
-async function askAI(prompt, system){
-  if (!AI_KEY) return null;
-  try {
-    const r = await axios.post(AI_ENDPOINT, {
-      model:AI_MODEL,
-      messages:[
-        { role:'system', content: system },
-        { role:'user',   content: prompt }
-      ],
-      max_tokens: 250, temperature: 0.95
-    }, {
-      headers:{ 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 25000
-    });
-    const raw = r.data?.choices?.[0]?.message?.content;
-    if (!raw) return null;
-    const c = humanize(raw);
-    return (c && !containsForbidden(c)) ? c : null;
-  } catch(e){
-    pushLog('error','ai',`${e.response?.status||''} ${e.message}`);
-    resetDailyStats(); dailyStats.aiErrors++;
-    return null;
-  }
-}
-async function testAIRaw(){
-  if (!AI_KEY) return { ok:false, error:'REWIND_KEY missing' };
-  const t0 = Date.now();
-  try {
-    const r = await axios.post(AI_ENDPOINT, {
-      model:AI_MODEL,
-      messages:[
-        { role:'system', content:'You are a helpful assistant.' },
-        { role:'user',   content:'Reply with exactly: AI WORKS' }
-      ],
-      max_tokens:20
-    }, {
-      headers:{ 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type':'application/json' },
-      timeout:20000
-    });
-    return { ok:true, ms:Date.now()-t0, status:r.status, raw:r.data?.choices?.[0]?.message?.content };
-  } catch(e){ return { ok:false, ms:Date.now()-t0, status:e.response?.status, error:e.message }; }
-}
-
-/* ══════════════════════════════════════════════════════════════
  *  34 MB ENFORCEMENT
  * ══════════════════════════════════════════════════════════════ */
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
   const resp = await axios.get(url, {
-    responseType: 'arraybuffer',
-    timeout: 60000,
-    maxContentLength: maxBytes + 1,
-    maxBodyLength: maxBytes + 1,
+    responseType: 'arraybuffer', timeout: 60000,
+    maxContentLength: maxBytes + 1, maxBodyLength: maxBytes + 1,
     validateStatus: s => s >= 200 && s < 300,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BreadBot/1.0)' }
   });
   const buf = Buffer.from(resp.data);
-  if (buf.length > maxBytes){
-    throw new Error(`Media too big (${(buf.length/1024/1024).toFixed(1)}MB > ${(maxBytes/1024/1024).toFixed(0)}MB)`);
-  }
+  if (buf.length > maxBytes) throw new Error(`Media too big (${(buf.length/1024/1024).toFixed(1)}MB > ${(maxBytes/1024/1024).toFixed(0)}MB)`);
   if (buf.length < 32) throw new Error('Media file is empty');
   const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
   return { buffer: buf, mimetype, sizeBytes: buf.length };
@@ -517,8 +582,7 @@ function sendBuffer(jid, content, priority=2, lane='auto'){
   const actualLane = lane === 'auto' ? (priority === 0 ? 'fast' : 'slow') : lane;
   return new Promise((resolve, reject)=>{
     const job = {
-      name:`send:${jid}`,
-      priority,
+      name:`send:${jid}`, priority,
       fn: async ()=>{
         if (!sock){ reject(new Error('Bot disconnected')); return; }
         if (botPaused && priority > 0){ reject(new Error('Bot paused')); return; }
@@ -534,7 +598,7 @@ function sendBuffer(jid, content, priority=2, lane='auto'){
     else jobs.pushSlow(job);
   });
 }
-function adminReply(jid, text, quoted){
+function adminReply(jid, text){
   return sendBuffer(jid, { text }, 0, 'fast').catch(e => pushLog('warn','adminreply',e.message));
 }
 
@@ -622,7 +686,6 @@ async function y2mateResolve(videoId, prefer='360p'){
   const vId = (html.match(/v_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
   const id  = (html.match(/_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
   if (!vId || !id) throw new Error('y2mate: video not found');
-
   const qualities = ['360p','480p','720p'];
   const start = Math.max(0, qualities.indexOf(prefer));
   let lastErr=null;
@@ -670,7 +733,6 @@ async function y2mateDownloadMusic(videoId, format='mp3'){
   const vId = (html.match(/v_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
   const id  = (html.match(/_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
   if (!vId || !id) throw new Error('y2mate: audio not found');
-
   const ftype = format === 'mp3' ? 'mp3' : 'mp4';
   const conv = await axios.post(
     'https://www.y2mate.com/mates/convert',
@@ -681,7 +743,6 @@ async function y2mateDownloadMusic(videoId, format='mp3'){
   const dl = (ch.match(/href="(https?:\/\/[^"]+\.(mp3|mp4|m4a)[^"]*)"/)||[])[1]
           || (ch.match(/href="(https?:\/\/[^"]+)"/)||[])[1];
   if (!dl) throw new Error('y2mate: no music download link');
-
   const fileId = Date.now()+'_'+Math.random().toString(36).slice(2,8);
   const ext = format === 'mp3' ? '.mp3' : '.mp4';
   const fp = path.join(DOWNLOAD_DIR, `${fileId}${ext}`);
@@ -734,14 +795,11 @@ async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow'){
       await sendBuffer(chatJid, { text: `🔞 No NSFW results for "${query}"` }, priority, lane);
       return false;
     }
-    const picked = links.slice(0, 2);
-    for (const link of picked){
+    for (const link of links.slice(0, 2)){
       try {
         const resp = await axios.get(link.url || link, {
-          responseType: 'arraybuffer',
-          timeout: 90000,
-          maxContentLength: MEDIA_MAX_BYTES + 1,
-          maxBodyLength: MEDIA_MAX_BYTES + 1,
+          responseType: 'arraybuffer', timeout: 90000,
+          maxContentLength: MEDIA_MAX_BYTES + 1, maxBodyLength: MEDIA_MAX_BYTES + 1,
           headers: { 'User-Agent': YT_HEADERS['User-Agent'] }
         });
         const buf = Buffer.from(resp.data);
@@ -774,7 +832,6 @@ async function nsfwRoleplay(userName, text){
  * ══════════════════════════════════════════════════════════════ */
 const VAGUE = ['', 'something','anything','nice','good','stuff','it','them','some','please','pls','now','me','one'];
 function isVague(q){ return !q || VAGUE.includes(q.toLowerCase().trim()); }
-
 function detectMediaIntent(text){
   const low = (text||'').toLowerCase().trim();
   if (!low) return null;
@@ -788,8 +845,7 @@ function detectMediaIntent(text){
   }
   if (/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/i.test(low)){
     let q = low.replace(/^(please\s+|pls\s+|hey\s+|hi\s+|yo\s+)?(can\s+you\s+)?(send|share|give|show|drop|post|download|get)\s+(me\s+)?(a\s+|some\s+|any\s+)?/i,'');
-    q = q.replace(/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/gi,'');
-    q = q.replace(/\b(of|by|from|for)\b/gi,'');
+    q = q.replace(/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/gi,'').replace(/\b(of|by|from|for)\b/gi,'');
     q = q.replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
     return { type:'music', query: q || 'top hits' };
   }
@@ -807,8 +863,7 @@ function detectDownloadIntent(text){
   const low = text.toLowerCase();
   if (/\b(download|dl|save|grab|fetch)\b/.test(low) && /\b(youtube|video|vid|song|music)\b/.test(low)){
     const q = low.replace(/^(please\s+|pls\s+|hey\s+|hi\s+)?(can\s+you\s+)?(download|dl|save|grab|fetch)\s+(me\s+)?(a\s+|the\s+)?/i,'')
-      .replace(/\b(youtube|video|vid|song|music)\b/gi,'')
-      .replace(/\b(of|from|for|by)\b/gi,'')
+      .replace(/\b(youtube|video|vid|song|music)\b/gi,'').replace(/\b(of|from|for|by)\b/gi,'')
       .replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
     return { query: q };
   }
@@ -823,7 +878,6 @@ function detectGroupLinkRequest(text){
   if (!text) return false;
   return /group\s*link|grouplink|join\s*link|link\s*(ye|re)\s*group|link rekujoina/i.test(text);
 }
-
 const BOT_NAMES = ['bread','breadbot','abby','abby faith','sithole'];
 function isReplyToBot(msg){
   const c = msg.message?.extendedTextMessage?.contextInfo
@@ -853,9 +907,7 @@ function isDirectedAtBot(msg, text){
 /* ══════════════════════════════════════════════════════════════
  *  PERSISTENCE
  * ══════════════════════════════════════════════════════════════ */
-function saveAdminLids(){
-  try { fs.writeFileSync(ADMIN_LID_FILE, JSON.stringify([...adminLids],null,2)); } catch(e){}
-}
+function saveAdminLids(){ try { fs.writeFileSync(ADMIN_LID_FILE, JSON.stringify([...adminLids],null,2)); } catch(e){} }
 let groupSettings = new Map();
 function loadGroupSettings(){
   try { if (fs.existsSync(GROUP_SETTINGS_FILE))
@@ -1010,10 +1062,7 @@ async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
   if (now - last > 5 * 60 * 1000){
     antilinkWarnCooldown.set(key, now);
     try {
-      await sendBuffer(jid, {
-        text: `⚠️ Links not allowed here, @${senderJid.split('@')[0]}`,
-        mentions: [senderJid]
-      }, 3, 'slow');
+      await sendBuffer(jid, { text: `⚠️ Links not allowed here, @${senderJid.split('@')[0]}`, mentions: [senderJid] }, 3, 'slow');
     } catch(e){}
   }
   return true;
@@ -1047,22 +1096,18 @@ function scheduleMidnightJoin(){
     if (localHour() !== JOIN_HOUR) return;
     if (joinInProgress || !sock || connectionStatus!=='connected' || !joinQueue.length) return;
     if (Date.now() - lastJoinAt < JOIN_INTERVAL_MS) return;
-
     joinInProgress = true;
     const item = joinQueue.shift();
-    saveQueue();
-    resetDailyStats();
+    saveQueue(); resetDailyStats();
     lastJoinAt = Date.now();
     recentJoinAttempts.set(item.code, Date.now());
-
     try {
       pushLog('info','join',`Joining ${item.code}...`);
       const res = await sock.groupAcceptInvite(item.code);
       if (res){
         joinedGroups.set(res, { name:null, joinedAt:Date.now(), discovered:false });
         lastGreetingAt.set(res, Date.now());
-        saveGroups();
-        dailyStats.joined++;
+        saveGroups(); dailyStats.joined++;
         pushLog('success','join',`✅ Joined ${res}`);
       }
     } catch(e){
@@ -1071,9 +1116,7 @@ function scheduleMidnightJoin(){
     } finally {
       joinInProgress = false;
       const now = Date.now();
-      for (const [k, t] of recentJoinAttempts){
-        if (now - t > 30 * 60 * 1000) recentJoinAttempts.delete(k);
-      }
+      for (const [k, t] of recentJoinAttempts){ if (now - t > 30 * 60 * 1000) recentJoinAttempts.delete(k); }
     }
   }, 60000);
 }
@@ -1128,7 +1171,7 @@ async function resolvePending(id, action, payload, adminChatJid){
 }
 
 /* Download flow */
-async function startDownloadSearch(chatJid, query, msg, priority=1, lane='slow'){
+async function startDownloadSearch(chatJid, query, priority=1, lane='slow'){
   const results = await ytSearch(query, 6);
   if (!results.length){
     await sendBuffer(chatJid, { text: `Couldn't find "${query}" 😕` }, priority, lane);
@@ -1136,11 +1179,9 @@ async function startDownloadSearch(chatJid, query, msg, priority=1, lane='slow')
   }
   downloadPicks.set(chatJid, { query, results, ts:Date.now() });
   const list = results.map((r,i)=>`${i+1}. ${r.title}`).join('\n');
-  await sendBuffer(chatJid, {
-    text: `Found ${results.length} for *${query}*:\n\n${list}\n\nReply with a number (1-${results.length}) or "1,2,3" for multiple.`
-  }, priority, lane);
+  await sendBuffer(chatJid, { text: `Found ${results.length} for *${query}*:\n\n${list}\n\nReply with a number (1-${results.length}) or "1,2,3" for multiple.` }, priority, lane);
 }
-async function handleDownloadPick(chatJid, text, msg, priority=1, lane='slow'){
+async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
   const entry = downloadPicks.get(chatJid);
   if (!entry) return false;
   if (Date.now() - entry.ts > DOWNLOAD_PICK_TTL){ downloadPicks.delete(chatJid); return false; }
@@ -1169,13 +1210,13 @@ async function handleDownloadPick(chatJid, text, msg, priority=1, lane='slow'){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `🥖 *BreadBot v53 — Admin Commands*
+const COMMAND_LIST = `🥖 *BreadBot v54 — Admin Commands*
 
 *BASICS*
 !help · !ping · !status · !jobs
-!test · !testall · !aitest · !scraperstatus
-!whoami · !stats · !summary · !logs · !errors
-!count · !groups · !inbox
+!test · !testall · !aitest · !providers
+!scraperstatus · !whoami · !stats · !summary
+!logs · !errors · !count · !groups · !inbox
 
 *MAIN GROUP*
 !setmain · !main · !invite · !mylink
@@ -1197,17 +1238,12 @@ const COMMAND_LIST = `🥖 *BreadBot v53 — Admin Commands*
 !allimg <url> | <cap>
 
 *DOWNLOADS*
-!dl <q> — search YouTube → numbered pick
-!download <url> — direct
-!music <q> — mp3
-!nsfwvideo <q> — NSFW (redgifs)
-!nsfw <url> — NSFW from URL
-!nsfw on|off · !nsfwroleplay on|off
-!cleanup
+!dl <q> · !download <url> · !music <q>
+!nsfwvideo <q> · !nsfw <url>
+!nsfw on|off · !nsfwroleplay on|off · !cleanup
 
 *CONTROL*
-!pause · !resume
-!offline <mins> · !online
+!pause · !resume · !offline <mins> · !online
 !limit <n> · !unlimit
 
 34 MB cap enforced on every file.`;
@@ -1222,7 +1258,7 @@ function logRepeatedCmd(cmd, chatJid){
 async function handleAdminCommand(text, chatJid, msg){
   const args = text.slice(1).trim().split(/\s+/);
   const cmd  = args[0].toLowerCase();
-  const reply = (t)=>adminReply(chatJid, t, msg);
+  const reply = (t)=>adminReply(chatJid, t);
   logRepeatedCmd(cmd, chatJid);
 
   switch(cmd){
@@ -1232,11 +1268,23 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'resume': botPaused = false; await reply('▶️ Resumed.'); break;
     case 'offline': { const m = parseInt(args[1],10) || 30; botOfflineUntil = Date.now()+m*60000; await reply(`💤 Offline ${m}min.`); break; }
     case 'online': botOfflineUntil = 0; await reply('🟢 Online.'); break;
-    case 'limit': { const n = parseInt(args[1],10)||20; MESSAGE_FLOOD_THRESHOLD = n; await reply(`📊 Limit ${n}/s.`); break; }
+    case 'limit': { const n = Math.max(1, parseInt(args[1],10)||20); MESSAGE_FLOOD_THRESHOLD = n; await reply(`📊 Limit ${n}/s.`); break; }
     case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('📊 No limit.'); break;
     case 'jobs': {
       const s = jobs.stats();
       await reply(`⚙️ *Fast* ${s.fast.queued}/${s.fast.max} · done ${s.fast.done}\n⚙️ *Slow* ${s.slow.queued}/${s.slow.max} · done ${s.slow.done}`);
+      break;
+    }
+    case 'providers': {
+      const lines = PROVIDER_ORDER.map(n => {
+        const r = providerReport[n] || {};
+        const key = PROVIDERS[n].keys.map(k=>process.env[k]).find(v=>v&&v.trim()) ? '🔑' : '·';
+        const active = n === activeProvider ? ' ← ACTIVE' : '';
+        if (r.skipped) return `${key} ${n}: no key`;
+        if (r.ok) return `${key} ${n}: ✅ ${r.ms}ms${active}`;
+        return `${key} ${n}: ❌ ${r.status || ''} ${r.error || ''}`.slice(0,80);
+      }).join('\n');
+      await reply(`🤖 *AI Providers*\n\n${lines}\n\nActive: *${activeProvider || 'NONE'}*`);
       break;
     }
     case 'status': case 'diag': {
@@ -1246,18 +1294,19 @@ async function handleAdminCommand(text, chatJid, msg){
         `Uptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`,
         `Time: *${describeWindow()}* · NSFW: *${describeNsfw()}* · DM: *${describeDm()}*`,
         `Paused: *${botPaused}* · Offline: *${botOfflineUntil>Date.now()?'yes':'no'}*`,
-        ``,`👥 Groups: *${joinedGroups.size}* · 💬 DMs: *${activeDMs.size}*`,
+        ``, `👥 Groups: *${joinedGroups.size}* · 💬 DMs: *${activeDMs.size}*`,
         `⭐ Main: *${mainGroupJid||'not set'}*`,`📋 Queue: *${joinQueue.length}*`,
         `⚙️ Fast: *${s.fast.queued}* · Slow: *${s.slow.queued}*`,
         `🎯 Focus: *${f.currentState}*`,
-        ``,`📈 *Today*`,`DM: *${st.dmsReplied}* · Media: *${st.picsSent+st.videosSent}*`,
+        `🤖 AI: *${activeProvider || 'NONE'}*`,
+        ``, `📈 *Today*`,`DM: *${st.dmsReplied}* · Media: *${st.picsSent+st.videosSent}*`,
         `NSFW: *${st.nsfwSent}* · Downloads: *${st.downloads}*`,
         `Broadcasts: *${st.broadcastsSent}* · Dropped: *${st.messagesDropped}*`,
         ``,`👑 Admin LIDs: *${[...adminLids].join(', ')||'none'}*`
       ].join('\n'));
       break;
     }
-    case 'count': await reply(`Groups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nMain: *${mainGroupJid||'not set'}*`); break;
+    case 'count': await reply(`Groups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nMain: *${mainGroupJid||'not set'}*\nAI: *${activeProvider||'NONE'}*`); break;
     case 'groups': {
       if (!joinedGroups.size){ await reply('No groups.'); return; }
       const list = [...joinedGroups.entries()].map(([j],i)=>`${i+1}. ${j===mainGroupJid?'⭐ ':''}${j}`).join('\n');
@@ -1417,7 +1466,7 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'dl': {
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('❌ `!dl <song or video>`'); return; }
-      await startDownloadSearch(chatJid, q, msg, 0, 'fast');
+      await startDownloadSearch(chatJid, q, 0, 'fast');
       break;
     }
     case 'download': {
@@ -1526,13 +1575,19 @@ async function handleAdminCommand(text, chatJid, msg){
       break;
     }
     case 'aitest': {
-      const r = await testAIRaw();
-      await reply(r.ok ? `✅ AI works (${r.ms}ms)` : `❌ ${r.status||''} ${r.error}`);
+      const r = await testAllProviders();
+      const lines = PROVIDER_ORDER.map(n => {
+        const x = r[n];
+        if (!x) return `${n}: —`;
+        if (x.ok) return `${n}: ✅ ${x.ms}ms`;
+        return `${n}: ❌ ${x.status||''} ${x.error||'fail'}`;
+      }).join('\n');
+      await reply(`🧪 *AI Test Results*\n\n${lines}\n\nActive: *${activeProvider||'NONE'}*`);
       break;
     }
     case 'test': {
       const s = jobs.stats();
-      await reply(`✅ Bot: *${botNumber}*\nStatus: *${connectionStatus}*\nFast: *${s.fast.queued}*\nSlow: *${s.slow.queued}*`);
+      await reply(`✅ Bot: *${botNumber}*\nStatus: *${connectionStatus}*\nAI: *${activeProvider||'NONE'}*\nFast: *${s.fast.queued}*\nSlow: *${s.slow.queued}*`);
       break;
     }
     case 'testall': {
@@ -1540,16 +1595,24 @@ async function handleAdminCommand(text, chatJid, msg){
       const tests = [];
       const s1 = await scraperSearch('test'); tests.push(`Search: ${s1.ok?`✅ ${s1.images.length}`:'❌'}`);
       const s2 = await scraperGif('funny'); tests.push(`GIF: ${s2.ok?`✅ ${s2.gifs.length}`:'❌'}`);
-      const rw = await testAIRaw(); tests.push(`AI: ${rw.ok?`✅ ${rw.ms}ms`:`❌ ${rw.error}`}`);
+      const rw = await testAllProviders();
+      for (const n of PROVIDER_ORDER){
+        const x = rw[n];
+        if (!x) continue;
+        if (x.skipped) tests.push(`${n}: no key`);
+        else if (x.ok) tests.push(`${n}: ✅ ${x.ms}ms`);
+        else tests.push(`${n}: ❌ ${x.status||''}`);
+      }
       tests.push(`WA: ${connectionStatus==='connected'?'✅':'❌'}`);
       tests.push(`Main: ${mainGroupJid?'✅':'❌'}`);
       tests.push(`NSFW DL: ${RedgifsDownloader?'✅':'❌'}`);
+      tests.push(`Groups: ${joinedGroups.size} · DMs: ${activeDMs.size}`);
       await reply(['🧪 *Tests*','',...tests].join('\n'));
       break;
     }
     case 'stats': case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply(`📊 *Today*\nJoined: *${s.joined}*\nDM: *${s.dmsReplied}*\nMedia: *${s.picsSent+s.videosSent}*\nNSFW: *${s.nsfwSent}*\nDownloads: *${s.downloads}*\nBroadcasts: *${s.broadcastsSent}*`);
+      await reply(`📊 *Today*\nJoined: *${s.joined}*\nDM: *${s.dmsReplied}*\nMedia: *${s.picsSent+s.videosSent}*\nNSFW: *${s.nsfwSent}*\nDownloads: *${s.downloads}*\nBroadcasts: *${s.broadcastsSent}*\nAI: *${activeProvider||'NONE'}*`);
       break;
     }
     case 'whoami': {
@@ -1567,10 +1630,8 @@ class AdBuilder {
   static build({ title, body, cta, link, footer, style='fancy' }){
     if (style === 'bold') return [`*${title}*`, '', body, cta?`\n*${cta}*`:'', link?`\n${link}`:'', footer?`\n_${footer}_`:''].filter(Boolean).join('\n');
     if (style === 'minimal') return [title, body, cta, link].filter(Boolean).join('\n\n');
-    return ['╔══════════════════════════╗',
-      `║ ✨ ${(title||'').toUpperCase()} ✨`,
-      '╚══════════════════════════╝', '', body, '',
-      cta?`*${cta}*`:'', link||'', footer?`\n_${footer}_`:''].filter(Boolean).join('\n');
+    return ['╔══════════════════════════╗',`║ ✨ ${(title||'').toUpperCase()} ✨`,'╚══════════════════════════╝','',body,'',
+      cta?`*${cta}*`:'',link||'',footer?`\n_${footer}_`:''].filter(Boolean).join('\n');
   }
 }
 
@@ -1594,54 +1655,7 @@ function checkFlood(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SCHEDULERS
- * ══════════════════════════════════════════════════════════════ */
-const GREETING_PHRASES = {
-  morning:['Morning all ☀️','Mangwanani guys ☀️','Good morning fam'],
-  midday:['Hi guys 👋','Hey everyone','Hello fam 😊'],
-  evening:['Good evening fam 🌆','Evening all 👋','Manheru guys'],
-  night:['Good night all 🌙','Manheru akanaka 🌙','Sleep well fam']
-};
-function getTimeOfDay(){
-  const h = localHour();
-  if (h>=5 && h<12) return 'morning';
-  if (h>=12 && h<17) return 'midday';
-  if (h>=17 && h<21) return 'evening';
-  return 'night';
-}
-function pickGreeting(p){ const pool = GREETING_PHRASES[p] || GREETING_PHRASES.midday; return pool[Math.floor(Math.random()*pool.length)]; }
-function scheduleGreetings(){
-  setInterval(async ()=>{
-    if (!sock || connectionStatus!=='connected' || !joinedGroups.size || botPaused || Date.now() < botOfflineUntil) return;
-    const now = Date.now();
-    const minMs = GREETING_MIN_HOURS*3600000, maxMs = GREETING_MAX_HOURS*3600000;
-    for (const [jid] of joinedGroups){
-      const sinceLast = now - (lastGreetingAt.get(jid)||0);
-      if (sinceLast < minMs) continue;
-      const progress = (sinceLast - minMs) / (maxMs - minMs);
-      if (Math.random() > Math.min(progress, 1)) continue;
-      try {
-        await sendBuffer(jid, { text: pickGreeting(getTimeOfDay()) }, 3, 'slow');
-        lastGreetingAt.set(jid, now); resetDailyStats(); dailyStats.greetingsSent++;
-      } catch(e){}
-    }
-    saveGroups();
-  }, 900000);
-}
-function scheduleDailyReport(){
-  setInterval(async ()=>{
-    if (!sock || connectionStatus!=='connected') return;
-    const now = new Date(); const today = now.toISOString().slice(0,10);
-    if (now.getHours() !== DAILY_REPORT_HOUR || lastDailyReportDate === today) return;
-    lastDailyReportDate = today; resetDailyStats(); const s = dailyStats;
-    try {
-      await sock.sendMessage(ADMIN_JID, { text: `📊 Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}` });
-    } catch(e){}
-  }, 60000);
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  DM PROCESSING  — conversation memory + anti-repeat
+ *  DM PROCESSING
  * ══════════════════════════════════════════════════════════════ */
 async function processDM(item){
   const { msg, text, chatJid, senderJid, pushName, phone, intent, lang } = item;
@@ -1654,12 +1668,10 @@ async function processDM(item){
       if (!results.length){ await sendBuffer(chatJid, { text:`Couldn't find "${intent.query}" 😕` }, 2, 'slow'); return; }
       const top = results[0];
       await sendBuffer(chatJid, { text:`🎵 Found *${top.title}*. Downloading...` }, 2, 'slow');
-      const { filePath, sizeBytes } = await y2mateDownloadMusic(top.id, 'mp3');
+      const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
       await sendMediaFile(chatJid, filePath, `🎵 ${top.title}`, 2, 'slow');
       resetDailyStats(); dailyStats.downloads++;
-    } catch(e){
-      await sendBuffer(chatJid, { text:`❌ ${e.message}` }, 2, 'slow');
-    }
+    } catch(e){ await sendBuffer(chatJid, { text:`❌ ${e.message}` }, 2, 'slow'); }
     return;
   }
 
@@ -1705,33 +1717,23 @@ async function processDM(item){
     return;
   }
 
-  // Free chat with memory (last 5 turns)
   const hist = userHistories.get(senderJid) || [];
   const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
-  const transcript = recentTurns.map(h =>
-    `${h.role === 'bot' ? 'Abby' : 'Them'}: ${h.text}`
-  ).join('\n');
+  const transcript = recentTurns.map(h => `${h.role === 'bot' ? 'Abby' : 'Them'}: ${h.text}`).join('\n');
   const fullPrompt = transcript
     ? `Conversation so far:\n${transcript}\n\nThem: ${text}\n\nReply as Abby. This is a NEW reply — do NOT repeat anything you said before. Vary your wording completely.`
     : text;
 
-  const sys = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ${langName}. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you're an AI. Be casual, playful, and VARIED — never give the same reply twice. If the conversation continues, refer back to what you said earlier.`;
-
+  const sys = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ${langName}. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you're an AI. Be casual, playful, and VARIED — never give the same reply twice.`;
   let aiReply = await askAI(fullPrompt, sys);
   if (!aiReply) return;
 
   const lastBot = hist.filter(h => h.role === 'bot').slice(-1)[0];
   if (lastBot && lastBot.text.toLowerCase().trim() === aiReply.toLowerCase().trim()){
     pushLog('warn','ai','Duplicate blocked — regenerating');
-    const retry = await askAI(
-      `You already said: "${lastBot.text}". Say something COMPLETELY DIFFERENT.`,
-      sys
-    );
-    if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()){
-      aiReply = retry;
-    } else {
-      return;
-    }
+    const retry = await askAI(`You already said: "${lastBot.text}". Say something COMPLETELY DIFFERENT.`, sys);
+    if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()) aiReply = retry;
+    else return;
   }
 
   hist.push({ role:'user', text, ts:Date.now() });
@@ -1748,9 +1750,8 @@ async function processDMQueue(){
   const item = dmQueue.shift();
   if (!item) return;
   dmQueueProcessing = true;
-  try {
-    await focus.run(item.chatJid, async ()=>{ await processDM(item); });
-  } catch(e){
+  try { await focus.run(item.chatJid, async ()=>{ await processDM(item); }); }
+  catch(e){
     pushLog('error','dmqueue',e.message);
     if (e.message === 'Focus lock timeout') dmQueue.unshift(item);
   } finally {
@@ -1764,9 +1765,7 @@ function enqueueDM(item){
     pushLog('warn','queue',`DM queue full (${DM_QUEUE_MAX})`);
     return false;
   }
-  dmQueue.push(item);
-  processDMQueue();
-  return true;
+  dmQueue.push(item); processDMQueue(); return true;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1856,9 +1855,7 @@ async function handleMessage(msg){
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
     const h = userHistories.get(senderJid);
     const last = h[h.length-1];
-    if (!last || last.text !== text || last.role !== 'user'){
-      h.push({ role:'user', text, ts:Date.now() });
-    }
+    if (!last || last.text !== text || last.role !== 'user') h.push({ role:'user', text, ts:Date.now() });
     if (h.length > USER_HISTORY_SIZE * 2) h.shift();
   }
 
@@ -1870,13 +1867,13 @@ async function handleMessage(msg){
   }
 
   if (text && downloadPicks.has(chatJid)){
-    const ok = await handleDownloadPick(chatJid, text, msg, isAdmin?0:2, isAdmin?'fast':'slow');
+    const ok = await handleDownloadPick(chatJid, text, isAdmin?0:2, isAdmin?'fast':'slow');
     if (ok) return;
   }
 
   const dl = text ? detectDownloadIntent(text) : null;
   if (dl && dl.query){
-    await startDownloadSearch(chatJid, dl.query, msg, isAdmin?0:2, isAdmin?'fast':'slow');
+    await startDownloadSearch(chatJid, dl.query, isAdmin?0:2, isAdmin?'fast':'slow');
     return;
   }
 
@@ -1886,15 +1883,9 @@ async function handleMessage(msg){
     const directed = isDirectedAtBot(msg, text);
 
     if (isMain && text){
-      if (detectGroupLinkRequest(text)){
-        await sendBuffer(chatJid, { text:`🔗 Join: ${ADMIN_GROUP_LINK}` }, 3, 'slow');
-        return;
-      }
+      if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:`🔗 Join: ${ADMIN_GROUP_LINK}` }, 3, 'slow'); return; }
       const isNsfw = detectNsfw(text);
-      if (isNsfw && !isAdmin && !isNsfwWindow()){
-        await sendBuffer(chatJid, { text:'Not right now 😅 try after 9pm' }, 3, 'slow');
-        return;
-      }
+      if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now 😅 try after 9pm' }, 3, 'slow'); return; }
       const gIntent = detectMediaIntent(text);
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
@@ -1933,10 +1924,7 @@ async function handleMessage(msg){
       const lang = detectLanguage(text);
       const sys = `You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ${LANG_NAMES[lang]}. Mix light Shona. Never say you're AI. ${analysis?`Members often use: ${analysis.topWords.slice(0,6).join(', ')}`:''}`;
       const aiReply = await askAI(text, sys);
-      if (aiReply){
-        await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow');
-        resetDailyStats(); dailyStats.greetingsSent++;
-      }
+      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow'); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
     }
 
@@ -1945,10 +1933,7 @@ async function handleMessage(msg){
       const lang = detectLanguage(text);
       const sys = `You are Abby Faith Sithole, 23, Harare Zimbabwe. Someone is talking TO you in a group. Reply SHORT, casual, in ${LANG_NAMES[lang]}. Never mention AI. ${analysis?`Style: ${analysis.topWords.slice(0,5).join(', ')}`:''}`;
       const aiReply = await askAI(text, sys);
-      if (aiReply){
-        await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow');
-        resetDailyStats(); dailyStats.greetingsSent++;
-      }
+      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow'); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
     }
 
@@ -1967,7 +1952,7 @@ async function handleMessage(msg){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  CONNECT BOT — announces admin identity to Live Messages
+ *  CONNECT BOT — RAW SOCKET
  * ══════════════════════════════════════════════════════════════ */
 async function connectBot(){
   if (isConnecting) return;
@@ -1989,39 +1974,9 @@ async function connectBot(){
       keepAliveIntervalMs: 30000
     });
 
-    if (wrapSocket){
-      try {
-        sock = wrapSocket(baseSocket, {
-          groupOpGuard:{ limits:{ add:{ max:3, windowMs:600000 } } },
-          legitimacySignals:{ typoProbability:0.02 },
-          jidCanonicalizer:{ enabled:true, canonical:'pn' },
-          circuitBreaker:{
-            enabled:true,
-            failureThreshold:10,
-            successThreshold:2,
-            timeout:30000,
-            halfOpenMaxCalls:2
-          }
-        });
-        pushLog('success','antiban','Wrapped');
-      } catch(e){
-        pushLog('warn','antiban',`wrapSocket failed: ${e.message} — using raw socket`);
-        sock = baseSocket;
-      }
-    } else { sock = baseSocket; pushLog('warn','antiban','Not available'); }
-
-    if (SessionHealthMonitor){
-      try {
-        healthMonitor = new SessionHealthMonitor({
-          badMacThreshold: 3, badMacWindowMs: 60000,
-          onDegraded:(s)=>{
-            pushLog('error','health',`DEGRADED: ${s.badMacCount} Bad MACs`);
-            resetDailyStats(); dailyStats.badMacs = s.badMacCount;
-          }
-        });
-        pushLog('info','health','Monitor started');
-      } catch(e){ pushLog('warn','health',e.message); }
-    }
+    // ✅ Raw socket — baileys-antiban v4 wrapper removed (fixes circuitBreaker crash)
+    sock = baseSocket;
+    pushLog('info','antiban','Raw socket (antiban wrapper disabled)');
 
     sock.ev.on('connection.update', async (update)=>{
       const { connection, lastDisconnect, qr } = update;
@@ -2039,55 +1994,52 @@ async function connectBot(){
         pushLog('success','bot',`Connected as ${botNumber}`);
         pushLog('info','time',`${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`);
 
-        // Entropy service with typeof guards
-        if (createHumanEntropyService){
-          try {
-            entropyService = createHumanEntropyService(sock, botJid,
-              { enabled:true, minIntervalMs:7200000, maxIntervalMs:21600000 });
-            if (entropyService && typeof entropyService.start === 'function'){
-              try { entropyService.start(); pushLog('success','entropy','Started'); }
-              catch(e){ pushLog('warn','entropy',`start() failed: ${e.message} — disabled`); entropyService = null; }
-            } else {
-              pushLog('warn','entropy','No start() method — disabled');
-              entropyService = null;
-            }
-          } catch(e){
-            pushLog('warn','entropy',`init failed: ${e.message} — disabled`);
-            entropyService = null;
-          }
-        }
-
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
 
         // ══════════════════════════════════════════════════════
-        //  ADMIN ANNOUNCEMENT TO LIVE MESSAGES
-        //  Fires immediately on connect — before any admin message
-        //  Shows phone + saved LIDs in the panel
+        //  AI PROVIDER AUTO-DETECT
+        // ══════════════════════════════════════════════════════
+        try {
+          await detectAIBackend();
+        } catch(e){
+          pushLog('error','ai',`detect failed: ${e.message}`);
+        }
+
+        // ══════════════════════════════════════════════════════
+        //  LIVE MESSAGE: bot online + admin credentials
         // ══════════════════════════════════════════════════════
         const lidList = [...adminLids];
         pushLiveMessage({
           id: 'boot-' + Date.now(),
           ts: new Date().toISOString(),
-          chatJid: ADMIN_JID,
-          chatType: 'system',
-          senderJid: botJid,
-          senderName: 'BOT ONLINE',
+          chatJid: ADMIN_JID, chatType: 'system',
+          senderJid: botJid, senderName: 'BOT ONLINE',
           phone: ADMIN_PHONE,
           lid: lidList.join(', ') || 'none',
-          text: `✅ Bot ONLINE as ${botNumber}\n👑 Admin: ${ADMIN_PHONE}\n🆔 LIDs: ${lidList.join(', ') || 'none'}\n🌐 ${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`,
-          mediaType: 'system',
-          isAdmin: true
+          text: `✅ Bot ONLINE as ${botNumber}\n👑 Admin: ${ADMIN_PHONE}\n🆔 LIDs: ${lidList.join(', ') || 'none'}\n🤖 AI: ${activeProvider || 'NONE'}\n🌐 ${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`,
+          mediaType: 'system', isAdmin: true
         });
         pushLog('success','admin',`Live-log: ONLINE announcement — admin ${ADMIN_PHONE}`);
 
-        // DM the admin the credentials
+        // ══════════════════════════════════════════════════════
+        //  DM ADMIN the boot summary
+        // ══════════════════════════════════════════════════════
         try {
+          const providerSummary = PROVIDER_ORDER.map(n => {
+            const x = providerReport[n];
+            if (!x) return '';
+            if (x.skipped) return `· ${n}: no key`;
+            if (x.ok) return `${n===activeProvider?'✅':'·'} ${n}: ${x.ms}ms`;
+            return `❌ ${n}: ${x.status||''} ${(x.error||'').slice(0,40)}`;
+          }).filter(Boolean).join('\n');
+
           const sent = await sock.sendMessage(ADMIN_JID, { text:
             `✅ *BreadBot ONLINE*\n` +
             `📱 Bot: ${botNumber}\n` +
             `👑 Admin phone: ${ADMIN_PHONE}\n` +
             `🆔 Admin LIDs: ${lidList.join(', ') || 'none'}\n` +
-            `📁 Saved LIDs file: admin_lids.json\n\n` +
+            `📁 Saved: admin_lids.json\n\n` +
+            `🤖 *AI Providers*\n${providerSummary}\n\n` +
             `⭐ Main: ${mainGroupJid||'not set'}\n` +
             `👥 Groups: ${joinedGroups.size}\n` +
             `💬 DMs: ${activeDMs.size}\n` +
@@ -2099,33 +2051,47 @@ async function connectBot(){
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin',`DM notify failed: ${e.message}`); }
 
-        // Second Live entry showing the notification was sent
+        // ══════════════════════════════════════════════════════
+        //  If no AI works — alert admin loudly
+        // ══════════════════════════════════════════════════════
+        if (!activeProvider){
+          try {
+            const sent = await sock.sendMessage(ADMIN_JID, { text:
+              `⚠️ *NO AI BACKEND WORKS*\n\n` +
+              `Tested: ${PROVIDER_ORDER.join(', ')}\n\n` +
+              `Set one of these in Render → Environment:\n` +
+              `• REWIND_KEY\n` +
+              `• OPENAI_API_KEY\n` +
+              `• VENICE_KEY\n` +
+              `• GEMINI_KEY\n\n` +
+              `Bot will NOT reply to DMs until one works.`
+            });
+            if (sent?.key?.id) markBotSent(sent.key.id);
+          } catch(e){}
+          pushLiveMessage({
+            id: 'ai-fail-' + Date.now(), ts: new Date().toISOString(),
+            chatJid: ADMIN_JID, chatType: 'system',
+            senderJid: botJid, senderName: 'AI ERROR',
+            phone: ADMIN_PHONE, lid: lidList.join(', '),
+            text: '⚠️ NO AI BACKEND WORKS — check env: REWIND_KEY, OPENAI_API_KEY, VENICE_KEY, GEMINI_KEY',
+            mediaType: 'system', isAdmin: true
+          });
+        }
+
+        // Second Live entry confirming DM
         pushLiveMessage({
-          id: 'notify-' + Date.now(),
-          ts: new Date().toISOString(),
-          chatJid: ADMIN_JID,
-          chatType: 'system',
-          senderJid: botJid,
-          senderName: botNumber + ' (BOT)',
-          phone: ADMIN_PHONE,
-          lid: lidList.join(', ') || 'none',
-          text: `📨 Sent ONLINE notification + credentials to admin`,
-          mediaType: 'system',
-          isAdmin: true
+          id: 'notify-' + Date.now(), ts: new Date().toISOString(),
+          chatJid: ADMIN_JID, chatType: 'system',
+          senderJid: botJid, senderName: botNumber + ' (BOT)',
+          phone: ADMIN_PHONE, lid: lidList.join(', ') || 'none',
+          text: `📨 Sent ONLINE notification + AI status to admin`,
+          mediaType: 'system', isAdmin: true
         });
       }
       if (connection === 'close'){
         isConnecting = false;
         const code = getDisconnectStatusCode(lastDisconnect);
-        let cls = null;
-        if (classifyDisconnect){ try { cls = classifyDisconnect(code); } catch(e){} }
-        if (cls) pushLog('warn','bot',`Disconnected (${code}) — ${cls.message} [${cls.category}]`);
-        else pushLog('warn','bot',`Disconnected (${code})`);
-
-        if (entropyService && typeof entropyService.stop === 'function'){
-          try { entropyService.stop(); } catch(e){}
-        }
-        entropyService = null;
+        pushLog('warn','bot',`Disconnected (${code})`);
 
         if (manualDisconnect){ connectionStatus = 'disconnected'; return; }
         if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
@@ -2154,9 +2120,7 @@ async function connectBot(){
           pushLog('warn','bot',`515 retry ${delay/1000}s (attempt ${consecutive515})`);
           await new Promise(r=>setTimeout(r, delay));
           const since = Date.now() - lastReconnectAt;
-          if (since < MIN_RECONNECT_INTERVAL_MS){
-            await new Promise(r=>setTimeout(r, MIN_RECONNECT_INTERVAL_MS - since));
-          }
+          if (since < MIN_RECONNECT_INTERVAL_MS) await new Promise(r=>setTimeout(r, MIN_RECONNECT_INTERVAL_MS - since));
           lastReconnectAt = Date.now();
           try { sock.ev.removeAllListeners('connection.update'); } catch(e){}
           try { sock.ev.removeAllListeners('creds.update'); } catch(e){}
@@ -2166,10 +2130,9 @@ async function connectBot(){
           return connectBot();
         }
 
-        const shouldReconnect = cls ? cls.shouldReconnect : true;
-        if (shouldReconnect && reconnectAttempts < MAX_RECONNECT){
+        if (reconnectAttempts < MAX_RECONNECT){
           reconnectAttempts++;
-          const delay = cls?.backoffMs || Math.min(5000 * reconnectAttempts, 30000);
+          const delay = Math.min(5000 * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
           pushLog('warn','bot',`Retry ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
           setTimeout(()=>{ try { sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
@@ -2184,12 +2147,8 @@ async function connectBot(){
     sock.ev.on('group-participants.update', async (u)=>{ try { await handleParticipants(u); } catch(e){ pushLog('error','group',e.message); } });
     sock.ev.on('messages.upsert', async ({ messages })=>{
       for (const msg of messages || []){
-        try {
-          if (entropyService && typeof entropyService.addRecentContact === 'function' && msg.key?.remoteJid && !msg.key.fromMe){
-            try { entropyService.addRecentContact(msg.key.remoteJid, msg.key); } catch(e){}
-          }
-          await handleMessage(msg);
-        } catch(e){ pushLog('error','handler',e.message); }
+        try { await handleMessage(msg); }
+        catch(e){ pushLog('error','handler',e.message); }
       }
     });
   } catch(err){
@@ -2201,10 +2160,6 @@ async function connectBot(){
 
 async function disconnectBot(){
   manualDisconnect = true;
-  if (entropyService && typeof entropyService.stop === 'function'){
-    try { entropyService.stop(); } catch(e){}
-  }
-  entropyService = null;
   if (sock){ try { sock.end(undefined); } catch(e){} sock = null;
     connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; botNumber = null;
     pushLog('warn','bot','Disconnected'); }
@@ -2234,13 +2189,14 @@ app.get('/health',(req,res)=>res.json({
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
   dmQueue: dmQueue.length, dmQueueMax: DM_QUEUE_MAX,
   adminLids: [...adminLids],
+  ai: { active: activeProvider, providers: providerReport },
   consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
 }));
 app.get('/api/status',(req,res)=>res.json({
   status: connectionStatus, botNumber,
   groups: joinedGroups.size, dms: activeDMs.size,
   queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
-  adminLids: [...adminLids]
+  adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
 }));
 app.get('/admin/qr',async (req,res)=>{
   if (!qrDataUri) return res.status(404).json({ error:'No QR' });
@@ -2274,7 +2230,8 @@ app.get('/admin/messages-stream',(req,res)=>{
   msgClients.add(res); req.on('close',()=>msgClients.delete(res));
 });
 
-app.get('/admin/aitest',async (req,res)=>res.json(await testAIRaw()));
+app.get('/admin/aitest',async (req,res)=>res.json(await testAllProviders()));
+app.get('/admin/providers',async (req,res)=>res.json({ active: activeProvider, report: providerReport }));
 app.get('/admin/scraperstatus',async (req,res)=>res.json(await scraperStatus()));
 app.get('/admin/sched',(req,res)=>res.json({
   lanes: jobs.stats(), focus: focus.stats(),
@@ -2301,17 +2258,17 @@ app.get('/admin/stats',(req,res)=>{
     paused: botPaused,
     offlineUntil: botOfflineUntil > Date.now() ? new Date(botOfflineUntil).toISOString() : null,
     mainGroup: mainGroupJid,
-    antibanActive: !!wrapSocket, entropyRunning: !!entropyService,
+    antibanActive: false, entropyRunning: false,
     floodLimit: MESSAGE_FLOOD_THRESHOLD,
     nsfwDownloader: !!RedgifsDownloader,
-    rewindConfigured: !!process.env.REWIND_KEY
+    ai: { active: activeProvider, providers: providerReport }
   });
 });
 
-/* ─── HTML panel with ADMIN badge ─── */
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v53</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700;letter-spacing:1px}.sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.msg-admin{background:#2d1517;border-left:3px solid #da3633 !important}.msg-sys{background:#1a1d3a;border-left:3px solid #6e40c9 !important}</style></head><body>
-<h1>🥖 BreadBot v53</h1><div class="sub">Admin: <b id="ap">—</b> · LIDs: <b id="al">—</b> · Window: <b id="w">—</b> · NSFW: <b id="ns">—</b> · DM: <b id="dm">—</b></div>
+/* ─── HTML panel ─── */
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v54</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.ai-badge{background:#238636;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}</style></head><body>
+<h1>🥖 BreadBot v54</h1><div class="sub">Admin: <b id="ap">—</b> · LIDs: <b id="al">—</b> · Window: <b id="w">—</b> · NSFW: <b id="ns">—</b> · DM: <b id="dm">—</b> · AI: <b id="ai">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div><span class="dot" id="dot"></span><span id="st">—</span></div>
 <div class="row"><span>Bot</span><span class="val" id="bn">—</span></div>
@@ -2325,6 +2282,8 @@ const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 <button class="danger" onclick="a('disconnect')">Disconnect</button>
 <button onclick="a('pause')">Pause</button><button onclick="a('resume')">Resume</button>
 <button onclick="a('offline')">Off 30m</button><button onclick="a('online')">Online</button></div></div>
+<div class="card"><h2>🤖 AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
+<div style="margin-top:8px"><button onclick="testAI()">🧪 Test all</button></div></div>
 <div class="card"><h2>Lanes</h2>
 <div class="row"><span>Fast queue</span><span class="val" id="fq">—</span></div>
 <div class="row"><span>Fast done</span><span class="val" id="fd">—</span></div>
@@ -2354,6 +2313,14 @@ const $=id=>document.getElementById(id);
 async function api(p,m='GET',body){const o={method:m};if(body){o.headers={'Content-Type':'application/json'};o.body=JSON.stringify(body);}const r=await fetch('/admin/'+p,o);return r.json();}
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setS(s){$('dot').className='dot s-'+s;$('st').textContent=s;}
+async function testAI(){
+  const b=$('aiList');
+  b.innerHTML='Testing...';
+  const r=await api('aitest');
+  b.innerHTML=Object.entries(r).map(([k,v])=>
+    v.ok?`<div>✅ ${k}: ${v.ms}ms</div>`:`<div style="color:#f85149">❌ ${k}: ${v.status||''} ${esc(v.error||'')}</div>`
+  ).join('');
+}
 async function refresh(){
   try{const d=await api('stats');setS(d.status);
   $('ap').textContent=d.adminPhone||'—';
@@ -2361,6 +2328,7 @@ async function refresh(){
   $('w').textContent=(d.window&&d.window.time)||'—';
   $('ns').textContent=(d.window&&d.window.nsfw)||'—';
   $('dm').textContent=(d.window&&d.window.dmAI)||'—';
+  $('ai').textContent=(d.ai&&d.ai.active)||'NONE';
   $('bn').textContent=d.botNumber||'—';
   const u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
   $('up').textContent=h+'h '+m+'m '+s+'s';
@@ -2380,6 +2348,14 @@ async function refresh(){
   $('md').textContent=(t.picsSent||0)+(t.videosSent||0);
   $('nsf').textContent=t.nsfwSent||0;$('dls').textContent=t.downloads||0;
   $('bc').textContent=t.broadcastsSent||0;$('drp').textContent=t.messagesDropped||0;
+  // AI providers
+  const pr=(d.ai&&d.ai.providers)||{};
+  $('aiList').innerHTML=Object.entries(pr).map(([n,v])=>{
+    const active = (d.ai&&d.ai.active)===n ? ' <span class="ai-badge">ACTIVE</span>' : '';
+    if (v.skipped) return `<div style="opacity:0.5">· ${n}: no key</div>`;
+    if (v.ok) return `<div>✅ ${n}: ${v.ms}ms${active}</div>`;
+    return `<div style="color:#f85149">❌ ${n}: ${v.status||''} ${esc(v.error||'')}</div>`;
+  }).join('') || '<div style="opacity:0.5">Not tested yet</div>';
   const q=await api('qr-data');
   if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
   else{$('qrImg').style.display='none';}
@@ -2388,8 +2364,9 @@ async function refresh(){
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
 function logs(){const es=new EventSource('/admin/logs');es.onmessage=e=>{try{const en=JSON.parse(e.data);const div=document.createElement('div');const t=new Date(en.ts).toLocaleTimeString();div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);const b=$('logs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};es.onerror=()=>{es.close();setTimeout(logs,5000);};}
 function msgs(){const es=new EventSource('/admin/messages-stream');es.onmessage=e=>{try{const m=JSON.parse(e.data);const div=document.createElement('div');
-  div.className='msg-row'+(m.isAdmin?' msg-admin':'')+(m.mediaType==='system'?' msg-sys':'');
-  div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4px';div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
+  div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4px';
+  div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
+  div.style.background=m.mediaType==='system'?'#1a1d3a':(m.isAdmin?'#2d1517':'transparent');
   const badge = m.mediaType==='system' ? '<span class="sys-badge">SYSTEM</span>' : (m.isAdmin ? '<span class="admin-badge">ADMIN</span>' : '');
   div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' · <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' · 📱 '+esc(m.phone)+' · 🆔 '+esc(m.lid)+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
   const b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);
@@ -2414,9 +2391,7 @@ setInterval(()=>{
 }, 60000);
 setInterval(()=>{
   const now = Date.now();
-  for (const [k, t] of antilinkWarnCooldown){
-    if (now - t > 10 * 60 * 1000) antilinkWarnCooldown.delete(k);
-  }
+  for (const [k, t] of antilinkWarnCooldown){ if (now - t > 10 * 60 * 1000) antilinkWarnCooldown.delete(k); }
 }, 120000);
 
 /* ══════════════════════════════════════════════════════════════
@@ -2426,23 +2401,25 @@ loadState();
 loadGroupSettings();
 loadLearningData();
 
-app.listen(PORT, ()=>{
+app.listen(PORT, async ()=>{
   console.log(`🌐 Port ${PORT}`);
   console.log(`👤 Admin phone: ${ADMIN_PHONE}`);
   console.log(`🔑 Admin LIDs: ${[...adminLids].join(', ')||'none'}`);
   console.log(`⭐ Main group: ${mainGroupJid||'not set'}`);
   console.log(`🕐 ${describeWindow()} · DM AI: ${describeDm()} · NSFW: ${describeNsfw()}`);
-  console.log(`⚙️ Lanes — fast max ${FAST_LANE_MAX}, slow max ${SLOW_LANE_MAX}`);
-  console.log(`📦 Media max: 34 MB (all files)`);
+  console.log(`📦 Media max: 34 MB`);
   console.log(`🔎 Scraper: ${SCRAPER_URL}`);
-  console.log(`🔞 NSFW DL: ${RedgifsDownloader ? 'enabled' : 'not installed (npm i redgifs-downloader)'}`);
-  console.log(`🤖 AI key: ${AI_KEY ? 'configured (' + (process.env.REWIND_KEY ? 'REWIND_KEY' : 'fallback') + ')' : 'MISSING — set REWIND_KEY'}`);
+  console.log(`🔞 NSFW DL: ${RedgifsDownloader ? 'enabled' : 'not installed'}`);
+  console.log(`🤖 Testing AI providers...`);
   pushLog('info','system',`Boot port ${PORT}`);
   pushLog('info','system',`Admin: ${ADMIN_PHONE} — LIDs: ${[...adminLids].join(', ')||'none'}`);
-  pushLog('info','system',`Main group: ${mainGroupJid||'not set'}`);
-  pushLog('info','system',`Lanes fast=${FAST_LANE_MAX} slow=${SLOW_LANE_MAX}`);
-  pushLog('info','system',`Media cap 34MB on all files`);
-  pushLog('info','system',`AI: ${AI_KEY ? 'REWIND_KEY loaded' : 'NO KEY — check env'}`);
+  pushLog('info','system',`Main: ${mainGroupJid||'not set'}`);
+
+  // Pre-test AI before connecting so boot log shows status
+  await detectAIBackend();
+  console.log(`🤖 Active AI: ${activeProvider || 'NONE'}`);
+  pushLog('info','system',`AI backend: ${activeProvider || 'NONE'}`);
+
   scheduleGreetings();
   scheduleDailyReport();
   scheduleMidnightJoin();

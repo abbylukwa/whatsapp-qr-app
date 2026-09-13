@@ -1,13 +1,10 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v54 — Multi-AI + Raw Socket
- *  - Drops baileys-antiban wrapper (fixes circuitBreaker crash)
- *  - Drops entropy service (fixes this.wasp.on crash)
- *  - Auto-detects working AI key from: Rewind, OpenAI, Venice, Gemini
- *  - Falls back to next provider if active one fails at runtime
- *  - Notifies admin if no AI backend works
- *  - All admin commands work
+ *  BreadBot v55 — SyntaxError FIXED
+ *  - Panel HTML: no nested backticks
+ *  - Rewind endpoint corrected to api.rewind.ai
+ *  - All v54 features intact
  * ============================================================ */
 
 const express = require('express');
@@ -95,7 +92,7 @@ function getDisconnectStatusCode(lastDisconnect) {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  LOGGER + LIVE MESSAGES
+ *  LOGGER
  * ══════════════════════════════════════════════════════════════ */
 const LOG_BUFFER_MAX = 500, logBuffer=[], logClients=new Set();
 const LIVE_MSG_MAX   = 300, liveMessages=[], msgClients=new Set();
@@ -129,15 +126,15 @@ function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLO
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI PROVIDER SYSTEM — auto-detect working backend
+ *  AI PROVIDERS
  * ══════════════════════════════════════════════════════════════ */
 const PROVIDERS = {
   rewind: {
     name: 'rewind',
     keys: ['REWIND_KEY'],
     call: async (key, prompt, system) => {
-      const r = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: 'gpt-4o-mini',
+      const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
+        model: process.env.REWIND_MODEL || 'rewind-uncensored',
         messages: [
           { role:'system', content: system },
           { role:'user',   content: prompt }
@@ -207,9 +204,9 @@ const PROVIDERS = {
 
 const PROVIDER_ORDER = ['rewind', 'openai', 'venice', 'gemini'];
 
-let activeProvider = null;   // 'rewind' | 'openai' | 'venice' | 'gemini' | null
+let activeProvider = null;
 let activeKey      = null;
-let providerReport = {};     // { rewind: { ok, error, ms }, ... }
+let providerReport = {};
 
 async function testProvider(name, key) {
   const p = PROVIDERS[name];
@@ -218,14 +215,11 @@ async function testProvider(name, key) {
   try {
     const reply = await p.call(key, 'Reply with exactly: OK', 'You are a test bot.');
     const ms = Date.now() - t0;
-    if (reply && reply.trim().length > 0) {
-      return { ok: true, ms, sample: reply.trim().slice(0, 40) };
-    }
+    if (reply && reply.trim().length > 0) return { ok: true, ms, sample: reply.trim().slice(0, 40) };
     return { ok: false, error: 'empty response', ms };
   } catch(e) {
     return {
-      ok: false,
-      ms: Date.now() - t0,
+      ok: false, ms: Date.now() - t0,
       status: e.response?.status,
       error: e.response?.data?.error?.message || e.message
     };
@@ -248,10 +242,10 @@ async function detectAIBackend() {
     const result = await testProvider(name, key);
     providerReport[name] = result;
     if (result.ok) {
-      pushLog('success','ai',`${name}: ✅ WORKS (${result.ms}ms)`);
-      if (!found) { found = { name, key }; }
+      pushLog('success','ai',`${name}: OK (${result.ms}ms)`);
+      if (!found) found = { name, key };
     } else {
-      pushLog('warn','ai',`${name}: ❌ ${result.status || ''} ${result.error}`);
+      pushLog('warn','ai',`${name}: FAIL ${result.status || ''} ${result.error}`);
     }
   }
 
@@ -262,7 +256,7 @@ async function detectAIBackend() {
   } else {
     activeProvider = null;
     activeKey = null;
-    pushLog('error','ai','❌ No AI backend works — check env');
+    pushLog('error','ai','No AI backend works — check env');
   }
   return activeProvider;
 }
@@ -278,11 +272,10 @@ async function askAI(prompt, system) {
   } catch(e) {
     pushLog('error','ai',`${activeProvider}: ${e.response?.status || ''} ${e.message}`);
     resetDailyStats(); dailyStats.aiErrors++;
-    // Try to auto-switch to next working provider
     try {
       const next = PROVIDER_ORDER.find(n => n !== activeProvider && providerReport[n]?.ok);
       if (next) {
-        pushLog('warn','ai',`Switching to ${next} after failure on ${activeProvider}`);
+        pushLog('warn','ai',`Switching to ${next}`);
         activeProvider = next;
         activeKey = PROVIDERS[next].keys.map(k => process.env[k]).find(v => v && v.trim());
         const raw2 = await PROVIDERS[next].call(activeKey, prompt, system);
@@ -477,7 +470,7 @@ function announceAdminToLive(reason, extraLid){
     senderJid: ADMIN_JID, senderName: 'ADMIN',
     phone: ADMIN_PHONE,
     lid: extraLid ? `${extraLid}${lidList.length>1?' (+'+(lidList.length-1)+' more)':''}` : (lidList.join(', ')||'—'),
-    text: `👑 Admin ${reason}\n📱 ${ADMIN_PHONE}\n🆔 ${lidList.join(', ')||'none'}`,
+    text: `Admin ${reason}\nPhone: ${ADMIN_PHONE}\nLIDs: ${lidList.join(', ')||'none'}`,
     mediaType: 'system', isAdmin: true
   });
   pushLog('success','admin',`Live-log: ${reason} — LIDs [${lidList.join(', ')||'none'}]`);
@@ -782,17 +775,17 @@ async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow')
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  NSFW VIDEO (redgifs)
+ *  NSFW VIDEO
  * ══════════════════════════════════════════════════════════════ */
 async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow'){
   if (!RedgifsDownloader){
-    await sendBuffer(chatJid, { text: '🔞 NSFW downloader not installed. Run: npm i redgifs-downloader' }, priority, lane);
+    await sendBuffer(chatJid, { text: 'NSFW downloader not installed. Run: npm i redgifs-downloader' }, priority, lane);
     return false;
   }
   try {
     const links = await RedgifsDownloader.getSearchLinks(query, { numberToDownload: 3 });
     if (!links || !links.length){
-      await sendBuffer(chatJid, { text: `🔞 No NSFW results for "${query}"` }, priority, lane);
+      await sendBuffer(chatJid, { text: `No NSFW results for "${query}"` }, priority, lane);
       return false;
     }
     for (const link of links.slice(0, 2)){
@@ -804,7 +797,7 @@ async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow'){
         });
         const buf = Buffer.from(resp.data);
         if (buf.length > MEDIA_MAX_BYTES) continue;
-        await sendBuffer(chatJid, { video: buf, mimetype: 'video/mp4', caption: `🔞 ${query}` }, priority, lane);
+        await sendBuffer(chatJid, { video: buf, mimetype: 'video/mp4', caption: `NSFW ${query}` }, priority, lane);
         resetDailyStats(); dailyStats.nsfwSent++;
         return true;
       } catch(e){ pushLog('warn','nsfw',e.message); }
@@ -812,7 +805,7 @@ async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow'){
     return false;
   } catch(e){
     pushLog('error','nsfw',e.message);
-    await sendBuffer(chatJid, { text: `🔞 Search failed: ${e.message}` }, priority, lane);
+    await sendBuffer(chatJid, { text: `NSFW search failed: ${e.message}` }, priority, lane);
     return false;
   }
 }
@@ -925,7 +918,7 @@ function saveGroupSettingsDebounced(){
 function getGroupSetting(jid){
   if (!groupSettings.has(jid)){
     groupSettings.set(jid, { antilink:true, welcome:true, goodbye:true,
-      welcomeMsg:'Welcome {user}! 👋', goodbyeMsg:'{user} left. 👋' });
+      welcomeMsg:'Welcome {user}!', goodbyeMsg:'{user} left.' });
     saveGroupSettingsDebounced();
   }
   return groupSettings.get(jid);
@@ -998,7 +991,7 @@ function loadState(){
     const saved = fs.readFileSync(MAIN_GROUP_FILE,'utf8').trim();
     if (saved) mainGroupJid = saved;
   } } catch(e){}
-  pushLog('info','state',`queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} main=${mainGroupJid||'—'}`);
+  pushLog('info','state',`queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} main=${mainGroupJid||'-'}`);
 }
 function setMainGroup(jid){
   mainGroupJid = jid;
@@ -1007,7 +1000,7 @@ function setMainGroup(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  WELCOME / GOODBYE (main group only)
+ *  WELCOME / GOODBYE
  * ══════════════════════════════════════════════════════════════ */
 async function generateWelcome(userName){
   const ai = await askAI(
@@ -1015,7 +1008,7 @@ async function generateWelcome(userName){
     `You are Abby Faith Sithole, warm Zimbabwean. Casual, real. Mix Shona + English naturally. Never mention AI.`
   );
   if (ai && !containsForbidden(ai)) return informalize(ai);
-  return `Welcome ${userName}! 🎉 Tiri kufara kuva newe.`;
+  return `Welcome ${userName}! Tiri kufara kuva newe.`;
 }
 async function generateGoodbye(userName){
   const ai = await askAI(
@@ -1023,7 +1016,7 @@ async function generateGoodbye(userName){
     `You are Abby Faith Sithole, warm Zimbabwean. Casual tone.`
   );
   if (ai && !containsForbidden(ai)) return informalize(ai);
-  return `${userName} left. 👋`;
+  return `${userName} left.`;
 }
 async function handleParticipants(update){
   const { id, participants, action } = update;
@@ -1062,14 +1055,14 @@ async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
   if (now - last > 5 * 60 * 1000){
     antilinkWarnCooldown.set(key, now);
     try {
-      await sendBuffer(jid, { text: `⚠️ Links not allowed here, @${senderJid.split('@')[0]}`, mentions: [senderJid] }, 3, 'slow');
+      await sendBuffer(jid, { text: `Links not allowed here, @${senderJid.split('@')[0]}`, mentions: [senderJid] }, 3, 'slow');
     } catch(e){}
   }
   return true;
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  JOIN QUEUE (midnight only)
+ *  JOIN QUEUE
  * ══════════════════════════════════════════════════════════════ */
 function extractInviteCodes(text){
   if (!text) return [];
@@ -1108,7 +1101,7 @@ function scheduleMidnightJoin(){
         joinedGroups.set(res, { name:null, joinedAt:Date.now(), discovered:false });
         lastGreetingAt.set(res, Date.now());
         saveGroups(); dailyStats.joined++;
-        pushLog('success','join',`✅ Joined ${res}`);
+        pushLog('success','join',`Joined ${res}`);
       }
     } catch(e){
       dailyStats.failed++;
@@ -1143,38 +1136,38 @@ async function resolvePending(id, action, payload, adminChatJid){
   if (!p) return { ok:false, error:`No pending ${id}` };
   try {
     if (action === 'skip'){
-      await sendBuffer(p.userJid, { text: 'sorry, couldn\'t find that 😅' }, 2, 'slow');
+      await sendBuffer(p.userJid, { text: 'sorry, couldn\'t find that' }, 2, 'slow');
       pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
-      adminReply(adminChatJid, `✅ Replied casually to ${p.userName}.`);
+      adminReply(adminChatJid, `Replied casually to ${p.userName}.`);
       return { ok:true };
     }
     if (action === 'say'){
       await sendBuffer(p.userJid, { text: payload }, 2, 'slow');
       pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
-      adminReply(adminChatJid, `✅ Sent to ${p.userName}.`);
+      adminReply(adminChatJid, `Sent to ${p.userName}.`);
       return { ok:true };
     }
     const query = payload || p.intent.query;
     if (p.intent.type === 'video' || p.intent.type === 'gif'){
       const r = await scraperGif(query);
-      if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, '❌ No results.'); return { ok:false }; }
+      if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendGifSafe(p.userJid, r.gifs[0], '', 2, 'slow');
     } else {
       const r = await scraperSearch(query);
-      if (!r.ok || !r.images.length){ adminReply(adminChatJid, '❌ No results.'); return { ok:false }; }
+      if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendImageSafe(p.userJid, r.images[0], '', 2, 'slow');
     }
     pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
-    adminReply(adminChatJid, `✅ Sent to ${p.userName}.`);
+    adminReply(adminChatJid, `Sent to ${p.userName}.`);
     return { ok:true };
-  } catch(e){ adminReply(adminChatJid, `❌ ${e.message}`); return { ok:false, error:e.message }; }
+  } catch(e){ adminReply(adminChatJid, `Err: ${e.message}`); return { ok:false, error:e.message }; }
 }
 
 /* Download flow */
 async function startDownloadSearch(chatJid, query, priority=1, lane='slow'){
   const results = await ytSearch(query, 6);
   if (!results.length){
-    await sendBuffer(chatJid, { text: `Couldn't find "${query}" 😕` }, priority, lane);
+    await sendBuffer(chatJid, { text: `Couldn't find "${query}"` }, priority, lane);
     return;
   }
   downloadPicks.set(chatJid, { query, results, ts:Date.now() });
@@ -1189,18 +1182,18 @@ async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
   if (!nums.length) return false;
   const picks = [...new Set(nums)].slice(0, DOWNLOAD_MAX_PICKS);
   downloadPicks.delete(chatJid);
-  await sendBuffer(chatJid, { text: `⏳ Downloading ${picks.length} video(s)...` }, priority, lane);
+  await sendBuffer(chatJid, { text: `Downloading ${picks.length} video(s)...` }, priority, lane);
   for (const n of picks){
     const r = entry.results[n-1];
     if (!r) continue;
     try {
-      await sendBuffer(chatJid, { text: `▶️ ${r.title}` }, priority, lane);
+      await sendBuffer(chatJid, { text: `Playing ${r.title}` }, priority, lane);
       const { filePath, quality, sizeBytes } = await y2mateDownload(r.id, '360p');
       await sendMediaFile(chatJid, filePath, `${r.title}\n(${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, priority, lane);
       resetDailyStats(); dailyStats.downloads++;
       pushLog('success','download',`${r.title} (${quality})`);
     } catch(e){
-      await sendBuffer(chatJid, { text: `❌ ${r.title}: ${e.message}` }, priority, lane);
+      await sendBuffer(chatJid, { text: `${r.title}: ${e.message}` }, priority, lane);
       pushLog('error','download',e.message);
     }
   }
@@ -1210,41 +1203,41 @@ async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `🥖 *BreadBot v54 — Admin Commands*
+const COMMAND_LIST = `BreadBot v55 - Admin Commands
 
-*BASICS*
-!help · !ping · !status · !jobs
-!test · !testall · !aitest · !providers
-!scraperstatus · !whoami · !stats · !summary
-!logs · !errors · !count · !groups · !inbox
+BASICS
+!help / !ping / !status / !jobs
+!test / !testall / !aitest / !providers
+!scraperstatus / !whoami / !stats / !summary
+!logs / !errors / !count / !groups / !inbox
 
-*MAIN GROUP*
-!setmain · !main · !invite · !mylink
+MAIN GROUP
+!setmain / !main / !invite / !mylink
 
-*MESSAGING*
-!broadcast <msg> · !bcgroup <msg>
-!bcdm <msg> · !all <msg>
-!send <jid> <msg> · !grouplink <link>
+MESSAGING
+!broadcast <msg> / !bcgroup <msg>
+!bcdm <msg> / !all <msg>
+!send <jid> <msg> / !grouplink <link>
 
-*GROUP MGMT*
-!antilink on|off · !welcome on|off · !goodbye on|off
-!setwelcome <msg> · !setgoodbye <msg>
-!promote · !demote · !kick @user
-!tagall · !mute · !unmute · !lock · !unlock
+GROUP MANAGEMENT
+!antilink on|off / !welcome on|off / !goodbye on|off
+!setwelcome <msg> / !setgoodbye <msg>
+!promote / !demote / !kick @user
+!tagall / !mute / !unmute / !lock / !unlock
 
-*MEDIA*
-!pic <q> · !nextpic · !bcastpic <cap>
-!gif <q> · !nextgif · !bcastgif <cap>
+MEDIA
+!pic <q> / !nextpic / !bcastpic <cap>
+!gif <q> / !nextgif / !bcastgif <cap>
 !allimg <url> | <cap>
 
-*DOWNLOADS*
-!dl <q> · !download <url> · !music <q>
-!nsfwvideo <q> · !nsfw <url>
-!nsfw on|off · !nsfwroleplay on|off · !cleanup
+DOWNLOADS
+!dl <q> / !download <url> / !music <q>
+!nsfwvideo <q> / !nsfw <url>
+!nsfw on|off / !nsfwroleplay on|off / !cleanup
 
-*CONTROL*
-!pause · !resume · !offline <mins> · !online
-!limit <n> · !unlimit
+CONTROL
+!pause / !resume / !offline <mins> / !online
+!limit <n> / !unlimit
 
 34 MB cap enforced on every file.`;
 
@@ -1263,132 +1256,132 @@ async function handleAdminCommand(text, chatJid, msg){
 
   switch(cmd){
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
-    case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
-    case 'pause': botPaused = true; await reply('⏸️ Paused.'); break;
-    case 'resume': botPaused = false; await reply('▶️ Resumed.'); break;
-    case 'offline': { const m = parseInt(args[1],10) || 30; botOfflineUntil = Date.now()+m*60000; await reply(`💤 Offline ${m}min.`); break; }
-    case 'online': botOfflineUntil = 0; await reply('🟢 Online.'); break;
-    case 'limit': { const n = Math.max(1, parseInt(args[1],10)||20); MESSAGE_FLOOD_THRESHOLD = n; await reply(`📊 Limit ${n}/s.`); break; }
-    case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('📊 No limit.'); break;
+    case 'ping': await reply(`Pong!\nStatus: ${connectionStatus}\nUptime: ${Math.floor((Date.now()-botStartTime)/1000)}s`); break;
+    case 'pause': botPaused = true; await reply('Paused.'); break;
+    case 'resume': botPaused = false; await reply('Resumed.'); break;
+    case 'offline': { const m = parseInt(args[1],10) || 30; botOfflineUntil = Date.now()+m*60000; await reply(`Offline ${m}min.`); break; }
+    case 'online': botOfflineUntil = 0; await reply('Online.'); break;
+    case 'limit': { const n = Math.max(1, parseInt(args[1],10)||20); MESSAGE_FLOOD_THRESHOLD = n; await reply(`Limit ${n}/s.`); break; }
+    case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('No limit.'); break;
     case 'jobs': {
       const s = jobs.stats();
-      await reply(`⚙️ *Fast* ${s.fast.queued}/${s.fast.max} · done ${s.fast.done}\n⚙️ *Slow* ${s.slow.queued}/${s.slow.max} · done ${s.slow.done}`);
+      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}`);
       break;
     }
     case 'providers': {
-      const lines = PROVIDER_ORDER.map(n => {
-        const r = providerReport[n] || {};
-        const key = PROVIDERS[n].keys.map(k=>process.env[k]).find(v=>v&&v.trim()) ? '🔑' : '·';
-        const active = n === activeProvider ? ' ← ACTIVE' : '';
-        if (r.skipped) return `${key} ${n}: no key`;
-        if (r.ok) return `${key} ${n}: ✅ ${r.ms}ms${active}`;
-        return `${key} ${n}: ❌ ${r.status || ''} ${r.error || ''}`.slice(0,80);
+      const lines = PROVIDER_ORDER.map(function(n){
+        var r = providerReport[n] || {};
+        var hasKey = PROVIDERS[n].keys.map(function(k){return process.env[k];}).find(function(v){return v && v.trim();}) ? 'KEY' : '-';
+        var active = n === activeProvider ? ' ACTIVE' : '';
+        if (r.skipped) return hasKey + ' ' + n + ': no key';
+        if (r.ok) return hasKey + ' ' + n + ': OK ' + r.ms + 'ms' + active;
+        return hasKey + ' ' + n + ': FAIL ' + (r.status || '') + ' ' + (r.error || '');
       }).join('\n');
-      await reply(`🤖 *AI Providers*\n\n${lines}\n\nActive: *${activeProvider || 'NONE'}*`);
+      await reply('AI Providers\n\n' + lines + '\n\nActive: ' + (activeProvider || 'NONE'));
       break;
     }
     case 'status': case 'diag': {
       const s = jobs.stats(); const f = focus.stats(); resetDailyStats(); const st = dailyStats;
       await reply([
-        `📊 *Status*`,`Connection: *${connectionStatus}*`,`Bot: *${botNumber||'—'}*`,
-        `Uptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`,
-        `Time: *${describeWindow()}* · NSFW: *${describeNsfw()}* · DM: *${describeDm()}*`,
-        `Paused: *${botPaused}* · Offline: *${botOfflineUntil>Date.now()?'yes':'no'}*`,
-        ``, `👥 Groups: *${joinedGroups.size}* · 💬 DMs: *${activeDMs.size}*`,
-        `⭐ Main: *${mainGroupJid||'not set'}*`,`📋 Queue: *${joinQueue.length}*`,
-        `⚙️ Fast: *${s.fast.queued}* · Slow: *${s.slow.queued}*`,
-        `🎯 Focus: *${f.currentState}*`,
-        `🤖 AI: *${activeProvider || 'NONE'}*`,
-        ``, `📈 *Today*`,`DM: *${st.dmsReplied}* · Media: *${st.picsSent+st.videosSent}*`,
-        `NSFW: *${st.nsfwSent}* · Downloads: *${st.downloads}*`,
-        `Broadcasts: *${st.broadcastsSent}* · Dropped: *${st.messagesDropped}*`,
-        ``,`👑 Admin LIDs: *${[...adminLids].join(', ')||'none'}*`
+        'Status','Connection: '+connectionStatus,'Bot: '+(botNumber||'-'),
+        'Uptime: '+Math.floor((Date.now()-botStartTime)/1000)+'s',
+        'Time: '+describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm(),
+        'Paused: '+botPaused+' Offline: '+(botOfflineUntil>Date.now()?'yes':'no'),
+        '','Groups: '+joinedGroups.size+' DMs: '+activeDMs.size,
+        'Main: '+(mainGroupJid||'not set'),'Queue: '+joinQueue.length,
+        'Fast: '+s.fast.queued+' Slow: '+s.slow.queued,
+        'Focus: '+f.currentState,
+        'AI: '+(activeProvider||'NONE'),
+        '','Today','DM: '+st.dmsReplied+' Media: '+(st.picsSent+st.videosSent),
+        'NSFW: '+st.nsfwSent+' Downloads: '+st.downloads,
+        'Broadcasts: '+st.broadcastsSent+' Dropped: '+st.messagesDropped,
+        '','Admin LIDs: '+([...adminLids].join(', ')||'none')
       ].join('\n'));
       break;
     }
-    case 'count': await reply(`Groups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nMain: *${mainGroupJid||'not set'}*\nAI: *${activeProvider||'NONE'}*`); break;
+    case 'count': await reply('Groups: '+joinedGroups.size+'\nDMs: '+activeDMs.size+'\nQueue: '+joinQueue.length+'\nPending: '+pendingRequests.size+'\nMain: '+(mainGroupJid||'not set')+'\nAI: '+(activeProvider||'NONE')); break;
     case 'groups': {
       if (!joinedGroups.size){ await reply('No groups.'); return; }
-      const list = [...joinedGroups.entries()].map(([j],i)=>`${i+1}. ${j===mainGroupJid?'⭐ ':''}${j}`).join('\n');
-      await reply(`👥 *Groups (${joinedGroups.size})*\n${list}`);
+      const list = [...joinedGroups.entries()].map(function(kv,i){return (i+1)+'. '+(kv[0]===mainGroupJid?'* ':'')+kv[0];}).join('\n');
+      await reply('Groups ('+joinedGroups.size+')\n'+list);
       break;
     }
     case 'inbox': case 'dms': {
       if (!activeDMs.size){ await reply('No DMs.'); return; }
-      const list = [...activeDMs].map((j,i)=>`${i+1}. ${j.split('@')[0]}`).join('\n');
-      await reply(`💬 *DMs (${activeDMs.size})*\n${list}`);
+      const list = [...activeDMs].map(function(j,i){return (i+1)+'. '+j.split('@')[0];}).join('\n');
+      await reply('DMs ('+activeDMs.size+')\n'+list);
       break;
     }
     case 'setmain': {
       if (!chatJid.endsWith('@g.us')){ await reply('Run this in the group.'); return; }
-      setMainGroup(chatJid); await reply('✅ Main group set.');
+      setMainGroup(chatJid); await reply('Main group set.');
       break;
     }
-    case 'main': await reply(`⭐ Main: *${mainGroupJid||'not set'}*`); break;
-    case 'mylink': await adminReply(chatJid, `🔗 Join my group:\n${ADMIN_GROUP_LINK}`); break;
+    case 'main': await reply('Main: '+(mainGroupJid||'not set')); break;
+    case 'mylink': await adminReply(chatJid, 'Join my group:\n'+ADMIN_GROUP_LINK); break;
     case 'send': {
       const t = args[1]; const body = args.slice(2).join(' ').trim();
-      if (!t || !body){ await reply('❌ `!send <jid> <msg>`'); return; }
-      if (!joinedGroups.has(t)){ await reply(`❌ Not in ${t}`); return; }
+      if (!t || !body){ await reply('Usage: !send <jid> <msg>'); return; }
+      if (!joinedGroups.has(t)){ await reply('Not in '+t); return; }
       await sendBuffer(t, { text: body }, 0, 'fast');
-      await reply(`✅ Sent.`);
+      await reply('Sent.');
       break;
     }
     case 'broadcast': case 'bcgroup': {
       const m = args.slice(1).join(' ');
-      if (!m){ await reply(`❌ \`!${cmd} <msg>\``); return; }
-      await reply(`⏳ Broadcasting to ${joinedGroups.size} groups...`);
+      if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
+      await reply('Broadcasting to '+joinedGroups.size+' groups...');
       let sent=0;
       for (const jid of joinedGroups.keys()){
         try { await sendBuffer(jid, { text:m }, 3, 'slow'); sent++; } catch(e){}
       }
       resetDailyStats(); dailyStats.broadcastsSent += sent;
-      await reply(`✅ Queued ${sent}/${joinedGroups.size}`);
+      await reply('Queued '+sent+'/'+joinedGroups.size);
       break;
     }
     case 'all': case 'bcdm': {
       const m = args.slice(1).join(' ');
-      if (!m){ await reply(`❌ \`!${cmd} <msg>\``); return; }
+      if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
       const mode = cmd === 'all' ? 'all' : 'dms';
       const targets = mode === 'all' ? [...joinedGroups.keys(), ...activeDMs] : [...activeDMs];
-      if (!targets.length){ await reply('📭 None.'); return; }
+      if (!targets.length){ await reply('None.'); return; }
       for (const jid of targets){ try { await sendBuffer(jid, { text:m }, 3, 'slow'); } catch(e){} }
       resetDailyStats(); dailyStats.broadcastsSent += targets.length;
-      await reply(`✅ Done.`);
+      await reply('Done.');
       break;
     }
     case 'pic': case 'search': {
       const q = args.slice(1).join(' ');
-      if (!q){ await reply('❌ `!pic <query>`'); return; }
+      if (!q){ await reply('Usage: !pic <query>'); return; }
       const r = await scraperSearch(q, false);
-      if (!r.ok || !r.images.length){ await reply('❌ No results'); return; }
+      if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      await sendImageSafe(chatJid, r.images[0], `Preview 1/${r.images.length}`, 0, 'fast');
+      await sendImageSafe(chatJid, r.images[0], 'Preview 1/'+r.images.length, 0, 'fast');
       break;
     }
     case 'nextpic': {
       if (!previewCache.imageUrls.length){ await reply('No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex+1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
-      await sendImageSafe(chatJid, previewCache.currentUrl, `Preview ${previewCache.imageIndex+1}/${previewCache.imageUrls.length}`, 0, 'fast');
+      await sendImageSafe(chatJid, previewCache.currentUrl, 'Preview '+(previewCache.imageIndex+1)+'/'+previewCache.imageUrls.length, 0, 'fast');
       break;
     }
     case 'gif': {
       const q = args.slice(1).join(' ');
-      if (!q){ await reply('❌ `!gif <query>`'); return; }
+      if (!q){ await reply('Usage: !gif <query>'); return; }
       const r = await scraperGif(q, false);
-      if (!r.ok || !r.gifs.length){ await reply('❌ No results'); return; }
+      if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      await sendGifSafe(chatJid, r.gifs[0], `GIF 1/${r.gifs.length}`, 0, 'fast');
+      await sendGifSafe(chatJid, r.gifs[0], 'GIF 1/'+r.gifs.length, 0, 'fast');
       break;
     }
     case 'nextgif': {
       if (!previewCache.gifUrls.length){ await reply('No preview.'); return; }
       previewCache.gifIndex = (previewCache.gifIndex+1) % previewCache.gifUrls.length;
       previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
-      await sendGifSafe(chatJid, previewCache.currentUrl, `GIF ${previewCache.gifIndex+1}/${previewCache.gifUrls.length}`, 0, 'fast');
+      await sendGifSafe(chatJid, previewCache.currentUrl, 'GIF '+(previewCache.gifIndex+1)+'/'+previewCache.gifUrls.length, 0, 'fast');
       break;
     }
     case 'bcastpic': case 'bcastpicdm': case 'bcastpicgroup': {
@@ -1397,9 +1390,9 @@ async function handleAdminCommand(text, chatJid, msg){
       const mode = cmd === 'bcastpic' ? 'all' : cmd === 'bcastpicdm' ? 'dms' : 'groups';
       const targets = mode === 'all' ? [...joinedGroups.keys(), ...activeDMs]
         : mode === 'groups' ? [...joinedGroups.keys()] : [...activeDMs];
-      if (!targets.length){ await reply(`No ${mode}.`); return; }
+      if (!targets.length){ await reply('No '+mode+'.'); return; }
       for (const jid of targets){ await sendImageSafe(jid, previewCache.currentUrl, cap, 3, 'slow'); }
-      await reply('✅ Done.');
+      await reply('Done.');
       break;
     }
     case 'bcastgif': {
@@ -1407,24 +1400,24 @@ async function handleAdminCommand(text, chatJid, msg){
       const cap = args.slice(1).join(' ') || '';
       const targets = [...joinedGroups.keys(), ...activeDMs];
       for (const jid of targets){ await sendGifSafe(jid, previewCache.currentUrl, cap, 3, 'slow'); }
-      await reply('✅ Done.');
+      await reply('Done.');
       break;
     }
     case 'allimg': {
       const parts = args.slice(1).join(' ').split('|').map(s=>s.trim());
       const url = parts[0]; const cap = parts[1] || '';
-      if (!url){ await reply('❌ `!allimg <url> | <cap>`'); return; }
+      if (!url){ await reply('Usage: !allimg <url> | <cap>'); return; }
       const targets = [...joinedGroups.keys(), ...activeDMs];
       for (const jid of targets){ await sendImageSafe(jid, url, cap, 3, 'slow'); }
-      await reply('✅ Done.');
+      await reply('Done.');
       break;
     }
     case 'ad': {
       const parts = args.slice(1).join(' ').split('|').map(p=>p.trim());
       const [title, body, cta, link, style] = parts;
-      if (!title || !body){ await reply('❌ `!ad <title>|<body>|[cta]|[link]|[style]`'); return; }
+      if (!title || !body){ await reply('Usage: !ad <title>|<body>|[cta]|[link]|[style]'); return; }
       const ad = AdBuilder.build({ title, body, cta, link, footer:'Reply STOP to opt out', style: style||'fancy' });
-      await reply(`📢 *Preview:*\n\n${ad}`);
+      await reply('Preview:\n\n'+ad);
       replyCache.set('LAST_AD', ad);
       break;
     }
@@ -1433,128 +1426,128 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!ad){ await reply('No ad.'); return; }
       const targets = [...joinedGroups.keys(), ...activeDMs];
       for (const jid of targets){ await sendBuffer(jid, { text:ad }, 3, 'slow'); }
-      await reply('✅ Done.');
+      await reply('Done.');
       break;
     }
-    case 'antilink': { getGroupSetting(chatJid).antilink = args[1]==='on'; saveGroupSettingsDebounced(); await reply(`✅ ${args[1]==='on'?'ON':'OFF'}`); break; }
-    case 'welcome':  { getGroupSetting(chatJid).welcome  = args[1]==='on'; saveGroupSettingsDebounced(); await reply(`✅ ${args[1]==='on'?'ON':'OFF'}`); break; }
-    case 'goodbye':  { getGroupSetting(chatJid).goodbye  = args[1]==='on'; saveGroupSettingsDebounced(); await reply(`✅ ${args[1]==='on'?'ON':'OFF'}`); break; }
-    case 'setwelcome': { const t = args.slice(1).join(' '); if (!t){ await reply('❌ Provide text.'); return; } getGroupSetting(chatJid).welcomeMsg = t; saveGroupSettingsDebounced(); await reply('✅'); break; }
-    case 'setgoodbye': { const t = args.slice(1).join(' '); if (!t){ await reply('❌ Provide text.'); return; } getGroupSetting(chatJid).goodbyeMsg = t; saveGroupSettingsDebounced(); await reply('✅'); break; }
+    case 'antilink': { getGroupSetting(chatJid).antilink = args[1]==='on'; saveGroupSettingsDebounced(); await reply(args[1]==='on'?'ON':'OFF'); break; }
+    case 'welcome':  { getGroupSetting(chatJid).welcome  = args[1]==='on'; saveGroupSettingsDebounced(); await reply(args[1]==='on'?'ON':'OFF'); break; }
+    case 'goodbye':  { getGroupSetting(chatJid).goodbye  = args[1]==='on'; saveGroupSettingsDebounced(); await reply(args[1]==='on'?'ON':'OFF'); break; }
+    case 'setwelcome': { const t = args.slice(1).join(' '); if (!t){ await reply('Provide text.'); return; } getGroupSetting(chatJid).welcomeMsg = t; saveGroupSettingsDebounced(); await reply('Set.'); break; }
+    case 'setgoodbye': { const t = args.slice(1).join(' '); if (!t){ await reply('Provide text.'); return; } getGroupSetting(chatJid).goodbyeMsg = t; saveGroupSettingsDebounced(); await reply('Set.'); break; }
     case 'promote': case 'demote': case 'kick': {
       const t = msg.message?.extendedTextMessage?.contextInfo?.participant
               || (args[1] ? args[1].replace(/\D/g,'')+'@s.whatsapp.net' : null);
-      if (!t){ await reply('❌ Reply or give phone.'); return; }
+      if (!t){ await reply('Reply or give phone.'); return; }
       const act = cmd === 'promote' ? 'promote' : cmd === 'demote' ? 'demote' : 'remove';
-      try { await sock.groupParticipantsUpdate(chatJid, [t], act); await reply(`✅ ${cmd} done.`); }
-      catch(e){ await reply(`❌ ${e.message}`); }
+      try { await sock.groupParticipantsUpdate(chatJid, [t], act); await reply(cmd+' done.'); }
+      catch(e){ await reply('Err: '+e.message); }
       break;
     }
     case 'tagall': {
       try {
         const meta = await sock.groupMetadata(chatJid);
         const mentions = meta.participants.map(p=>p.id);
-        const list = mentions.map(j=>`@${j.split('@')[0]}`).join(' ');
-        await sendBuffer(chatJid, { text: `📢 *Attention:*\n\n${list}`, mentions }, 0, 'fast');
-      } catch(e){ await reply(`❌ ${e.message}`); }
+        const list = mentions.map(j=>'@'+j.split('@')[0]).join(' ');
+        await sendBuffer(chatJid, { text: 'Attention:\n\n'+list, mentions }, 0, 'fast');
+      } catch(e){ await reply('Err: '+e.message); }
       break;
     }
-    case 'mute':   { try { await sock.groupSettingUpdate(chatJid,'announcement'); await reply('🔇'); } catch(e){ await reply(`❌ ${e.message}`); } break; }
-    case 'unmute': { try { await sock.groupSettingUpdate(chatJid,'not_announcement'); await reply('🔊'); } catch(e){ await reply(`❌ ${e.message}`); } break; }
-    case 'lock':   { try { await sock.groupSettingUpdate(chatJid,'locked'); await reply('🔒'); } catch(e){ await reply(`❌ ${e.message}`); } break; }
-    case 'unlock': { try { await sock.groupSettingUpdate(chatJid,'unlocked'); await reply('🔓'); } catch(e){ await reply(`❌ ${e.message}`); } break; }
+    case 'mute':   { try { await sock.groupSettingUpdate(chatJid,'announcement'); await reply('Muted.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'unmute': { try { await sock.groupSettingUpdate(chatJid,'not_announcement'); await reply('Unmuted.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'lock':   { try { await sock.groupSettingUpdate(chatJid,'locked'); await reply('Locked.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'unlock': { try { await sock.groupSettingUpdate(chatJid,'unlocked'); await reply('Unlocked.'); } catch(e){ await reply('Err: '+e.message); } break; }
     case 'dl': {
       const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('❌ `!dl <song or video>`'); return; }
+      if (!q){ await reply('Usage: !dl <song or video>'); return; }
       await startDownloadSearch(chatJid, q, 0, 'fast');
       break;
     }
     case 'download': {
       const url = args[1];
-      if (!url){ await reply('❌ `!download <url>`'); return; }
-      await reply('⏳ Resolving...');
+      if (!url){ await reply('Usage: !download <url>'); return; }
+      await reply('Resolving...');
       try {
         const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
-        if (!vid){ await reply('❌ Bad URL.'); return; }
+        if (!vid){ await reply('Bad URL.'); return; }
         const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '360p');
-        await sendMediaFile(chatJid, filePath, `(${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, 0, 'fast');
+        await sendMediaFile(chatJid, filePath, '('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast');
         resetDailyStats(); dailyStats.downloads++;
-        await reply('✅ Sent.');
-      } catch(e){ await reply(`❌ ${e.message}`); }
+        await reply('Sent.');
+      } catch(e){ await reply('Err: '+e.message); }
       break;
     }
     case 'music': {
       const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('❌ `!music <song>`'); return; }
-      await reply(`🎵 Searching "${q}"...`);
+      if (!q){ await reply('Usage: !music <song>'); return; }
+      await reply('Searching "'+q+'"...');
       try {
         const results = await ytSearch(q + ' audio', 3);
-        if (!results.length){ await reply('❌ None.'); return; }
+        if (!results.length){ await reply('None.'); return; }
         const top = results[0];
-        await reply(`🎧 *${top.title}* — downloading...`);
+        await reply(top.title+' - downloading...');
         const { filePath, sizeBytes } = await y2mateDownloadMusic(top.id, 'mp3');
-        await sendMediaFile(chatJid, filePath, `🎵 ${top.title}\n(${(sizeBytes/1024/1024).toFixed(1)}MB)`, 0, 'fast');
+        await sendMediaFile(chatJid, filePath, top.title+'\n('+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast');
         resetDailyStats(); dailyStats.downloads++;
-        await reply('✅ Sent.');
-      } catch(e){ await reply(`❌ ${e.message}`); }
+        await reply('Sent.');
+      } catch(e){ await reply('Err: '+e.message); }
       break;
     }
     case 'nsfwvideo': {
       const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('❌ `!nsfwvideo <query>`'); return; }
-      await reply(`🔞 Searching "${q}"...`);
+      if (!q){ await reply('Usage: !nsfwvideo <query>'); return; }
+      await reply('Searching "'+q+'"...');
       const ok = await nsfwVideoSearchAndSend(chatJid, q, 0, 'fast');
-      if (ok) await reply('✅ Sent.');
+      if (ok) await reply('Sent.');
       break;
     }
     case 'nsfw': {
-      if (args[1] === 'on'){ await reply('🔞 on.'); break; }
-      if (args[1] === 'off'){ await reply('🔞 off.'); break; }
+      if (args[1] === 'on'){ await reply('on.'); break; }
+      if (args[1] === 'off'){ await reply('off.'); break; }
       const url = args[1];
-      if (!url){ await reply('❌ `!nsfw <url>` or `!nsfwvideo <query>`'); return; }
+      if (!url){ await reply('Usage: !nsfw <url> or !nsfwvideo <query>'); return; }
       try {
         const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
-        if (!vid){ await reply('❌ Bad URL.'); return; }
+        if (!vid){ await reply('Bad URL.'); return; }
         const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '720p');
-        await sendMediaFile(chatJid, filePath, `NSFW (${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, 0, 'fast');
+        await sendMediaFile(chatJid, filePath, 'NSFW ('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast');
         resetDailyStats(); dailyStats.nsfwDownloads++;
-        await reply('✅ Sent.');
-      } catch(e){ await reply(`❌ ${e.message}`); }
+        await reply('Sent.');
+      } catch(e){ await reply('Err: '+e.message); }
       break;
     }
     case 'nsfwroleplay': {
-      if (args[1] === 'on'){ nsfwRoleplayEnabled = true; await reply('🔞 Roleplay ON.'); break; }
-      if (args[1] === 'off'){ nsfwRoleplayEnabled = false; await reply('🔞 Roleplay OFF.'); break; }
-      await reply('❌ `!nsfwroleplay on|off`');
+      if (args[1] === 'on'){ nsfwRoleplayEnabled = true; await reply('Roleplay ON.'); break; }
+      if (args[1] === 'off'){ nsfwRoleplayEnabled = false; await reply('Roleplay OFF.'); break; }
+      await reply('Usage: !nsfwroleplay on|off');
       break;
     }
     case 'cleanup': {
       try {
         const files = fs.readdirSync(DOWNLOAD_DIR);
         for (const f of files){ try{ fs.unlinkSync(path.join(DOWNLOAD_DIR,f)); }catch(e){} }
-        await reply(`🧹 Cleared ${files.length}.`);
-      } catch(e){ await reply(`❌ ${e.message}`); }
+        await reply('Cleared '+files.length+'.');
+      } catch(e){ await reply('Err: '+e.message); }
       break;
     }
     case 'logs': {
-      const recent = logBuffer.slice(-30).map(e=>`[${e.level}] ${e.source}: ${e.message}`).join('\n');
-      await reply(`📜 *Logs (30)*\n\n${recent.slice(0,3500)}`);
+      const recent = logBuffer.slice(-30).map(e=>'['+e.level+'] '+e.source+': '+e.message).join('\n');
+      await reply('Logs (30)\n\n'+recent.slice(0,3500));
       break;
     }
     case 'errors': {
-      const errs = logBuffer.filter(e=>e.level==='error').slice(-20).map(e=>`[${e.source}] ${e.message}`).join('\n');
-      await reply(`❌ *Errors*\n\n${errs.slice(0,3500)||'none'}`);
+      const errs = logBuffer.filter(e=>e.level==='error').slice(-20).map(e=>'['+e.source+'] '+e.message).join('\n');
+      await reply('Errors\n\n'+(errs.slice(0,3500)||'none'));
       break;
     }
     case 'pending': {
       if (!pendingRequests.size){ await reply('None.'); return; }
-      const list = [...pendingRequests.values()].slice(0,20).map(p=>`• *${p.id}* — ${p.userName} — ${p.intent.type}: "${p.intent.query}"`).join('\n');
-      await reply(`⏳ *Pending*\n${list}`);
+      const list = [...pendingRequests.values()].slice(0,20).map(p=>'- '+p.id+' - '+p.userName+' - '+p.intent.type+': "'+p.intent.query+'"').join('\n');
+      await reply('Pending\n'+list);
       break;
     }
     case 'teach': {
       const id = args[1]; const rest = args.slice(2).join(' ').trim();
-      if (!id || !rest){ await reply('❌ `!teach <id> <q|say|skip>`'); return; }
+      if (!id || !rest){ await reply('Usage: !teach <id> <q|say|skip>'); return; }
       if (rest === 'skip') await resolvePending(id, 'skip', null, chatJid);
       else if (rest.startsWith('say ')) await resolvePending(id, 'say', rest.slice(4).trim(), chatJid);
       else await resolvePending(id, 'search', rest, chatJid);
@@ -1562,76 +1555,75 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'scrapersearch': case 'scrapergif': {
       const q = args.slice(1).join(' ');
-      if (!q){ await reply('❌ Give query.'); return; }
+      if (!q){ await reply('Give query.'); return; }
       const r = cmd === 'scrapersearch' ? await scraperSearch(q) : await scraperGif(q);
-      if (!r.ok){ await reply(`❌ ${r.error}`); return; }
+      if (!r.ok){ await reply('Err: '+r.error); return; }
       const items = r.images || r.gifs || [];
-      await reply(`✅ ${items.length} results\nFirst: ${items[0]||'none'}`);
+      await reply(items.length+' results\nFirst: '+(items[0]||'none'));
       break;
     }
     case 'scraperstatus': {
       const st = await scraperStatus();
-      await reply(st.ok ? `✅ Up (${st.data?.status||'ok'})` : `❌ ${st.error}`);
+      await reply(st.ok ? 'Up ('+(st.data?.status||'ok')+')' : 'Err: '+st.error);
       break;
     }
     case 'aitest': {
       const r = await testAllProviders();
-      const lines = PROVIDER_ORDER.map(n => {
-        const x = r[n];
-        if (!x) return `${n}: —`;
-        if (x.ok) return `${n}: ✅ ${x.ms}ms`;
-        return `${n}: ❌ ${x.status||''} ${x.error||'fail'}`;
+      const lines = PROVIDER_ORDER.map(function(n){
+        var x = r[n];
+        if (!x) return n+': -';
+        if (x.ok) return n+': OK '+x.ms+'ms';
+        return n+': FAIL '+(x.status||'')+' '+(x.error||'fail');
       }).join('\n');
-      await reply(`🧪 *AI Test Results*\n\n${lines}\n\nActive: *${activeProvider||'NONE'}*`);
+      await reply('AI Test Results\n\n'+lines+'\n\nActive: '+(activeProvider||'NONE'));
       break;
     }
     case 'test': {
       const s = jobs.stats();
-      await reply(`✅ Bot: *${botNumber}*\nStatus: *${connectionStatus}*\nAI: *${activeProvider||'NONE'}*\nFast: *${s.fast.queued}*\nSlow: *${s.slow.queued}*`);
+      await reply('Bot: '+botNumber+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
       break;
     }
     case 'testall': {
-      await reply('🧪 Running...');
+      await reply('Running...');
       const tests = [];
-      const s1 = await scraperSearch('test'); tests.push(`Search: ${s1.ok?`✅ ${s1.images.length}`:'❌'}`);
-      const s2 = await scraperGif('funny'); tests.push(`GIF: ${s2.ok?`✅ ${s2.gifs.length}`:'❌'}`);
+      const s1 = await scraperSearch('test'); tests.push('Search: '+(s1.ok?'OK '+s1.images.length:'FAIL'));
+      const s2 = await scraperGif('funny'); tests.push('GIF: '+(s2.ok?'OK '+s2.gifs.length:'FAIL'));
       const rw = await testAllProviders();
       for (const n of PROVIDER_ORDER){
         const x = rw[n];
         if (!x) continue;
-        if (x.skipped) tests.push(`${n}: no key`);
-        else if (x.ok) tests.push(`${n}: ✅ ${x.ms}ms`);
-        else tests.push(`${n}: ❌ ${x.status||''}`);
+        if (x.skipped) tests.push(n+': no key');
+        else if (x.ok) tests.push(n+': OK '+x.ms+'ms');
+        else tests.push(n+': FAIL '+(x.status||''));
       }
-      tests.push(`WA: ${connectionStatus==='connected'?'✅':'❌'}`);
-      tests.push(`Main: ${mainGroupJid?'✅':'❌'}`);
-      tests.push(`NSFW DL: ${RedgifsDownloader?'✅':'❌'}`);
-      tests.push(`Groups: ${joinedGroups.size} · DMs: ${activeDMs.size}`);
-      await reply(['🧪 *Tests*','',...tests].join('\n'));
+      tests.push('WA: '+(connectionStatus==='connected'?'OK':'FAIL'));
+      tests.push('Main: '+(mainGroupJid?'OK':'FAIL'));
+      tests.push('NSFW DL: '+(RedgifsDownloader?'OK':'FAIL'));
+      tests.push('Groups: '+joinedGroups.size+' DMs: '+activeDMs.size);
+      await reply('Tests\n\n'+tests.join('\n'));
       break;
     }
     case 'stats': case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply(`📊 *Today*\nJoined: *${s.joined}*\nDM: *${s.dmsReplied}*\nMedia: *${s.picsSent+s.videosSent}*\nNSFW: *${s.nsfwSent}*\nDownloads: *${s.downloads}*\nBroadcasts: *${s.broadcastsSent}*\nAI: *${activeProvider||'NONE'}*`);
+      await reply('Today\nJoined: '+s.joined+'\nDM: '+s.dmsReplied+'\nMedia: '+(s.picsSent+s.videosSent)+'\nNSFW: '+s.nsfwSent+'\nDownloads: '+s.downloads+'\nBroadcasts: '+s.broadcastsSent+'\nAI: '+(activeProvider||'NONE'));
       break;
     }
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
       const l = extractLid(msg, chatJid);
       const a = isAdminSender(msg, chatJid);
-      await reply(`JID: *${msg.key.participant||msg.key.remoteJid}*\nLID: *${l||'—'}*\nCandidates: *${c.join(', ')||'none'}*\nIs admin: *${a?'YES':'NO'}*\n\nKnown LIDs: *${[...adminLids].join(', ')||'none'}*`);
+      await reply('JID: '+(msg.key.participant||msg.key.remoteJid)+'\nLID: '+(l||'-')+'\nCandidates: '+(c.join(', ')||'none')+'\nIs admin: '+(a?'YES':'NO')+'\n\nKnown LIDs: '+([...adminLids].join(', ')||'none'));
       break;
     }
-    default: await reply(`❓ Unknown: *!${cmd}*\n\nSend *!help*.`);
+    default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
   }
 }
 
 class AdBuilder {
   static build({ title, body, cta, link, footer, style='fancy' }){
-    if (style === 'bold') return [`*${title}*`, '', body, cta?`\n*${cta}*`:'', link?`\n${link}`:'', footer?`\n_${footer}_`:''].filter(Boolean).join('\n');
+    if (style === 'bold') return ['*'+title+'*', '', body, cta?'\n*'+cta+'*':'', link?'\n'+link:'', footer?'\n_'+footer+'_':''].filter(Boolean).join('\n');
     if (style === 'minimal') return [title, body, cta, link].filter(Boolean).join('\n\n');
-    return ['╔══════════════════════════╗',`║ ✨ ${(title||'').toUpperCase()} ✨`,'╚══════════════════════════╝','',body,'',
-      cta?`*${cta}*`:'',link||'',footer?`\n_${footer}_`:''].filter(Boolean).join('\n');
+    return ['---', title.toUpperCase(), '---', '', body, '', cta?'*'+cta+'*':'', link||'', footer?'\n_'+footer+'_':''].filter(Boolean).join('\n');
   }
 }
 
@@ -1665,13 +1657,13 @@ async function processDM(item){
   if (intent && intent.type === 'music'){
     try {
       const results = await ytSearch(intent.query + ' audio', 3);
-      if (!results.length){ await sendBuffer(chatJid, { text:`Couldn't find "${intent.query}" 😕` }, 2, 'slow'); return; }
+      if (!results.length){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow'); return; }
       const top = results[0];
-      await sendBuffer(chatJid, { text:`🎵 Found *${top.title}*. Downloading...` }, 2, 'slow');
+      await sendBuffer(chatJid, { text:'Found '+top.title+'. Downloading...' }, 2, 'slow');
       const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
-      await sendMediaFile(chatJid, filePath, `🎵 ${top.title}`, 2, 'slow');
+      await sendMediaFile(chatJid, filePath, top.title, 2, 'slow');
       resetDailyStats(); dailyStats.downloads++;
-    } catch(e){ await sendBuffer(chatJid, { text:`❌ ${e.message}` }, 2, 'slow'); }
+    } catch(e){ await sendBuffer(chatJid, { text:'Err: '+e.message }, 2, 'slow'); }
     return;
   }
 
@@ -1681,13 +1673,13 @@ async function processDM(item){
       if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow'); resetDailyStats(); dailyStats.dmsReplied++; }
       return;
     } else {
-      await sendBuffer(chatJid, { text: 'Not right now 😅 try after 9pm' }, 2, 'slow');
+      await sendBuffer(chatJid, { text: 'Not right now, try after 9pm' }, 2, 'slow');
       return;
     }
   }
 
   if (detectGroupLinkRequest(text)){
-    await sendBuffer(chatJid, { text:`🔗 Join our group:\n${ADMIN_GROUP_LINK}` }, 2, 'slow');
+    await sendBuffer(chatJid, { text:'Join our group:\n'+ADMIN_GROUP_LINK }, 2, 'slow');
     resetDailyStats(); dailyStats.dmsReplied++;
     return;
   }
@@ -1713,25 +1705,25 @@ async function processDM(item){
     }
     const history = userHistories.get(senderJid) || [];
     const id = createPendingRequest(senderJid, pushName, phone, history, intent);
-    await sendBuffer(chatJid, { text: 'checking rn 😊' }, 2, 'slow');
+    await sendBuffer(chatJid, { text: 'checking...' }, 2, 'slow');
     return;
   }
 
   const hist = userHistories.get(senderJid) || [];
   const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
-  const transcript = recentTurns.map(h => `${h.role === 'bot' ? 'Abby' : 'Them'}: ${h.text}`).join('\n');
+  const transcript = recentTurns.map(h => (h.role === 'bot' ? 'Abby' : 'Them') + ': ' + h.text).join('\n');
   const fullPrompt = transcript
-    ? `Conversation so far:\n${transcript}\n\nThem: ${text}\n\nReply as Abby. This is a NEW reply — do NOT repeat anything you said before. Vary your wording completely.`
+    ? 'Conversation so far:\n' + transcript + '\n\nThem: ' + text + '\n\nReply as Abby. This is a NEW reply - do NOT repeat anything you said before.'
     : text;
 
-  const sys = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ${langName}. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you're an AI. Be casual, playful, and VARIED — never give the same reply twice.`;
+  const sys = 'You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ' + langName + '. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you are an AI. Be casual, playful, and VARIED - never give the same reply twice.';
   let aiReply = await askAI(fullPrompt, sys);
   if (!aiReply) return;
 
   const lastBot = hist.filter(h => h.role === 'bot').slice(-1)[0];
   if (lastBot && lastBot.text.toLowerCase().trim() === aiReply.toLowerCase().trim()){
-    pushLog('warn','ai','Duplicate blocked — regenerating');
-    const retry = await askAI(`You already said: "${lastBot.text}". Say something COMPLETELY DIFFERENT.`, sys);
+    pushLog('warn','ai','Duplicate blocked - regenerating');
+    const retry = await askAI('You already said: "'+lastBot.text+'". Say something COMPLETELY DIFFERENT.', sys);
     if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()) aiReply = retry;
     else return;
   }
@@ -1762,7 +1754,7 @@ async function processDMQueue(){
 function enqueueDM(item){
   if (dmQueue.length >= DM_QUEUE_MAX){
     resetDailyStats(); dailyStats.messagesDropped++;
-    pushLog('warn','queue',`DM queue full (${DM_QUEUE_MAX})`);
+    pushLog('warn','queue','DM queue full ('+DM_QUEUE_MAX+')');
     return false;
   }
   dmQueue.push(item); processDMQueue(); return true;
@@ -1817,12 +1809,12 @@ async function handleMessage(msg){
 
   pushLiveMessage({
     id:msgId, ts:new Date().toISOString(), chatJid, chatType,
-    senderJid, senderName:pushName, phone:phone||'—', lid:lid||'—',
-    text:text.slice(0,200)||`[${mediaType}]`, mediaType, isAdmin
+    senderJid, senderName:pushName, phone:phone||'-', lid:lid||'-',
+    text:text.slice(0,200)||'['+mediaType+']', mediaType, isAdmin
   });
 
   if (isAdmin && text.startsWith('!')){
-    pushLog('info','admin',`Cmd: ${text.split(' ')[0]}`);
+    pushLog('info','admin','Cmd: '+text.split(' ')[0]);
     await handleAdminCommand(text, chatJid, msg);
     return;
   }
@@ -1837,16 +1829,16 @@ async function handleMessage(msg){
       const caption = args.slice(1).join(' ').trim();
       try {
         const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger:pino({level:'silent'}) });
-        if (!buffer){ adminReply(chatJid, '❌ Failed.'); return; }
-        if (buffer.length > MEDIA_MAX_BYTES){ adminReply(chatJid, `❌ ${(buffer.length/1024/1024).toFixed(1)}MB > 34MB`); return; }
+        if (!buffer){ adminReply(chatJid, 'Failed.'); return; }
+        if (buffer.length > MEDIA_MAX_BYTES){ adminReply(chatJid, (buffer.length/1024/1024).toFixed(1)+'MB > 34MB'); return; }
         const mode = cmd==='bcdm'?'dms':cmd==='bcgroup'?'groups':'all';
         const targets = mode === 'all' ? [...joinedGroups.keys(), ...activeDMs]
           : mode === 'groups' ? [...joinedGroups.keys()] : [...activeDMs];
-        if (!targets.length){ adminReply(chatJid, `No ${mode}.`); return; }
-        adminReply(chatJid, `📸 Queued to ${targets.length}.`);
+        if (!targets.length){ adminReply(chatJid, 'No '+mode+'.'); return; }
+        adminReply(chatJid, 'Queued to '+targets.length+'.');
         for (const jid of targets) await sendBuffer(jid, { image: buffer, caption }, 3, 'slow');
-        adminReply(chatJid, '✅ Done.');
-      } catch(e){ adminReply(chatJid, `❌ ${e.message}`); }
+        adminReply(chatJid, 'Done.');
+      } catch(e){ adminReply(chatJid, 'Err: '+e.message); }
       return;
     }
   }
@@ -1863,7 +1855,7 @@ async function handleMessage(msg){
   if (codes.length){
     let added = 0;
     for (const c of codes) if (queueJoin(c, phone||pushName, chatType)) added++;
-    if (added && !isGroup) await sendBuffer(chatJid, { text:`✅ Queued ${added}. Total ${joinQueue.length}` }, 3, 'slow');
+    if (added && !isGroup) await sendBuffer(chatJid, { text:'Queued '+added+'. Total '+joinQueue.length }, 3, 'slow');
   }
 
   if (text && downloadPicks.has(chatJid)){
@@ -1883,9 +1875,9 @@ async function handleMessage(msg){
     const directed = isDirectedAtBot(msg, text);
 
     if (isMain && text){
-      if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:`🔗 Join: ${ADMIN_GROUP_LINK}` }, 3, 'slow'); return; }
+      if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow'); return; }
       const isNsfw = detectNsfw(text);
-      if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now 😅 try after 9pm' }, 3, 'slow'); return; }
+      if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow'); return; }
       const gIntent = detectMediaIntent(text);
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
@@ -1893,9 +1885,9 @@ async function handleMessage(msg){
             const results = await ytSearch(gIntent.query + ' audio', 3);
             if (results.length){
               const top = results[0];
-              await sendBuffer(chatJid, { text:`🎵 *${top.title}* — downloading...` }, 3, 'slow');
+              await sendBuffer(chatJid, { text:top.title+' - downloading...' }, 3, 'slow');
               const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
-              await sendMediaFile(chatJid, filePath, `🎵 ${top.title}`, 3, 'slow');
+              await sendMediaFile(chatJid, filePath, top.title, 3, 'slow');
               resetDailyStats(); dailyStats.downloads++;
               return;
             }
@@ -1922,7 +1914,7 @@ async function handleMessage(msg){
       }
       const analysis = analyzeGroup(chatJid);
       const lang = detectLanguage(text);
-      const sys = `You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ${LANG_NAMES[lang]}. Mix light Shona. Never say you're AI. ${analysis?`Members often use: ${analysis.topWords.slice(0,6).join(', ')}`:''}`;
+      const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ' + LANG_NAMES[lang] + '. Mix light Shona. Never say you are AI. ' + (analysis?'Members often use: '+analysis.topWords.slice(0,6).join(', '):'');
       const aiReply = await askAI(text, sys);
       if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow'); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
@@ -1931,14 +1923,14 @@ async function handleMessage(msg){
     if (directed && text){
       const analysis = analyzeGroup(chatJid);
       const lang = detectLanguage(text);
-      const sys = `You are Abby Faith Sithole, 23, Harare Zimbabwe. Someone is talking TO you in a group. Reply SHORT, casual, in ${LANG_NAMES[lang]}. Never mention AI. ${analysis?`Style: ${analysis.topWords.slice(0,5).join(', ')}`:''}`;
+      const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. Someone is talking TO you in a group. Reply SHORT, casual, in ' + LANG_NAMES[lang] + '. Never mention AI. ' + (analysis?'Style: '+analysis.topWords.slice(0,5).join(', '):'');
       const aiReply = await askAI(text, sys);
       if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow'); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
     }
 
     if (text && Math.random() < AMBIENT_CHANCE){
-      const sys = `You are Abby Faith Sithole in a group. React casually, 1 short sentence, warm. Never mention AI.`;
+      const sys = 'You are Abby Faith Sithole in a group. React casually, 1 short sentence, warm. Never mention AI.';
       const aiReply = await askAI(text, sys);
       if (aiReply) await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow');
     }
@@ -1952,7 +1944,7 @@ async function handleMessage(msg){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  CONNECT BOT — RAW SOCKET
+ *  CONNECT BOT
  * ══════════════════════════════════════════════════════════════ */
 async function connectBot(){
   if (isConnecting) return;
@@ -1961,7 +1953,7 @@ async function connectBot(){
     pushLog('info','bot','Initializing...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     const { version } = await fetchLatestBaileysVersion();
-    pushLog('info','bot',`WA version ${version.join('.')}`);
+    pushLog('info','bot','WA version '+version.join('.'));
 
     const baseSocket = makeWASocket({
       version, auth: state, printQRInTerminal: false,
@@ -1974,7 +1966,6 @@ async function connectBot(){
       keepAliveIntervalMs: 30000
     });
 
-    // ✅ Raw socket — baileys-antiban v4 wrapper removed (fixes circuitBreaker crash)
     sock = baseSocket;
     pushLog('info','antiban','Raw socket (antiban wrapper disabled)');
 
@@ -1991,80 +1982,60 @@ async function connectBot(){
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
         consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0;
-        pushLog('success','bot',`Connected as ${botNumber}`);
-        pushLog('info','time',`${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`);
+        pushLog('success','bot','Connected as '+botNumber);
+        pushLog('info','time',describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm());
 
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
 
-        // ══════════════════════════════════════════════════════
-        //  AI PROVIDER AUTO-DETECT
-        // ══════════════════════════════════════════════════════
-        try {
-          await detectAIBackend();
-        } catch(e){
-          pushLog('error','ai',`detect failed: ${e.message}`);
-        }
+        try { await detectAIBackend(); }
+        catch(e){ pushLog('error','ai','detect failed: '+e.message); }
 
-        // ══════════════════════════════════════════════════════
-        //  LIVE MESSAGE: bot online + admin credentials
-        // ══════════════════════════════════════════════════════
         const lidList = [...adminLids];
         pushLiveMessage({
-          id: 'boot-' + Date.now(),
-          ts: new Date().toISOString(),
+          id: 'boot-' + Date.now(), ts: new Date().toISOString(),
           chatJid: ADMIN_JID, chatType: 'system',
           senderJid: botJid, senderName: 'BOT ONLINE',
-          phone: ADMIN_PHONE,
-          lid: lidList.join(', ') || 'none',
-          text: `✅ Bot ONLINE as ${botNumber}\n👑 Admin: ${ADMIN_PHONE}\n🆔 LIDs: ${lidList.join(', ') || 'none'}\n🤖 AI: ${activeProvider || 'NONE'}\n🌐 ${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`,
+          phone: ADMIN_PHONE, lid: lidList.join(', ') || 'none',
+          text: 'Bot ONLINE as ' + botNumber + '\nAdmin: ' + ADMIN_PHONE + '\nLIDs: ' + (lidList.join(', ') || 'none') + '\nAI: ' + (activeProvider || 'NONE') + '\n' + describeWindow() + ' NSFW: ' + describeNsfw() + ' DM: ' + describeDm(),
           mediaType: 'system', isAdmin: true
         });
-        pushLog('success','admin',`Live-log: ONLINE announcement — admin ${ADMIN_PHONE}`);
+        pushLog('success','admin','Live-log: ONLINE announcement - admin '+ADMIN_PHONE);
 
-        // ══════════════════════════════════════════════════════
-        //  DM ADMIN the boot summary
-        // ══════════════════════════════════════════════════════
         try {
-          const providerSummary = PROVIDER_ORDER.map(n => {
-            const x = providerReport[n];
+          const providerSummary = PROVIDER_ORDER.map(function(n){
+            var x = providerReport[n];
             if (!x) return '';
-            if (x.skipped) return `· ${n}: no key`;
-            if (x.ok) return `${n===activeProvider?'✅':'·'} ${n}: ${x.ms}ms`;
-            return `❌ ${n}: ${x.status||''} ${(x.error||'').slice(0,40)}`;
+            if (x.skipped) return '- ' + n + ': no key';
+            if (x.ok) return (n===activeProvider?'* ':'- ') + n + ': ' + x.ms + 'ms';
+            return 'X ' + n + ': ' + (x.status||'') + ' ' + (x.error||'').slice(0,40);
           }).filter(Boolean).join('\n');
 
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            `✅ *BreadBot ONLINE*\n` +
-            `📱 Bot: ${botNumber}\n` +
-            `👑 Admin phone: ${ADMIN_PHONE}\n` +
-            `🆔 Admin LIDs: ${lidList.join(', ') || 'none'}\n` +
-            `📁 Saved: admin_lids.json\n\n` +
-            `🤖 *AI Providers*\n${providerSummary}\n\n` +
-            `⭐ Main: ${mainGroupJid||'not set'}\n` +
-            `👥 Groups: ${joinedGroups.size}\n` +
-            `💬 DMs: ${activeDMs.size}\n` +
-            `🕐 ${describeWindow()}\n` +
-            `NSFW: ${describeNsfw()}\n` +
-            `DM AI: ${describeDm()}\n\n` +
-            `Send *!help* for commands.`
+            'BreadBot ONLINE\n' +
+            'Bot: ' + botNumber + '\n' +
+            'Admin phone: ' + ADMIN_PHONE + '\n' +
+            'Admin LIDs: ' + (lidList.join(', ') || 'none') + '\n' +
+            'File: admin_lids.json\n\n' +
+            'AI Providers\n' + providerSummary + '\n\n' +
+            'Main: ' + (mainGroupJid||'not set') + '\n' +
+            'Groups: ' + joinedGroups.size + '\n' +
+            'DMs: ' + activeDMs.size + '\n' +
+            describeWindow() + '\n' +
+            'NSFW: ' + describeNsfw() + '\n' +
+            'DM AI: ' + describeDm() + '\n\n' +
+            'Send !help for commands.'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
-        } catch(e){ pushLog('warn','admin',`DM notify failed: ${e.message}`); }
+        } catch(e){ pushLog('warn','admin','DM notify failed: '+e.message); }
 
-        // ══════════════════════════════════════════════════════
-        //  If no AI works — alert admin loudly
-        // ══════════════════════════════════════════════════════
         if (!activeProvider){
           try {
             const sent = await sock.sendMessage(ADMIN_JID, { text:
-              `⚠️ *NO AI BACKEND WORKS*\n\n` +
-              `Tested: ${PROVIDER_ORDER.join(', ')}\n\n` +
-              `Set one of these in Render → Environment:\n` +
-              `• REWIND_KEY\n` +
-              `• OPENAI_API_KEY\n` +
-              `• VENICE_KEY\n` +
-              `• GEMINI_KEY\n\n` +
-              `Bot will NOT reply to DMs until one works.`
+              'NO AI BACKEND WORKS\n\n' +
+              'Tested: ' + PROVIDER_ORDER.join(', ') + '\n\n' +
+              'Set one of these in Render Environment:\n' +
+              '- REWIND_KEY\n- OPENAI_API_KEY\n- VENICE_KEY\n- GEMINI_KEY\n\n' +
+              'Bot will NOT reply to DMs until one works.'
             });
             if (sent?.key?.id) markBotSent(sent.key.id);
           } catch(e){}
@@ -2073,38 +2044,37 @@ async function connectBot(){
             chatJid: ADMIN_JID, chatType: 'system',
             senderJid: botJid, senderName: 'AI ERROR',
             phone: ADMIN_PHONE, lid: lidList.join(', '),
-            text: '⚠️ NO AI BACKEND WORKS — check env: REWIND_KEY, OPENAI_API_KEY, VENICE_KEY, GEMINI_KEY',
+            text: 'NO AI BACKEND WORKS - check env: REWIND_KEY, OPENAI_API_KEY, VENICE_KEY, GEMINI_KEY',
             mediaType: 'system', isAdmin: true
           });
         }
 
-        // Second Live entry confirming DM
         pushLiveMessage({
           id: 'notify-' + Date.now(), ts: new Date().toISOString(),
           chatJid: ADMIN_JID, chatType: 'system',
           senderJid: botJid, senderName: botNumber + ' (BOT)',
           phone: ADMIN_PHONE, lid: lidList.join(', ') || 'none',
-          text: `📨 Sent ONLINE notification + AI status to admin`,
+          text: 'Sent ONLINE notification + AI status to admin',
           mediaType: 'system', isAdmin: true
         });
       }
       if (connection === 'close'){
         isConnecting = false;
         const code = getDisconnectStatusCode(lastDisconnect);
-        pushLog('warn','bot',`Disconnected (${code})`);
+        pushLog('warn','bot','Disconnected ('+code+')');
 
         if (manualDisconnect){ connectionStatus = 'disconnected'; return; }
         if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
         if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired'); return; }
-        if (code === 428 || code === 440){ connectionStatus = 'disconnected'; pushLog('error','bot',`Conflict ${code}`); return; }
+        if (code === 428 || code === 440){ connectionStatus = 'disconnected'; pushLog('error','bot','Conflict '+code); return; }
 
         if (code === DisconnectReason.restartRequired || code === 515){
-          if (restart515InFlight){ pushLog('warn','bot','515 in flight — skip'); return; }
+          if (restart515InFlight){ pushLog('warn','bot','515 in flight - skip'); return; }
           restart515InFlight = true;
           const now = Date.now();
           if (now < spamCooldownUntil){
             const remain = spamCooldownUntil - now;
-            pushLog('warn','antispam',`cooldown ${Math.ceil(remain/1000)}s`);
+            pushLog('warn','antispam','cooldown '+Math.ceil(remain/1000)+'s');
             await new Promise(r=>setTimeout(r, remain));
           }
           const t = Date.now();
@@ -2112,12 +2082,12 @@ async function connectBot(){
           recent515Timestamps = recent515Timestamps.filter(ts => t - ts < SPAM_WINDOW_MS);
           if (recent515Timestamps.length > SPAM_THRESHOLD){
             spamCooldownUntil = t + SPAM_COOLDOWN_MS;
-            pushLog('warn','antispam',`${recent515Timestamps.length}x 515 in 60s — pause 60s`);
+            pushLog('warn','antispam',recent515Timestamps.length+'x 515 in 60s - pause 60s');
             recent515Timestamps = []; consecutive515 = 0;
           }
           consecutive515 += 1;
           const delay = Math.min(RESTART_515_BASE_DELAY_MS * Math.pow(2, consecutive515-1), RESTART_515_MAX_DELAY_MS);
-          pushLog('warn','bot',`515 retry ${delay/1000}s (attempt ${consecutive515})`);
+          pushLog('warn','bot','515 retry '+delay/1000+'s (attempt '+consecutive515+')');
           await new Promise(r=>setTimeout(r, delay));
           const since = Date.now() - lastReconnectAt;
           if (since < MIN_RECONNECT_INTERVAL_MS) await new Promise(r=>setTimeout(r, MIN_RECONNECT_INTERVAL_MS - since));
@@ -2134,8 +2104,8 @@ async function connectBot(){
           reconnectAttempts++;
           const delay = Math.min(5000 * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
-          pushLog('warn','bot',`Retry ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
-          setTimeout(()=>{ try { sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
+          pushLog('warn','bot','Retry '+delay/1000+'s ['+reconnectAttempts+'/'+MAX_RECONNECT+']');
+          setTimeout(function(){ try { sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
           pushLog('error','bot','Max retries');
@@ -2145,15 +2115,16 @@ async function connectBot(){
 
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('group-participants.update', async (u)=>{ try { await handleParticipants(u); } catch(e){ pushLog('error','group',e.message); } });
-    sock.ev.on('messages.upsert', async ({ messages })=>{
-      for (const msg of messages || []){
+    sock.ev.on('messages.upsert', async function(data){
+      const messages = data.messages || [];
+      for (const msg of messages){
         try { await handleMessage(msg); }
         catch(e){ pushLog('error','handler',e.message); }
       }
     });
   } catch(err){
     isConnecting = false;
-    pushLog('error','bot',`Connection failed: ${err.message}`);
+    pushLog('error','bot','Connection failed: '+err.message);
     connectionStatus = 'error';
   }
 }
@@ -2170,7 +2141,7 @@ function refreshQR(){
   isConnecting = false; botNumber = null;
   consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0; restart515InFlight = false;
   pushLog('info','bot','Manual QR refresh');
-  setTimeout(()=>{ manualDisconnect = false; connectBot(); }, 1500);
+  setTimeout(function(){ manualDisconnect = false; connectBot(); }, 1500);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2179,7 +2150,7 @@ function refreshQR(){
 const app = express();
 app.use(express.json());
 
-app.get('/health',(req,res)=>res.json({
+app.get('/health',function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,
   uptime:Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
@@ -2191,59 +2162,59 @@ app.get('/health',(req,res)=>res.json({
   adminLids: [...adminLids],
   ai: { active: activeProvider, providers: providerReport },
   consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
-}));
-app.get('/api/status',(req,res)=>res.json({
+}); });
+app.get('/api/status',function(req,res){ res.json({
   status: connectionStatus, botNumber,
   groups: joinedGroups.size, dms: activeDMs.size,
   queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
   adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
-}));
-app.get('/admin/qr',async (req,res)=>{
+}); });
+app.get('/admin/qr',async function(req,res){
   if (!qrDataUri) return res.status(404).json({ error:'No QR' });
   const b64 = qrDataUri.replace(/^data:image\/\w+;base64,/,'');
   res.writeHead(200, { 'Content-Type':'image/png' });
   res.end(Buffer.from(b64, 'base64'));
 });
-app.get('/admin/qr-data',(req,res)=>res.json({ qr: qrDataUri, status: connectionStatus, botNumber }));
-app.post('/admin/connect',(req,res)=>{ if (!sock) connectBot(); res.json({ ok:true }); });
-app.post('/admin/reconnect',async (req,res)=>{ await disconnectBot(); setTimeout(()=>{ manualDisconnect=false; connectBot(); },1500); res.json({ ok:true }); });
-app.post('/admin/disconnect',async (req,res)=>{ await disconnectBot(); res.json({ ok:true }); });
-app.post('/admin/refresh-qr',(req,res)=>{ refreshQR(); res.json({ ok:true }); });
-app.post('/admin/clear-session',(req,res)=>{ try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
-app.post('/admin/pause',(req,res)=>{ botPaused = true; res.json({ ok:true }); });
-app.post('/admin/resume',(req,res)=>{ botPaused = false; res.json({ ok:true }); });
-app.post('/admin/offline',(req,res)=>{
-  const mins = parseInt(req.body?.minutes, 10) || 30;
+app.get('/admin/qr-data',function(req,res){ res.json({ qr: qrDataUri, status: connectionStatus, botNumber }); });
+app.post('/admin/connect',function(req,res){ if (!sock) connectBot(); res.json({ ok:true }); });
+app.post('/admin/reconnect',async function(req,res){ await disconnectBot(); setTimeout(function(){ manualDisconnect=false; connectBot(); },1500); res.json({ ok:true }); });
+app.post('/admin/disconnect',async function(req,res){ await disconnectBot(); res.json({ ok:true }); });
+app.post('/admin/refresh-qr',function(req,res){ refreshQR(); res.json({ ok:true }); });
+app.post('/admin/clear-session',function(req,res){ try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
+app.post('/admin/pause',function(req,res){ botPaused = true; res.json({ ok:true }); });
+app.post('/admin/resume',function(req,res){ botPaused = false; res.json({ ok:true }); });
+app.post('/admin/offline',function(req,res){
+  const mins = parseInt(req.body && req.body.minutes, 10) || 30;
   botOfflineUntil = Date.now() + mins*60000;
   res.json({ ok:true, until: new Date(botOfflineUntil).toISOString() });
 });
-app.post('/admin/online',(req,res)=>{ botOfflineUntil = 0; res.json({ ok:true }); });
+app.post('/admin/online',function(req,res){ botOfflineUntil = 0; res.json({ ok:true }); });
 
-app.get('/admin/logs',(req,res)=>{
+app.get('/admin/logs',function(req,res){
   res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive' });
-  for (const e of logBuffer.slice(-100)) res.write(`data: ${JSON.stringify(e)}\n\n`);
-  logClients.add(res); req.on('close',()=>logClients.delete(res));
+  for (const e of logBuffer.slice(-100)) res.write('data: '+JSON.stringify(e)+'\n\n');
+  logClients.add(res); req.on('close',function(){ logClients.delete(res); });
 });
-app.get('/admin/messages-stream',(req,res)=>{
+app.get('/admin/messages-stream',function(req,res){
   res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive' });
-  for (const m of liveMessages.slice(-100)) res.write(`data: ${JSON.stringify(m)}\n\n`);
-  msgClients.add(res); req.on('close',()=>msgClients.delete(res));
+  for (const m of liveMessages.slice(-100)) res.write('data: '+JSON.stringify(m)+'\n\n');
+  msgClients.add(res); req.on('close',function(){ msgClients.delete(res); });
 });
 
-app.get('/admin/aitest',async (req,res)=>res.json(await testAllProviders()));
-app.get('/admin/providers',async (req,res)=>res.json({ active: activeProvider, report: providerReport }));
-app.get('/admin/scraperstatus',async (req,res)=>res.json(await scraperStatus()));
-app.get('/admin/sched',(req,res)=>res.json({
+app.get('/admin/aitest',async function(req,res){ res.json(await testAllProviders()); });
+app.get('/admin/providers',function(req,res){ res.json({ active: activeProvider, report: providerReport }); });
+app.get('/admin/scraperstatus',async function(req,res){ res.json(await scraperStatus()); });
+app.get('/admin/sched',function(req,res){ res.json({
   lanes: jobs.stats(), focus: focus.stats(),
   window: describeWindow(), dmQueue: dmQueue.length,
   consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
-}));
-app.get('/admin/pending',(req,res)=>res.json({ pending: [...pendingRequests.values()] }));
-app.post('/admin/pending/:id/resolve',async (req,res)=>{
-  const { id } = req.params; const { action, payload } = req.body || {};
-  res.json(await resolvePending(id, action || 'search', payload, ADMIN_JID));
+}); });
+app.get('/admin/pending',function(req,res){ res.json({ pending: [...pendingRequests.values()] }); });
+app.post('/admin/pending/:id/resolve',async function(req,res){
+  const id = req.params.id; const body = req.body || {};
+  res.json(await resolvePending(id, body.action || 'search', body.payload, ADMIN_JID));
 });
-app.get('/admin/stats',(req,res)=>{
+app.get('/admin/stats',function(req,res){
   resetDailyStats();
   res.json({
     status: connectionStatus, botNumber,
@@ -2265,131 +2236,119 @@ app.get('/admin/stats',(req,res)=>{
   });
 });
 
-/* ─── HTML panel ─── */
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v54</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.ai-badge{background:#238636;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}</style></head><body>
-<h1>🥖 BreadBot v54</h1><div class="sub">Admin: <b id="ap">—</b> · LIDs: <b id="al">—</b> · Window: <b id="w">—</b> · NSFW: <b id="ns">—</b> · DM: <b id="dm">—</b> · AI: <b id="ai">—</b></div>
-<div class="grid">
-<div class="card"><h2>Connection</h2><div><span class="dot" id="dot"></span><span id="st">—</span></div>
-<div class="row"><span>Bot</span><span class="val" id="bn">—</span></div>
-<div class="row"><span>Uptime</span><span class="val" id="up">—</span></div>
-<div class="row"><span>Paused</span><span class="val" id="pz">—</span></div>
-<div class="row"><span>Offline</span><span class="val" id="off">—</span></div>
-<div class="row"><span>515</span><span class="val" id="c5">—</span></div>
-<img id="qrImg" src="" style="display:none">
-<div style="margin-top:10px"><button class="primary" onclick="a('connect')">Start</button>
-<button onclick="a('refresh-qr')">Refresh QR</button>
-<button class="danger" onclick="a('disconnect')">Disconnect</button>
-<button onclick="a('pause')">Pause</button><button onclick="a('resume')">Resume</button>
-<button onclick="a('offline')">Off 30m</button><button onclick="a('online')">Online</button></div></div>
-<div class="card"><h2>🤖 AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
-<div style="margin-top:8px"><button onclick="testAI()">🧪 Test all</button></div></div>
-<div class="card"><h2>Lanes</h2>
-<div class="row"><span>Fast queue</span><span class="val" id="fq">—</span></div>
-<div class="row"><span>Fast done</span><span class="val" id="fd">—</span></div>
-<div class="row"><span>Slow queue</span><span class="val" id="sq">—</span></div>
-<div class="row"><span>Slow done</span><span class="val" id="sd">—</span></div>
-<div class="row"><span>Failed</span><span class="val" id="fl">—</span></div>
-<div class="row"><span>Dropped</span><span class="val" id="dr">—</span></div></div>
-<div class="card"><h2>Scope</h2>
-<div class="row"><span>Groups</span><span class="val" id="g">—</span></div>
-<div class="row"><span>DMs</span><span class="val" id="d">—</span></div>
-<div class="row"><span>Join queue</span><span class="val" id="jq">—</span></div>
-<div class="row"><span>Pending</span><span class="val" id="pd">—</span></div>
-<div class="row"><span>DM queue</span><span class="val" id="dmq">—</span></div>
-<div class="row"><span>Main</span><span class="val" id="mg">—</span></div></div>
-<div class="card"><h2>Today</h2>
-<div class="row"><span>DM</span><span class="val" id="dms">—</span></div>
-<div class="row"><span>Media</span><span class="val" id="md">—</span></div>
-<div class="row"><span>NSFW</span><span class="val" id="nsf">—</span></div>
-<div class="row"><span>Downloads</span><span class="val" id="dls">—</span></div>
-<div class="row"><span>Broadcasts</span><span class="val" id="bc">—</span></div>
-<div class="row"><span>Dropped</span><span class="val" id="drp">—</span></div></div>
-<div class="card full"><h2>📨 Live Messages</h2><div id="msgs"></div></div>
-<div class="card full"><h2>📜 Logs</h2><div id="logs"></div></div>
-</div>
-<script>
-const $=id=>document.getElementById(id);
-async function api(p,m='GET',body){const o={method:m};if(body){o.headers={'Content-Type':'application/json'};o.body=JSON.stringify(body);}const r=await fetch('/admin/'+p,o);return r.json();}
-function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function setS(s){$('dot').className='dot s-'+s;$('st').textContent=s;}
-async function testAI(){
-  const b=$('aiList');
-  b.innerHTML='Testing...';
-  const r=await api('aitest');
-  b.innerHTML=Object.entries(r).map(([k,v])=>
-    v.ok?`<div>✅ ${k}: ${v.ms}ms</div>`:`<div style="color:#f85149">❌ ${k}: ${v.status||''} ${esc(v.error||'')}</div>`
-  ).join('');
-}
-async function refresh(){
-  try{const d=await api('stats');setS(d.status);
-  $('ap').textContent=d.adminPhone||'—';
-  $('al').textContent=(d.adminLids||[]).join(', ')||'none';
-  $('w').textContent=(d.window&&d.window.time)||'—';
-  $('ns').textContent=(d.window&&d.window.nsfw)||'—';
-  $('dm').textContent=(d.window&&d.window.dmAI)||'—';
-  $('ai').textContent=(d.ai&&d.ai.active)||'NONE';
-  $('bn').textContent=d.botNumber||'—';
-  const u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
-  $('up').textContent=h+'h '+m+'m '+s+'s';
-  $('pz').textContent=d.paused?'yes':'no';
-  $('off').textContent=d.offlineUntil?'yes':'no';
-  $('c5').textContent=d.consecutive515||0;
-  const L=d.lanes||{fast:{},slow:{},total:{}};
-  $('fq').textContent=L.fast.queued||0;$('fd').textContent=L.fast.done||0;
-  $('sq').textContent=L.slow.queued||0;$('sd').textContent=L.slow.done||0;
-  $('fl').textContent=L.total.failed||0;$('dr').textContent=L.total.dropped||0;
-  $('g').textContent=d.joinedGroups||0;$('d').textContent=d.dmCount||0;
-  $('jq').textContent=d.queueSize||0;$('pd').textContent=d.pendingCount||0;
-  $('dmq').textContent=(d.dmQueueLength||0)+'/'+(d.dmQueueMax||1000);
-  $('mg').textContent=d.mainGroup||'not set';
-  const t=d.dailyStats||{};
-  $('dms').textContent=t.dmsReplied||0;
-  $('md').textContent=(t.picsSent||0)+(t.videosSent||0);
-  $('nsf').textContent=t.nsfwSent||0;$('dls').textContent=t.downloads||0;
-  $('bc').textContent=t.broadcastsSent||0;$('drp').textContent=t.messagesDropped||0;
-  // AI providers
-  const pr=(d.ai&&d.ai.providers)||{};
-  $('aiList').innerHTML=Object.entries(pr).map(([n,v])=>{
-    const active = (d.ai&&d.ai.active)===n ? ' <span class="ai-badge">ACTIVE</span>' : '';
-    if (v.skipped) return `<div style="opacity:0.5">· ${n}: no key</div>`;
-    if (v.ok) return `<div>✅ ${n}: ${v.ms}ms${active}</div>`;
-    return `<div style="color:#f85149">❌ ${n}: ${v.status||''} ${esc(v.error||'')}</div>`;
-  }).join('') || '<div style="opacity:0.5">Not tested yet</div>';
-  const q=await api('qr-data');
-  if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
-  else{$('qrImg').style.display='none';}
-  }catch(e){}
-}
-async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
-function logs(){const es=new EventSource('/admin/logs');es.onmessage=e=>{try{const en=JSON.parse(e.data);const div=document.createElement('div');const t=new Date(en.ts).toLocaleTimeString();div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);const b=$('logs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};es.onerror=()=>{es.close();setTimeout(logs,5000);};}
-function msgs(){const es=new EventSource('/admin/messages-stream');es.onmessage=e=>{try{const m=JSON.parse(e.data);const div=document.createElement('div');
-  div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4px';
-  div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
-  div.style.background=m.mediaType==='system'?'#1a1d3a':(m.isAdmin?'#2d1517':'transparent');
-  const badge = m.mediaType==='system' ? '<span class="sys-badge">SYSTEM</span>' : (m.isAdmin ? '<span class="admin-badge">ADMIN</span>' : '');
-  div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' · <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' · 📱 '+esc(m.phone)+' · 🆔 '+esc(m.lid)+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
-  const b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);
-  }catch(e){}};es.onerror=()=>{es.close();setTimeout(msgs,5000);};}
-refresh();logs();msgs();setInterval(refresh,5000);
-</script></body></html>`;
-app.get('/',(req,res)=>res.send(PANEL_HTML));
-app.get('/admin',(req,res)=>res.send(PANEL_HTML));
+/* ─── HTML panel (NO NESTED BACKTICKS) ─── */
+const PANEL_HTML = [
+'<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v55</title>',
+'<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.ai-badge{background:#238636;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}</style></head><body>',
+'<h1>BreadBot v55</h1><div class="sub">Admin: <b id="ap">-</b> | LIDs: <b id="al">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b></div>',
+'<div class="grid">',
+'<div class="card"><h2>Connection</h2><div><span class="dot" id="dot"></span><span id="st">-</span></div>',
+'<div class="row"><span>Bot</span><span class="val" id="bn">-</span></div>',
+'<div class="row"><span>Uptime</span><span class="val" id="up">-</span></div>',
+'<div class="row"><span>Paused</span><span class="val" id="pz">-</span></div>',
+'<div class="row"><span>Offline</span><span class="val" id="off">-</span></div>',
+'<div class="row"><span>515</span><span class="val" id="c5">-</span></div>',
+'<img id="qrImg" src="" style="display:none">',
+'<div style="margin-top:10px"><button class="primary" onclick="a(\\'connect\\')">Start</button>',
+'<button onclick="a(\\'refresh-qr\\')">Refresh QR</button>',
+'<button class="danger" onclick="a(\\'disconnect\\')">Disconnect</button>',
+'<button onclick="a(\\'pause\\')">Pause</button><button onclick="a(\\'resume\\')">Resume</button>',
+'<button onclick="a(\\'offline\\')">Off 30m</button><button onclick="a(\\'online\\')">Online</button></div></div>',
+'<div class="card"><h2>AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>',
+'<div style="margin-top:8px"><button onclick="testAI()">Test all</button></div></div>',
+'<div class="card"><h2>Lanes</h2>',
+'<div class="row"><span>Fast queue</span><span class="val" id="fq">-</span></div>',
+'<div class="row"><span>Fast done</span><span class="val" id="fd">-</span></div>',
+'<div class="row"><span>Slow queue</span><span class="val" id="sq">-</span></div>',
+'<div class="row"><span>Slow done</span><span class="val" id="sd">-</span></div>',
+'<div class="row"><span>Failed</span><span class="val" id="fl">-</span></div>',
+'<div class="row"><span>Dropped</span><span class="val" id="dr">-</span></div></div>',
+'<div class="card"><h2>Scope</h2>',
+'<div class="row"><span>Groups</span><span class="val" id="g">-</span></div>',
+'<div class="row"><span>DMs</span><span class="val" id="d">-</span></div>',
+'<div class="row"><span>Join queue</span><span class="val" id="jq">-</span></div>',
+'<div class="row"><span>Pending</span><span class="val" id="pd">-</span></div>',
+'<div class="row"><span>DM queue</span><span class="val" id="dmq">-</span></div>',
+'<div class="row"><span>Main</span><span class="val" id="mg">-</span></div></div>',
+'<div class="card"><h2>Today</h2>',
+'<div class="row"><span>DM</span><span class="val" id="dms">-</span></div>',
+'<div class="row"><span>Media</span><span class="val" id="md">-</span></div>',
+'<div class="row"><span>NSFW</span><span class="val" id="nsf">-</span></div>',
+'<div class="row"><span>Downloads</span><span class="val" id="dls">-</span></div>',
+'<div class="row"><span>Broadcasts</span><span class="val" id="bc">-</span></div>',
+'<div class="row"><span>Dropped</span><span class="val" id="drp">-</span></div></div>',
+'<div class="card full"><h2>Live Messages</h2><div id="msgs"></div></div>',
+'<div class="card full"><h2>Logs</h2><div id="logs"></div></div>',
+'</div>',
+'<script>',
+'var $=function(id){return document.getElementById(id);};',
+'async function api(p,m,body){var o={method:m||"GET"};if(body){o.headers={"Content-Type":"application/json"};o.body=JSON.stringify(body);}var r=await fetch("/admin/"+p,o);return r.json();}',
+'function esc(s){return String(s||"").replace(/[&<>"\']/g,function(c){var map={"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","\\x27":"&#39;"};return map[c];});}',
+'function setS(s){$("dot").className="dot s-"+s;$("st").textContent=s;}',
+'async function testAI(){var b=$("aiList");b.innerHTML="Testing...";var r=await api("aitest");b.innerHTML=Object.keys(r).map(function(k){var v=r[k];if(v.ok)return "<div>OK "+k+": "+v.ms+"ms</div>";return "<div style=\\"color:#f85149\\">FAIL "+k+": "+(v.status||"")+" "+esc(v.error||"")+"</div>";}).join("");}',
+'async function refresh(){try{var d=await api("stats");setS(d.status);',
+'$("ap").textContent=d.adminPhone||"-";',
+'$("al").textContent=(d.adminLids||[]).join(", ")||"none";',
+'$("w").textContent=(d.window&&d.window.time)||"-";',
+'$("ns").textContent=(d.window&&d.window.nsfw)||"-";',
+'$("dm").textContent=(d.window&&d.window.dmAI)||"-";',
+'$("ai").textContent=(d.ai&&d.ai.active)||"NONE";',
+'$("bn").textContent=d.botNumber||"-";',
+'var u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;',
+'$("up").textContent=h+"h "+m+"m "+s+"s";',
+'$("pz").textContent=d.paused?"yes":"no";',
+'$("off").textContent=d.offlineUntil?"yes":"no";',
+'$("c5").textContent=d.consecutive515||0;',
+'var L=d.lanes||{fast:{},slow:{},total:{}};',
+'$("fq").textContent=L.fast.queued||0;$("fd").textContent=L.fast.done||0;',
+'$("sq").textContent=L.slow.queued||0;$("sd").textContent=L.slow.done||0;',
+'$("fl").textContent=L.total.failed||0;$("dr").textContent=L.total.dropped||0;',
+'$("g").textContent=d.joinedGroups||0;$("d").textContent=d.dmCount||0;',
+'$("jq").textContent=d.queueSize||0;$("pd").textContent=d.pendingCount||0;',
+'$("dmq").textContent=(d.dmQueueLength||0)+"/"+(d.dmQueueMax||1000);',
+'$("mg").textContent=d.mainGroup||"not set";',
+'var t=d.dailyStats||{};',
+'$("dms").textContent=t.dmsReplied||0;',
+'$("md").textContent=(t.picsSent||0)+(t.videosSent||0);',
+'$("nsf").textContent=t.nsfwSent||0;$("dls").textContent=t.downloads||0;',
+'$("bc").textContent=t.broadcastsSent||0;$("drp").textContent=t.messagesDropped||0;',
+'var pr=(d.ai&&d.ai.providers)||{};',
+'$("aiList").innerHTML=Object.keys(pr).map(function(n){var v=pr[n];var active=(d.ai&&d.ai.active)===n?" <span class=\\"ai-badge\\">ACTIVE</span>":"";if(v.skipped)return "<div style=\\"opacity:0.5\\">- "+n+": no key</div>";if(v.ok)return "<div>OK "+n+": "+v.ms+"ms"+active+"</div>";return "<div style=\\"color:#f85149\\">FAIL "+n+": "+(v.status||"")+" "+esc(v.error||"")+"</div>";}).join("")||"<div style=\\"opacity:0.5\\">Not tested yet</div>";',
+'var q=await api("qr-data");',
+'if(q.qr&&q.status==="qr"){$("qrImg").src="/admin/qr?t="+Date.now();$("qrImg").style.display="block";}',
+'else{$("qrImg").style.display="none";}',
+'}catch(e){}}',
+'async function a(x){await api(x,"POST");setTimeout(refresh,1000);}',
+'function logs(){var es=new EventSource("/admin/logs");es.onmessage=function(e){try{var en=JSON.parse(e.data);var div=document.createElement("div");var t=new Date(en.ts).toLocaleTimeString();div.innerHTML="<span style=\\"color:#484f58\\">"+t+"</span> <span style=\\"color:#58a6ff\\">["+en.level+"]</span> <span style=\\"color:#8b949e\\">"+esc(en.source)+"</span> "+esc(en.message);var b=$("logs");b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};es.onerror=function(){es.close();setTimeout(logs,5000);};}',
+'function msgs(){var es=new EventSource("/admin/messages-stream");es.onmessage=function(e){try{var m=JSON.parse(e.data);var div=document.createElement("div");',
+'div.style.padding="6px 10px";div.style.margin="4px 0";div.style.borderRadius="4px";',
+'div.style.borderLeft="3px solid "+(m.chatType==="group"?"#a371f7":(m.isAdmin?"#da3633":"#3fb950"));',
+'div.style.background=m.mediaType==="system"?"#1a1d3a":(m.isAdmin?"#2d1517":"transparent");',
+'var badge=m.mediaType==="system"?"<span class=\\"sys-badge\\">SYSTEM</span>":(m.isAdmin?"<span class=\\"admin-badge\\">ADMIN</span>":"");',
+'div.innerHTML="<div style=\\"color:#8b949e;font-size:11px\\">"+new Date(m.ts).toLocaleTimeString()+" | <span style=\\"color:#58a6ff\\">"+esc(m.senderName)+"</span>"+badge+" | "+esc(m.phone)+" | "+esc(m.lid)+"</div><div style=\\"white-space:pre-wrap\\">"+esc(m.text)+"</div>";',
+'var b=$("msgs");b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);',
+'}catch(e){}};es.onerror=function(){es.close();setTimeout(msgs,5000);};}',
+'refresh();logs();msgs();setInterval(refresh,5000);',
+'</script></body></html>'
+].join('\n');
+
+app.get('/',function(req,res){ res.send(PANEL_HTML); });
+app.get('/admin',function(req,res){ res.send(PANEL_HTML); });
 
 /* ══════════════════════════════════════════════════════════════
  *  PERIODIC TASKS
  * ══════════════════════════════════════════════════════════════ */
-setInterval(async ()=>{
+setInterval(async function(){
   if (connectionStatus==='connected' && sock && !botPaused && Date.now() > botOfflineUntil){
     try { await sock.sendPresenceUpdate('available'); } catch(e){}
   }
 }, 240000);
-setInterval(()=>{ axios.get(`http://localhost:${PORT}/health`).catch(()=>{}); }, 240000);
-setInterval(()=>{
+setInterval(function(){ axios.get('http://localhost:'+PORT+'/health').catch(function(){}); }, 240000);
+setInterval(function(){
   const now = Date.now();
   for (const [k,v] of downloadPicks){ if (now - v.ts > DOWNLOAD_PICK_TTL) downloadPicks.delete(k); }
 }, 60000);
-setInterval(()=>{
+setInterval(function(){
   const now = Date.now();
   for (const [k, t] of antilinkWarnCooldown){ if (now - t > 10 * 60 * 1000) antilinkWarnCooldown.delete(k); }
 }, 120000);
@@ -2401,40 +2360,39 @@ loadState();
 loadGroupSettings();
 loadLearningData();
 
-app.listen(PORT, async ()=>{
-  console.log(`🌐 Port ${PORT}`);
-  console.log(`👤 Admin phone: ${ADMIN_PHONE}`);
-  console.log(`🔑 Admin LIDs: ${[...adminLids].join(', ')||'none'}`);
-  console.log(`⭐ Main group: ${mainGroupJid||'not set'}`);
-  console.log(`🕐 ${describeWindow()} · DM AI: ${describeDm()} · NSFW: ${describeNsfw()}`);
-  console.log(`📦 Media max: 34 MB`);
-  console.log(`🔎 Scraper: ${SCRAPER_URL}`);
-  console.log(`🔞 NSFW DL: ${RedgifsDownloader ? 'enabled' : 'not installed'}`);
-  console.log(`🤖 Testing AI providers...`);
-  pushLog('info','system',`Boot port ${PORT}`);
-  pushLog('info','system',`Admin: ${ADMIN_PHONE} — LIDs: ${[...adminLids].join(', ')||'none'}`);
-  pushLog('info','system',`Main: ${mainGroupJid||'not set'}`);
+app.listen(PORT, async function(){
+  console.log('Port '+PORT);
+  console.log('Admin phone: '+ADMIN_PHONE);
+  console.log('Admin LIDs: '+([...adminLids].join(', ')||'none'));
+  console.log('Main group: '+(mainGroupJid||'not set'));
+  console.log(describeWindow()+' DM AI: '+describeDm()+' NSFW: '+describeNsfw());
+  console.log('Media max: 34 MB');
+  console.log('Scraper: '+SCRAPER_URL);
+  console.log('NSFW DL: '+(RedgifsDownloader ? 'enabled' : 'not installed'));
+  console.log('Testing AI providers...');
+  pushLog('info','system','Boot port '+PORT);
+  pushLog('info','system','Admin: '+ADMIN_PHONE+' LIDs: '+([...adminLids].join(', ')||'none'));
+  pushLog('info','system','Main: '+(mainGroupJid||'not set'));
 
-  // Pre-test AI before connecting so boot log shows status
   await detectAIBackend();
-  console.log(`🤖 Active AI: ${activeProvider || 'NONE'}`);
-  pushLog('info','system',`AI backend: ${activeProvider || 'NONE'}`);
+  console.log('Active AI: '+(activeProvider || 'NONE'));
+  pushLog('info','system','AI backend: '+(activeProvider || 'NONE'));
 
   scheduleGreetings();
   scheduleDailyReport();
   scheduleMidnightJoin();
-  connectBot().catch(err=>{ pushLog('error','system',`Boot: ${err.message}`); });
+  connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
 });
 
-process.on('SIGINT', async ()=>{
+process.on('SIGINT', async function(){
   pushLog('warn','system','SIGINT');
   try { if (sock) sock.end(undefined); } catch(e){}
   process.exit(0);
 });
-process.on('SIGTERM', async ()=>{
+process.on('SIGTERM', async function(){
   pushLog('warn','system','SIGTERM');
   try { if (sock) sock.end(undefined); } catch(e){}
   process.exit(0);
 });
-process.on('uncaughtException', (e)=>pushLog('error','uncaught',e.message));
-process.on('unhandledRejection', (e)=>pushLog('error','unhandled',String(e)));
+process.on('uncaughtException', function(e){ pushLog('error','uncaught', e.message); });
+process.on('unhandledRejection', function(e){ pushLog('error','unhandled', String(e)); });

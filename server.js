@@ -1,20 +1,18 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v60
+ *  BreadBot v60 — Full
+ *  - No dotenv (Render injects env vars directly)
  *  - 15 joins/day spread across 08:00-22:00
- *  - Main group probe at boot (resolves group LID)
+ *  - Main group probe at boot
  *  - Fibonacci per-task delays + task rotation
- *  - Reply-rate monitor (pauses broadcasts)
+ *  - Reply-rate monitor
  *  - Policy: cooldowns, caps, warm-up ramp
- *  - Delete rate cap (5/min, 30/hr, 100/day)
+ *  - Delete rate cap
  *  - Presence cycle + hidden privacy
  *  - Multi-host y2mate
- *  - Content block OFF by default (ENABLE_CONTENT_BLOCK)
- *  - Env-only keys
+ *  - Content block OFF by default
  * ============================================================ */
-
-require('dotenv').config();
 
 const express = require('express');
 const fs      = require('fs');
@@ -352,7 +350,7 @@ function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLO
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI PROVIDERS — env-only
+ *  AI PROVIDERS
  * ══════════════════════════════════════════════════════════════ */
 const PROVIDERS = {
   rewind: {

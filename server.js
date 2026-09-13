@@ -1,12 +1,14 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v62
- *  - mainGroupJid starts as null (admin must !setmain)
- *  - Admin preemption: slow lane pauses when admin is talking
- *  - Per-JID send lock prevents conflicts
- *  - Read receipts + typing indicator
- *  - Rewind AI only
+ *  BreadBot v63 — LID-aware admin detection + all v62 fixes
+ *  - Fixed: extractInviteCodes undefined crash
+ *  - Fixed: protocol frames flooding Live Messages
+ *  - Fixed: fromMe echoes appearing as "You" messages
+ *  - Added: LID-aware admin detection (checks id, phoneNumber, lid)
+ *  - Added: participantAlt/remoteJidAlt for sender resolution
+ *  - Added: bot self-detection in LID groups
+ *  - Main group starts as NULL (admin must !setmain)
  * ============================================================ */
 
 const express = require('express');
@@ -85,7 +87,6 @@ const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
 const DOWNLOAD_PICK_TTL  = 10 * 60 * 1000;
 const DOWNLOAD_MAX_PICKS = 8;
 
-/* Admin preemption window */
 const ADMIN_ACTIVE_MS = 45000;
 let adminActiveUntil = 0;
 
@@ -179,7 +180,7 @@ async function testAllProviders(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  PER-JID SEND LOCK — prevents two lanes sending to same chat
+ *  PER-JID SEND LOCK
  * ══════════════════════════════════════════════════════════════ */
 const jidLockMap = new Map();
 async function withJidLock(jid, fn){
@@ -442,6 +443,7 @@ function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF 
  * ══════════════════════════════════════════════════════════════ */
 let sock=null, qrDataUri=null;
 let connectionStatus='disconnected', botStartTime=Date.now(), botNumber=null, botJid=null;
+let botLid=null;
 let isConnecting=false, manualDisconnect=false;
 let reconnectAttempts=0; const MAX_RECONNECT=10;
 
@@ -451,7 +453,6 @@ const RESTART_515_BASE_DELAY_MS=1500, RESTART_515_MAX_DELAY_MS=30000;
 const MIN_RECONNECT_INTERVAL_MS=10000, SPAM_WINDOW_MS=60000;
 const SPAM_THRESHOLD=3, SPAM_COOLDOWN_MS=60000;
 
-/* MAIN GROUP — starts NULL. Admin must set it. */
 let mainGroupJid = null;
 
 const botSentIds = new Set();
@@ -489,7 +490,7 @@ function resetDailyStats(){
 resetDailyStats();
 
 /* ══════════════════════════════════════════════════════════════
- *  DUAL QUEUE — with admin preemption
+ *  DUAL QUEUE
  * ══════════════════════════════════════════════════════════════ */
 class DualQueue {
   constructor(){
@@ -527,13 +528,11 @@ class DualQueue {
     if (this.slowRunning) return;
     this.slowRunning = true;
     while (this.slow.length){
-      // ADMIN PREEMPTION — if admin is active, pause slow lane
       if (isAdminActive()){
         const wait = adminActiveUntil - Date.now() + 500;
         if (wait > 0){
           pushLog('info','queue',`Admin active — pausing slow lane ${Math.ceil(wait/1000)}s`);
           await new Promise(r => setTimeout(r, wait));
-          // re-check after wait, may have been extended
           continue;
         }
       }
@@ -599,33 +598,61 @@ class FocusPipeline {
 const focus = new FocusPipeline();
 
 /* ══════════════════════════════════════════════════════════════
- *  HELPERS
+ *  HELPERS — LID/PN aware extraction
  * ══════════════════════════════════════════════════════════════ */
-function markBotSent(id){
-  if (!id) return;
-  botSentIds.add(id);
-  if (botSentIds.size > 5000){
-    const a=[...botSentIds]; botSentIds.clear();
-    for (const i of a.slice(-2500)) botSentIds.add(i);
-  }
-}
+
+/** Extract all possible phone candidates from a message (PN + LID + Alt fields) */
 function extractAllPhoneCandidates(msg, senderJid){
-  const s=new Set();
-  const c=[msg.key?.participantPn, msg.key?.senderPn, msg.key?.remoteJidAlt,
-    msg.key?.participantAlt, senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
+  const s = new Set();
+  const c = [
+    msg.key?.participantPn,
+    msg.key?.senderPn,
+    msg.key?.remoteJidAlt,
+    msg.key?.participantAlt,
+    senderJid,
+    msg.key?.remoteJid,
+    msg.key?.participant
+  ].filter(Boolean);
   for (const x of c){
-    if (typeof x==='string'){
+    if (typeof x === 'string'){
       const d = x.split('@')[0].split(':')[0].replace(/\D/g,'');
-      if (d.length>=10) s.add(d);
+      if (d.length >= 10) s.add(d);
     }
   }
   return [...s];
 }
+
+/** Extract the LID from a message */
 function extractLidFromMsg(msg, senderJid){
-  const c=[senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
-  for (const x of c) if (typeof x==='string' && x.includes('@lid')) return x.split('@')[0];
+  const c = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
+  for (const x of c){
+    if (typeof x === 'string' && x.includes('@lid')) return x.split('@')[0];
+  }
   return null;
 }
+
+/** Extract the PN (phone number) from a message */
+function extractPnFromMsg(msg, senderJid){
+  // Try alt fields first (Baileys 6.8.0+)
+  if (msg.key?.participantAlt && msg.key.participantAlt.includes('@s.whatsapp.net')){
+    return msg.key.participantAlt.split('@')[0];
+  }
+  if (msg.key?.remoteJidAlt && msg.key.remoteJidAlt.includes('@s.whatsapp.net')){
+    return msg.key.remoteJidAlt.split('@')[0];
+  }
+  // Fallback: senderJid or remoteJid
+  const c = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
+  for (const x of c){
+    if (typeof x === 'string' && x.includes('@s.whatsapp.net')){
+      return x.split('@')[0];
+    }
+  }
+  return null;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  ADMIN DETECTION — LID-aware
+ * ══════════════════════════════════════════════════════════════ */
 function announceAdminToLive(reason, extraLid){
   const lidList = [...adminLids];
   pushLiveMessage({
@@ -639,9 +666,13 @@ function announceAdminToLive(reason, extraLid){
   });
   pushLog('success','admin',`Live-log: ${reason} - LIDs [${lidList.join(', ')||'none'}]`);
 }
+
 function isAdminSender(msg, senderJid){
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   const lid = extractLidFromMsg(msg, senderJid);
+  const pn = extractPnFromMsg(msg, senderJid);
+
+  // 1. Check if any candidate matches ADMIN_PHONE
   if (candidates.includes(ADMIN_PHONE)){
     if (lid && !adminLids.has(lid)){
       adminLids.add(lid);
@@ -651,62 +682,122 @@ function isAdminSender(msg, senderJid){
     }
     return true;
   }
+
+  // 2. Check if LID matches known admin LIDs
   if (lid && adminLids.has(lid)) return true;
+
+  // 3. Check if PN matches
+  if (pn && pn === ADMIN_PHONE) return true;
+  if (pn && adminLids.has(pn)) return true;
+
+  // 4. Check sender JID directly
   if (typeof senderJid === 'string'){
     const base = senderJid.split('@')[0].split(':')[0];
     if (base === ADMIN_PHONE) return true;
     if (adminLids.has(base)) return true;
   }
+
+  // 5. Check any candidate against known LIDs
   for (const c of candidates) if (adminLids.has(c)) return true;
+
   return false;
 }
+
 function extractPhone(msg, senderJid){
-  const c = extractAllPhoneCandidates(msg, senderJid); return c[0] || null;
+  const c = extractAllPhoneCandidates(msg, senderJid);
+  return c[0] || null;
 }
 function extractLid(msg, senderJid){ return extractLidFromMsg(msg, senderJid); }
 
-const FORBIDDEN = [
-  /\bas an ai\b/i, /\bi am an ai\b/i, /\blanguage model\b/i, /\bas an assistant\b/i,
-  /\bi cannot\b/i, /how can i help you today/i, /is there anything else/i,
-  /let me know if/i, /feel free to/i, /i hope this helps/i,
-  /thank you for reaching out/i, /\bapi[_ ]?key\b/i, /```/
-];
-function containsForbidden(t){ if (!t) return true; return FORBIDDEN.some(r=>r.test(t)); }
-function humanize(t){
-  if (!t) return '';
-  let s = t.replace(/```[\s\S]*?```/g,'').replace(/https?:\/\/\S+/g,'').trim();
-  s = s.split('\n').map(l=>l.trim()).filter(Boolean).join(' ');
-  s = s.replace(/^(assistant|ai|bot)[:\-]\s*/i,'').replace(/\s{2,}/g,' ').trim();
-  return s;
-}
-function informalize(t){
-  if (!t) return t;
-  if (Math.random()<0.4) t = t.charAt(0).toLowerCase()+t.slice(1);
-  if (Math.random()<0.05) t += ' ' + ['😊','😅','👀','🙂','😂'][Math.floor(Math.random()*5)];
-  return t;
-}
-const SHONA_MARKERS = ['ndi','uri','kuti','here','izvi','zvakanaka','sei','ndoda','unoda',
-  'mhoro','mangwanani','masikati','manheru','ndapota','zvinhu','vanhu','kuita','kuenda','kuuya'];
-const LANG_NAMES = { sn:'Shona', en:'English' };
-function detectLanguage(t){
-  if (!t) return 'en';
-  return t.toLowerCase().split(/\s+/).filter(w=>SHONA_MARKERS.includes(w)).length>0 ? 'sn' : 'en';
+/* ══════════════════════════════════════════════════════════════
+ *  BOT SELF-DETECTION — LID-aware
+ * ══════════════════════════════════════════════════════════════ */
+function isBotSender(msg, senderJid){
+  const candidates = extractAllPhoneCandidates(msg, senderJid);
+  const lid = extractLidFromMsg(msg, senderJid);
+  const pn = extractPnFromMsg(msg, senderJid);
+
+  // Check bot's phone number
+  if (botNumber && candidates.includes(botNumber)) return true;
+
+  // Check bot's LID (from sock.user.lid)
+  if (botLid && lid === botLid) return true;
+  if (botLid && candidates.includes(botLid)) return true;
+
+  // Check bot's PN
+  if (botNumber && pn === botNumber) return true;
+
+  // Check bot's JID directly
+  if (botJid){
+    const botBase = botJid.split('@')[0].split(':')[0];
+    if (senderJid && senderJid.includes(botBase)) return true;
+    if (candidates.includes(botBase)) return true;
+  }
+
+  return false;
 }
 
-/* ══════════════════════════════════════════════════════════════
- *  GROUP ADMIN CHECK
- * ══════════════════════════════════════════════════════════════ */
+/** Check if the bot itself is admin in a group (LID-aware) */
 async function botIsAdminIn(jid){
   const c = groupAdminCache.get(jid);
   if (c && Date.now() - c.ts < 60000) return c.botIsAdmin;
+
   try {
     const meta = await sock.groupMetadata(jid);
-    const me = meta.participants.find(p => p.id.split('@')[0].split(':')[0] === botNumber);
+    const me = meta.participants.find(p => {
+      // Check by id
+      if (p.id && p.id.split('@')[0].split(':')[0] === botNumber) return true;
+      // Check by phoneNumber (LID participants)
+      if (p.phoneNumber && p.phoneNumber.split('@')[0] === botNumber) return true;
+      // Check by lid
+      if (p.lid && botLid && p.lid === botLid) return true;
+      // Check by botJid
+      if (botJid && p.id && p.id === botJid) return true;
+      return false;
+    });
+
     const isAdmin = !!(me && (me.admin === 'admin' || me.admin === 'superadmin'));
     groupAdminCache.set(jid, { botIsAdmin: isAdmin, ts: Date.now() });
     return isAdmin;
   } catch(e){
     groupAdminCache.set(jid, { botIsAdmin: false, ts: Date.now() });
+    return false;
+  }
+}
+
+/** Get admin list for a group (LID-aware) */
+async function getGroupAdmins(jid){
+  try {
+    const meta = await sock.groupMetadata(jid);
+    const admins = meta.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin');
+    return admins.map(p => ({
+      id: p.id,
+      phoneNumber: p.phoneNumber || null,
+      lid: p.lid || null,
+      role: p.admin
+    }));
+  } catch(e){
+    return [];
+  }
+}
+
+/** Check if a specific user is admin in a group (LID-aware) */
+async function isUserAdminInGroup(groupJid, userJid){
+  try {
+    const meta = await sock.groupMetadata(groupJid);
+    const participant = meta.participants.find(p => {
+      if (p.id === userJid) return true;
+      if (p.phoneNumber && p.phoneNumber === userJid) return true;
+      if (p.lid && p.lid === userJid) return true;
+      // Match by base number
+      const userBase = userJid.split('@')[0].split(':')[0];
+      if (p.id && p.id.split('@')[0].split(':')[0] === userBase) return true;
+      if (p.phoneNumber && p.phoneNumber.split('@')[0] === userBase) return true;
+      if (p.lid && p.lid.split('@')[0] === userBase) return true;
+      return false;
+    });
+    return !!(participant && (participant.admin === 'admin' || participant.admin === 'superadmin'));
+  } catch(e){
     return false;
   }
 }
@@ -735,12 +826,19 @@ async function showTyping(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  INVITE RESOLUTION
+ *  INVITE RESOLUTION — FIXED (plural)
  * ══════════════════════════════════════════════════════════════ */
+function extractInviteCodes(text){
+  if (!text) return [];
+  const s = new Set();
+  const re = /chat\.whatsapp\.com\/([A-Za-z0-9]{15,30})/gi;
+  let m;
+  while ((m = re.exec(String(text))) !== null) s.add(m[1]);
+  return [...s];
+}
 function extractInviteCode(text){
-  if (!text) return null;
-  const m = String(text).match(/chat\.whatsapp\.com\/([A-Za-z0-9]{15,30})/i);
-  return m ? m[1] : null;
+  const all = extractInviteCodes(text);
+  return all.length ? all[0] : null;
 }
 async function resolveInviteToJid(link){
   const code = extractInviteCode(link);
@@ -790,10 +888,9 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskTy
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SEND — per-JID lock + admin preemption check
+ *  SEND
  * ══════════════════════════════════════════════════════════════ */
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false){
-  // Priority 0 = admin, always allowed. Others respect policy.
   if (priority >= 2){
     const gate = policyCanSend(jid);
     if (!gate.ok){
@@ -1243,7 +1340,6 @@ function loadState(){
     const a = JSON.parse(fs.readFileSync(ADMIN_LID_FILE,'utf8')) || [];
     for (const l of a) adminLids.add(l);
   } } catch(e){}
-  // Load main group ONLY if saved by admin. NO hardcoded fallback.
   try { if (fs.existsSync(MAIN_GROUP_FILE)){
     const saved = fs.readFileSync(MAIN_GROUP_FILE,'utf8').trim();
     if (saved) mainGroupJid = saved;
@@ -1274,13 +1370,19 @@ async function probeMainGroup(){
       try {
         const meta = await sock.groupMetadata(mainGroupJid);
         pushLog('info','main',`Main group: ${meta.subject || '?'} (${meta.participants?.length || 0} members)`);
+
+        // Cache LIDs and phones (LID-aware)
         for (const p of meta.participants || []){
-          const lid = p.id.includes('@lid') ? p.id.split('@')[0] : null;
-          const pn = p.id.includes('@s.whatsapp.net') ? p.id.split('@')[0] : null;
-          if (lid) recentGroupLids.set(lid, Date.now());
-          if (pn) recentGroupPhones.set(pn, Date.now());
+          if (p.id && p.id.includes('@lid')) recentGroupLids.set(p.id.split('@')[0], Date.now());
+          if (p.id && p.id.includes('@s.whatsapp.net')) recentGroupPhones.set(p.id.split('@')[0], Date.now());
+          if (p.phoneNumber) recentGroupPhones.set(p.phoneNumber.split('@')[0], Date.now());
+          if (p.lid) recentGroupLids.set(p.lid, Date.now());
         }
         pushLog('success','main',`Cached ${recentGroupLids.size} LIDs, ${recentGroupPhones.size} phones`);
+
+        // Log admin count
+        const admins = meta.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin');
+        pushLog('info','main',`Group has ${admins.length} admin(s)`);
       } catch(e){ pushLog('warn','main','metadata: '+e.message); }
     }, 15000);
   } catch(e){
@@ -1289,7 +1391,7 @@ async function probeMainGroup(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  WELCOME / GOODBYE — ONLY in main group
+ *  WELCOME / GOODBYE — MAIN GROUP ONLY
  * ══════════════════════════════════════════════════════════════ */
 async function generateWelcome(userName){
   const ai = await askAI(
@@ -1329,10 +1431,10 @@ async function handleParticipants(update){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  ANTI-LINK — only in main group, only if bot is admin
+ *  ANTI-LINK — MAIN GROUP ONLY, BOT MUST BE ADMIN
  * ══════════════════════════════════════════════════════════════ */
 async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
-  if (!mainGroupJid || jid !== mainGroupJid) return false; // only main group
+  if (!mainGroupJid || jid !== mainGroupJid) return false;
   const s = getGroupSetting(jid);
   if (!s.antilink || isAdmin) return false;
   const matches = text.match(/(https?:\/\/[^\s]+)/gi);
@@ -1404,7 +1506,7 @@ function scheduleGreetings(){
   setInterval(async function(){
     if (!sock || connectionStatus!=='connected' || !mainGroupJid || botPaused) return;
     if (Date.now() < botOfflineUntil) return;
-    if (isAdminActive()) return; // don't greet while admin is active
+    if (isAdminActive()) return;
     const now = Date.now();
     const minMs = GREETING_MIN_HOURS*3600000, maxMs = GREETING_MAX_HOURS*3600000;
     for (const [jid] of joinedGroups){
@@ -1579,16 +1681,15 @@ const replyCache = new NodeCache({ stdTTL:600 });
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v62 — Admin
+const COMMAND_LIST = `BreadBot v63 — Admin
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
 !setmain                — run inside the group to set it
 !main                   — show current main group
 !clearmain              — unset main group
-
-JOIN
 !join <invite-link>     — join a group manually
+!admins                 — list admins in main group
 
 BASICS
 !help / !ping / !status / !jobs / !flow
@@ -1645,15 +1746,12 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'limit': { const n = Math.max(1, parseInt(args[1],10)||20); MESSAGE_FLOOD_THRESHOLD = n; await reply(`Limit ${n}/s.`); break; }
     case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('No limit.'); break;
 
-    /* ───── MAIN GROUP ───── */
     case 'setmain': {
-      // Case 1: link provided
       const linkArg = args.slice(1).join(' ').trim();
       if (linkArg && /chat\.whatsapp\.com/i.test(linkArg)){
         try {
           const { code, jid, subject, size } = await resolveInviteToJid(linkArg);
           pushLog('info','main',`Resolved ${code} → ${jid} (${subject}, ${size})`);
-          // If bot isn't already in the group, join it
           if (!joinedGroups.has(jid)){
             try {
               const joined = await sock.groupAcceptInvite(code);
@@ -1663,18 +1761,13 @@ async function handleAdminCommand(text, chatJid, msg){
                 saveGroups();
                 pushLog('success','main',`Joined ${joined}`);
               }
-            } catch(e){
-              pushLog('warn','main',`Could not join ${jid}: ${e.message}`);
-            }
+            } catch(e){ pushLog('warn','main',`Could not join ${jid}: ${e.message}`); }
           }
           setMainGroup(jid);
           await reply(`✅ Main group set\n${jid}\n${subject} (${size} members)`);
-        } catch(e){
-          await reply(`❌ Could not resolve link: ${e.message}`);
-        }
+        } catch(e){ await reply(`❌ Could not resolve link: ${e.message}`); }
         break;
       }
-      // Case 2: run inside a group
       if (chatJid.endsWith('@g.us')){
         setMainGroup(chatJid);
         await reply(`✅ Main group set to this group: ${chatJid}`);
@@ -1683,19 +1776,13 @@ async function handleAdminCommand(text, chatJid, msg){
       await reply('❌ Usage: `!setmain https://chat.whatsapp.com/...` from DM, OR `!setmain` inside the group.');
       break;
     }
-    case 'clearmain': {
-      clearMainGroup();
-      await reply('✅ Main group cleared. Bot will ignore all group messages until a new one is set.');
-      break;
-    }
+    case 'clearmain': { clearMainGroup(); await reply('✅ Main group cleared.'); break; }
     case 'main': {
-      if (!mainGroupJid){ await reply('Main group: NOT SET\nUse `!setmain <link>` or run `!setmain` inside the group.'); break; }
+      if (!mainGroupJid){ await reply('Main group: NOT SET'); break; }
       try {
         const meta = await sock.groupMetadata(mainGroupJid);
         await reply(`Main group: ${mainGroupJid}\n${meta.subject || '?'} (${meta.participants?.length || 0} members)`);
-      } catch(e){
-        await reply(`Main group: ${mainGroupJid} (metadata unavailable: ${e.message})`);
-      }
+      } catch(e){ await reply(`Main group: ${mainGroupJid} (metadata error)`); }
       break;
     }
     case 'join': {
@@ -1708,18 +1795,25 @@ async function handleAdminCommand(text, chatJid, msg){
           joinedGroups.set(joined, { name: subject, joinedAt: Date.now(), discovered: false });
           lastGreetingAt.set(joined, Date.now());
           saveGroups();
-          pushLog('success','main',`Joined ${joined}`);
         }
         await reply(`✅ Joined\n${joined}\n${subject} (${size} members)`);
-      } catch(e){
-        await reply(`❌ ${e.message}`);
-      }
+      } catch(e){ await reply(`❌ ${e.message}`); }
+      break;
+    }
+    case 'admins': {
+      if (!mainGroupJid){ await reply('Set main group first.'); break; }
+      const admins = await getGroupAdmins(mainGroupJid);
+      if (!admins.length){ await reply('No admins found.'); break; }
+      const list = admins.map((a, i) =>
+        `${i+1}. ${a.role === 'superadmin' ? '👑' : '🛡️'} ${a.phoneNumber || a.lid || a.id.split('@')[0]}`
+      ).join('\n');
+      await reply(`Admins in main group (${admins.length}):\n${list}`);
       break;
     }
 
     case 'jobs': {
       const s = jobs.stats();
-      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}\nAdmin active: ${isAdminActive() ? 'YES ('+Math.ceil((adminActiveUntil-Date.now())/1000)+'s)' : 'no'}`);
+      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}\nAdmin active: ${isAdminActive() ? 'YES' : 'no'}`);
       break;
     }
     case 'flow': {
@@ -1738,6 +1832,7 @@ async function handleAdminCommand(text, chatJid, msg){
         `Deletes: ${deleteHist.min.length}/5m · ${deleteHist.hour.length}/30h · ${deleteHist.day.length}/100d`,
         `Main group: ${mainGroupJid||'NOT SET'}`,
         `Admin active: ${isAdminActive() ? 'YES' : 'no'}`,
+        `Bot LID: ${botLid||'unknown'}`,
         `Typing: ${ENABLE_TYPING?'ON':'OFF'} · Reads: ${ENABLE_READ_RECEIPTS?'ON':'OFF'}`
       ].join('\n'));
       break;
@@ -1753,6 +1848,7 @@ async function handleAdminCommand(text, chatJid, msg){
       const s = jobs.stats(); const f = focus.stats(); resetDailyStats(); const st = dailyStats;
       await reply([
         'Status','Connection: '+connectionStatus,'Bot: '+(botNumber||'-'),
+        'Bot LID: '+(botLid||'-'),
         'Uptime: '+Math.floor((Date.now()-botStartTime)/1000)+'s',
         'Time: '+describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm(),
         'Paused: '+botPaused+' Offline: '+(botOfflineUntil>Date.now()?'yes':'no'),
@@ -2050,7 +2146,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'test': {
       const s = jobs.stats();
-      await reply('Bot: '+botNumber+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nMain: '+(mainGroupJid||'NOT SET')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
+      await reply('Bot: '+botNumber+'\nBot LID: '+(botLid||'-')+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nMain: '+(mainGroupJid||'NOT SET')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
       break;
     }
     case 'testall': {
@@ -2062,6 +2158,7 @@ async function handleAdminCommand(text, chatJid, msg){
       tests.push('rewind: '+(rw.rewind?.ok ? 'OK '+rw.rewind.ms+'ms' : 'FAIL '+(rw.rewind?.status||'')));
       tests.push('WA: '+(connectionStatus==='connected'?'OK':'FAIL'));
       tests.push('Main: '+(mainGroupJid?'OK '+mainGroupJid:'NOT SET'));
+      tests.push('Bot LID: '+(botLid||'unknown'));
       tests.push('NSFW DL: '+(RedgifsDownloader?'OK':'FAIL'));
       tests.push('Reply rate: '+(replyRate()*100).toFixed(0)+'%');
       tests.push('Groups: '+joinedGroups.size+' DMs: '+activeDMs.size);
@@ -2076,8 +2173,9 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
       const l = extractLid(msg, chatJid);
+      const p = extractPnFromMsg(msg, chatJid);
       const a = isAdminSender(msg, chatJid);
-      await reply('JID: '+(msg.key.participant||msg.key.remoteJid)+'\nLID: '+(l||'-')+'\nCandidates: '+(c.join(', ')||'none')+'\nIs admin: '+(a?'YES':'NO')+'\n\nKnown LIDs: '+([...adminLids].join(', ')||'none'));
+      await reply('JID: '+(msg.key.participant||msg.key.remoteJid)+'\nLID: '+(l||'-')+'\nPN: '+(p||'-')+'\nCandidates: '+(c.join(', ')||'none')+'\nIs admin: '+(a?'YES':'NO')+'\n\nKnown LIDs: '+([...adminLids].join(', ')||'none'));
       break;
     }
     default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
@@ -2234,7 +2332,22 @@ async function handleMessage(msg){
   }
   if (botSentIds.has(msgId)) return;
 
-  let m = msg.message; let guard=0;
+  /* ═══════════════════════════════════════════════════════════
+   *  FILTER 1: Skip protocol-only frames
+   * ═══════════════════════════════════════════════════════════ */
+  const rawMsg = msg.message;
+  if (!rawMsg) return;
+  if (rawMsg.protocolMessage) return;
+  if (rawMsg.senderKeyDistributionMessage) return;
+  if (rawMsg.reactionMessage) return;
+  if (rawMsg.pollUpdateMessage) return;
+  if (rawMsg.pollCreationMessage) return;
+  if (rawMsg.pollCreationMessageV2) return;
+  if (rawMsg.pollCreationMessageV3) return;
+  if (rawMsg.stickerMessage) return;
+  if (msg.messageStubType) return;
+
+  let m = rawMsg; let guard=0;
   while (m && guard++<10){
     if (m.ephemeralMessage?.message){ m=m.ephemeralMessage.message; continue; }
     if (m.viewOnceMessage?.message){ m=m.viewOnceMessage.message; continue; }
@@ -2244,6 +2357,17 @@ async function handleMessage(msg){
     break;
   }
 
+  const hasText = !!(m?.conversation || m?.extendedTextMessage?.text
+                || m?.imageMessage || m?.videoMessage
+                || m?.audioMessage || m?.documentMessage
+                || m?.contactMessage || m?.locationMessage);
+  if (!hasText) return;
+
+  /* ═══════════════════════════════════════════════════════════
+   *  FILTER 2: Skip echoes of our own sends
+   * ═══════════════════════════════════════════════════════════ */
+  if (msg.key.fromMe) return;
+
   const text = m?.conversation || m?.extendedTextMessage?.text
             || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
   const mediaType = m?.imageMessage ? 'image' : m?.videoMessage ? 'video'
@@ -2252,21 +2376,23 @@ async function handleMessage(msg){
   const senderJid = isGroup ? (msg.key.participant||chatJid) : chatJid;
   const phone     = extractPhone(msg, senderJid);
   const lid       = extractLid(msg, senderJid);
-  const pushName  = msg.pushName || (msg.key.fromMe?'You':'Unknown');
+  const pn        = extractPnFromMsg(msg, senderJid);
+  const pushName  = msg.pushName || 'Unknown';
   const chatType  = isGroup ? 'group' : 'dm';
 
   if (isGroup) discoverGroup(chatJid);
   if (isGroup) recordGroupMessage(chatJid, text);
   else activeDMs.add(chatJid);
 
-  if (!msg.key.fromMe){
-    recordReply(chatJid);
-    markRead(msg).catch(()=>{});
-  }
+  recordReply(chatJid);
+  markRead(msg).catch(()=>{});
 
+  // LID-AWARE ADMIN DETECTION
   const isAdmin = isAdminSender(msg, senderJid);
 
-  // ADMIN ACTIVE — every admin message touches the preemption flag
+  // Skip if this is the bot's own message (LID-aware)
+  if (isBotSender(msg, senderJid)) return;
+
   if (isAdmin) touchAdminActive();
 
   pushLiveMessage({
@@ -2275,7 +2401,7 @@ async function handleMessage(msg){
     text:text.slice(0,200)||'['+mediaType+']', mediaType, isAdmin
   });
 
-  /* ═══ 1. ADMIN COMMANDS — accepted in admin DM OR main group ═══ */
+  /* ═══ 1. ADMIN COMMANDS ═══ */
   if (isAdmin && text.startsWith('!')){
     const inDM = !isGroup;
     const inMainGroup = mainGroupJid && chatJid === mainGroupJid;
@@ -2295,21 +2421,16 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ 2. NO MAIN GROUP → IGNORE ALL GROUP MESSAGES ═══ */
-  if (isGroup && !mainGroupJid){
-    // bot isn't configured yet — silently ignore
-    return;
-  }
+  /* ═══ 2. NO MAIN GROUP → IGNORE GROUP ═══ */
+  if (isGroup && !mainGroupJid) return;
 
-  /* ═══ 3. NOT MAIN GROUP → IGNORE ALL GROUP MESSAGES ═══ */
-  if (isGroup && chatJid !== mainGroupJid){
-    // bot only operates in main group
-    return;
-  }
+  /* ═══ 3. NOT MAIN GROUP → IGNORE GROUP ═══ */
+  if (isGroup && chatJid !== mainGroupJid) return;
 
   if (botPaused && !isAdmin) return;
   if (Date.now() < botOfflineUntil && !isAdmin) return;
 
+  /* ═══ 4. ADMIN IMAGE BROADCAST ═══ */
   if (!isGroup && isAdmin && mediaType === 'image' && text.startsWith('!')){
     const args = text.slice(1).trim().split(/\s+/);
     const cmd  = args[0].toLowerCase();
@@ -2358,10 +2479,9 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ GROUP MESSAGES — main group only ═══ */
+  /* ═══ GROUP MESSAGES — MAIN GROUP ONLY ═══ */
   if (isGroup){
     await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
-    const directed = isDirectedAtBot(msg, text);
 
     if (text){
       if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
@@ -2408,25 +2528,10 @@ async function handleMessage(msg){
       if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
     }
-
-    if (directed && text){
-      const analysis = analyzeGroup(chatJid);
-      const lang = detectLanguage(text);
-      const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. Someone is talking TO you in a group. Reply SHORT, casual, in ' + LANG_NAMES[lang] + '. Never mention AI. ' + (analysis?'Style: '+analysis.topWords.slice(0,5).join(', '):'');
-      const aiReply = await askAI(text, sys);
-      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true); resetDailyStats(); dailyStats.greetingsSent++; }
-      return;
-    }
-
-    if (text && Math.random() < AMBIENT_CHANCE){
-      const sys = 'You are Abby Faith Sithole in a group. React casually, 1 short sentence, warm. Never mention AI.';
-      const aiReply = await askAI(text, sys);
-      if (aiReply) await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true);
-    }
     return;
   }
 
-  /* ═══ ADMIN DM WITHOUT COMMAND — ignored, admin knows to use ! ═══ */
+  /* ═══ ADMIN DM WITHOUT COMMAND — ignored ═══ */
   if (isAdmin) return;
 
   /* ═══ NON-ADMIN DM ═══ */
@@ -2489,8 +2594,11 @@ async function connectBot(){
         reconnectAttempts = 0; botStartTime = Date.now();
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
+        // Extract bot LID if available (LID-aware)
+        botLid = sock.user?.lid ? sock.user.lid.split('@')[0].split(':')[0] : null;
         consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0;
         pushLog('success','bot','Connected as '+botNumber);
+        if (botLid) pushLog('info','bot','Bot LID: '+botLid);
         pushLog('info','time',describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm());
         pushLog('info','main',`Main group: ${mainGroupJid || 'NOT SET — use !setmain'}`);
 
@@ -2510,15 +2618,16 @@ async function connectBot(){
           chatJid: ADMIN_JID, chatType: 'system',
           senderJid: botJid, senderName: 'BOT ONLINE',
           phone: ADMIN_PHONE, lid: lidList.join(', ') || 'none',
-          text: 'Bot ONLINE as ' + botNumber + '\nMain group: ' + (mainGroupJid || 'NOT SET') + '\n' + describeWindow(),
+          text: 'Bot ONLINE as ' + botNumber + '\nBot LID: ' + (botLid || 'unknown') + '\nMain group: ' + (mainGroupJid || 'NOT SET') + '\n' + describeWindow(),
           mediaType: 'system', isAdmin: true
         });
         pushLog('success','admin','Live-log: ONLINE announcement');
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v62 ONLINE\n' +
+            'BreadBot v63 ONLINE\n' +
             'Bot: ' + botNumber + '\n' +
+            'Bot LID: ' + (botLid || 'unknown') + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
             'Main group: ' + (mainGroupJid || 'NOT SET — send !setmain <link>') + '\n' +
             'Groups: ' + joinedGroups.size + '\n' +
@@ -2599,13 +2708,13 @@ async function connectBot(){
 async function disconnectBot(){
   manualDisconnect = true;
   if (sock){ try { sock.end(undefined); } catch(e){} sock = null;
-    connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; botNumber = null;
+    connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; botNumber = null; botLid = null;
     pushLog('warn','bot','Disconnected'); }
 }
 function refreshQR(){
   qrDataUri = null; connectionStatus = 'disconnected'; manualDisconnect = true;
   if (sock){ try { sock.end(undefined); } catch(e){} sock = null; }
-  isConnecting = false; botNumber = null;
+  isConnecting = false; botNumber = null; botLid = null;
   consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0; restart515InFlight = false;
   pushLog('info','bot','Manual QR refresh');
   setTimeout(function(){ manualDisconnect = false; connectBot(); }, 1000);
@@ -2618,7 +2727,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v62</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v63</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -2638,13 +2747,14 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v62</h1>
+<h1>BreadBot v63</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — bot ignores all group messages. Send <b>!setmain &lt;link&gt;</b> from DM.</div>
 <div class="sub">Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2>
 <div><span class="dot" id="dot"></span><span id="st">-</span></div>
 <div class="row"><span>Bot</span><span class="val" id="bn">-</span></div>
+<div class="row"><span>Bot LID</span><span class="val" id="bl">-</span></div>
 <div class="row"><span>Uptime</span><span class="val" id="up">-</span></div>
 <div class="row"><span>Paused</span><span class="val" id="pz">-</span></div>
 <div class="row"><span>Admin active</span><span class="val" id="aa">-</span></div>
@@ -2706,6 +2816,7 @@ $('dm').textContent=(d.window&&d.window.dmAI)||'-';
 $('ai').textContent=(d.ai&&d.ai.active)||'NONE';
 $('mg').textContent=d.mainGroup||'NOT SET';
 $('bn').textContent=d.botNumber||'-';
+$('bl').textContent=d.botLid||'unknown';
 var u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
 $('up').textContent=h+'h '+m+'m '+s+'s';
 $('pz').textContent=d.paused?'yes':'no';
@@ -2758,13 +2869,14 @@ app.get('/health', function(req,res){ res.json({
   window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
   paused: botPaused, adminActive: isAdminActive(),
   mainGroup: mainGroupJid,
+  botNumber, botLid,
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
   ai: { active: activeProvider, providers: providerReport },
   consecutive515
 }); });
 
 app.get('/api/status', function(req,res){ res.json({
-  status: connectionStatus, botNumber,
+  status: connectionStatus, botNumber, botLid,
   groups: joinedGroups.size, dms: activeDMs.size,
   queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
   adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
@@ -2819,14 +2931,15 @@ app.get('/admin/flow', function(req,res){
     adminActiveUntil: new Date(adminActiveUntil).toISOString(),
     deletes: { min: deleteHist.min.length, hour: deleteHist.hour.length, day: deleteHist.day.length },
     fibIdx: { ...fibIdx },
-    mainGroupLids: recentGroupLids.size
+    mainGroupLids: recentGroupLids.size,
+    botLid
   });
 });
 app.get('/admin/stats', function(req,res){
   resetDailyStats();
   const age = getAccountAgeDays();
   res.json({
-    status: connectionStatus, botNumber,
+    status: connectionStatus, botNumber, botLid,
     uptime: Math.floor((Date.now()-botStartTime)/1000),
     dmCount: activeDMs.size, groupCount: joinedGroups.size,
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
@@ -2884,6 +2997,7 @@ app.listen(PORT, async function(){
   console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?'ON':'OFF'));
   console.log('Admin active window: '+ADMIN_ACTIVE_MS/1000+'s');
   console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
+  console.log('LID-aware admin detection: ENABLED');
 
   pushLog('info','system','Boot port '+PORT);
   pushLog('info','system','Admin: '+ADMIN_PHONE);
@@ -2891,6 +3005,7 @@ app.listen(PORT, async function(){
   pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
   pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
   pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
+  pushLog('info','admin','LID-aware detection enabled');
 
   findWorkingY2MateHost().then(h => {
     if (h) pushLog('success','yt','y2mate host: '+h);

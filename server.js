@@ -1,10 +1,12 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v61
- *  - Only Rewind AI (no extra API calls)
+ *  BreadBot v62
+ *  - mainGroupJid starts as null (admin must !setmain)
+ *  - Admin preemption: slow lane pauses when admin is talking
+ *  - Per-JID send lock prevents conflicts
  *  - Read receipts + typing indicator
- *  - Faster WhatsApp connect
+ *  - Rewind AI only
  * ============================================================ */
 
 const express = require('express');
@@ -42,7 +44,6 @@ const ADMIN_LID_FILE         = path.join(__dirname,'admin_lids.json');
 const HARDCODED_ADMIN_LIDS   = ['115110005706891'];
 const MAIN_GROUP_FILE        = path.join(__dirname,'main_group_jid.json');
 const ADMIN_GROUP_LINK       = 'https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7?s=sw&p=a&mlu=4&ilr=4';
-const HARDCODED_MAIN_GROUP_JID = '120363252134990834@g.us';
 
 const JOIN_QUEUE_FILE    = path.join(__dirname,'join_queue.json');
 const JOIN_MAX_PER_DAY       = 15;
@@ -83,6 +84,15 @@ const SCRAPER_NSFW_SITE = process.env.SCRAPER_NSFW_SITE || 'nsfw';
 const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
 const DOWNLOAD_PICK_TTL  = 10 * 60 * 1000;
 const DOWNLOAD_MAX_PICKS = 8;
+
+/* Admin preemption window */
+const ADMIN_ACTIVE_MS = 45000;
+let adminActiveUntil = 0;
+
+function isAdminActive(){ return Date.now() < adminActiveUntil; }
+function touchAdminActive(){
+  adminActiveUntil = Date.now() + ADMIN_ACTIVE_MS;
+}
 
 let botPaused = false;
 let botOfflineUntil = 0;
@@ -135,8 +145,7 @@ async function detectAIBackend(){
     activeKey = found.key;
     pushLog('success','ai',`rewind: OK ${providerReport.rewind.ms}ms — active`);
   } else {
-    activeProvider = null;
-    activeKey = null;
+    activeProvider = null; activeKey = null;
     pushLog('error','ai',`Rewind unavailable: ${providerReport.rewind?.error || 'unknown'}`);
   }
   return activeProvider;
@@ -170,7 +179,22 @@ async function testAllProviders(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  FIBONACCI TASK DELAYS
+ *  PER-JID SEND LOCK — prevents two lanes sending to same chat
+ * ══════════════════════════════════════════════════════════════ */
+const jidLockMap = new Map();
+async function withJidLock(jid, fn){
+  while (jidLockMap.has(jid)){
+    try { await jidLockMap.get(jid); } catch(e){}
+  }
+  let release;
+  const lock = new Promise(r => release = r);
+  jidLockMap.set(jid, lock);
+  try { return await fn(); }
+  finally { jidLockMap.delete(jid); release(); }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  FIBONACCI DELAYS
  * ══════════════════════════════════════════════════════════════ */
 const FIB_TABLES = {
   broadcast: [10, 20, 30, 50, 80, 130, 210],
@@ -358,7 +382,7 @@ function contentBlocked(text){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  DISCONNECT CODE HELPER
+ *  DISCONNECT HELPERS
  * ══════════════════════════════════════════════════════════════ */
 function getDisconnectStatusCode(lastDisconnect) {
   if (!lastDisconnect) return undefined;
@@ -427,7 +451,8 @@ const RESTART_515_BASE_DELAY_MS=1500, RESTART_515_MAX_DELAY_MS=30000;
 const MIN_RECONNECT_INTERVAL_MS=10000, SPAM_WINDOW_MS=60000;
 const SPAM_THRESHOLD=3, SPAM_COOLDOWN_MS=60000;
 
-let mainGroupJid = HARDCODED_MAIN_GROUP_JID;
+/* MAIN GROUP — starts NULL. Admin must set it. */
+let mainGroupJid = null;
 
 const botSentIds = new Set();
 const processedMessages = new Set();
@@ -464,7 +489,7 @@ function resetDailyStats(){
 resetDailyStats();
 
 /* ══════════════════════════════════════════════════════════════
- *  DUAL QUEUE
+ *  DUAL QUEUE — with admin preemption
  * ══════════════════════════════════════════════════════════════ */
 class DualQueue {
   constructor(){
@@ -502,6 +527,17 @@ class DualQueue {
     if (this.slowRunning) return;
     this.slowRunning = true;
     while (this.slow.length){
+      // ADMIN PREEMPTION — if admin is active, pause slow lane
+      if (isAdminActive()){
+        const wait = adminActiveUntil - Date.now() + 500;
+        if (wait > 0){
+          pushLog('info','queue',`Admin active — pausing slow lane ${Math.ceil(wait/1000)}s`);
+          await new Promise(r => setTimeout(r, wait));
+          // re-check after wait, may have been extended
+          continue;
+        }
+      }
+
       const job = this.slow.shift();
 
       const rotated = pickRotationSlot(job.taskType || 'group');
@@ -676,7 +712,7 @@ async function botIsAdminIn(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  PRESENCE — READ + TYPING
+ *  READ + TYPING
  * ══════════════════════════════════════════════════════════════ */
 async function markRead(msg){
   if (!ENABLE_READ_RECEIPTS || !sock || !msg?.key) return;
@@ -696,6 +732,22 @@ async function showTyping(jid){
     resetDailyStats(); dailyStats.typingsSent++;
     return ms;
   } catch(e){ return 0; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  INVITE RESOLUTION
+ * ══════════════════════════════════════════════════════════════ */
+function extractInviteCode(text){
+  if (!text) return null;
+  const m = String(text).match(/chat\.whatsapp\.com\/([A-Za-z0-9]{15,30})/i);
+  return m ? m[1] : null;
+}
+async function resolveInviteToJid(link){
+  const code = extractInviteCode(link);
+  if (!code) throw new Error('No invite code found in link');
+  const info = await sock.groupGetInviteInfo(code);
+  if (!info || !info.id) throw new Error('Could not resolve invite');
+  return { code, jid: info.id, subject: info.subject || 'unknown', size: info.size || 0 };
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -738,9 +790,10 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskTy
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  LANE-AWARE SEND — with optional typing indicator
+ *  SEND — per-JID lock + admin preemption check
  * ══════════════════════════════════════════════════════════════ */
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false){
+  // Priority 0 = admin, always allowed. Others respect policy.
   if (priority >= 2){
     const gate = policyCanSend(jid);
     if (!gate.ok){
@@ -759,8 +812,6 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
 
   const actualLane = lane === 'auto' ? (priority === 0 ? 'fast' : 'slow') : lane;
   if (priority >= 2) recordOutbound(jid);
-
-  // Typing indicator for user-facing sends (priority >= 2)
   const showTyping_ = typing && priority >= 2 && ENABLE_TYPING;
 
   return new Promise((resolve, reject)=>{
@@ -771,22 +822,23 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
         if (botPaused && priority > 0){ reject(new Error('Bot paused')); return; }
         if (Date.now() < botOfflineUntil && priority > 0){ reject(new Error('Bot offline')); return; }
 
-        // Show typing before the actual send
-        if (showTyping_){
-          try { await sock.sendPresenceUpdate('composing', jid); } catch(e){}
-          const ms = 1500 + Math.random() * 4500;
-          await new Promise(r => setTimeout(r, ms));
-          try { await sock.sendPresenceUpdate('paused', jid); } catch(e){}
-          await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
-          resetDailyStats(); dailyStats.typingsSent++;
-        }
+        return withJidLock(jid, async ()=>{
+          if (showTyping_){
+            try { await sock.sendPresenceUpdate('composing', jid); } catch(e){}
+            const ms = 1500 + Math.random() * 4500;
+            await new Promise(r => setTimeout(r, ms));
+            try { await sock.sendPresenceUpdate('paused', jid); } catch(e){}
+            await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+            resetDailyStats(); dailyStats.typingsSent++;
+          }
 
-        try {
-          const sent = await sock.sendMessage(jid, content);
-          if (sent?.key?.id) markBotSent(sent.key.id);
-          if (priority >= 2) policyRecordSend(jid);
-          resolve(sent);
-        } catch(e){ reject(e); }
+          try {
+            const sent = await sock.sendMessage(jid, content);
+            if (sent?.key?.id) markBotSent(sent.key.id);
+            if (priority >= 2) policyRecordSend(jid);
+            resolve(sent);
+          } catch(e){ reject(e); }
+        });
       }
     };
     if (actualLane === 'fast') jobs.pushFast(job);
@@ -794,7 +846,8 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   });
 }
 function adminReply(jid, text){
-  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false).catch(e => pushLog('warn','adminreply',e.message));
+  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
+    .catch(e => pushLog('warn','adminreply',e.message));
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1190,16 +1243,22 @@ function loadState(){
     const a = JSON.parse(fs.readFileSync(ADMIN_LID_FILE,'utf8')) || [];
     for (const l of a) adminLids.add(l);
   } } catch(e){}
+  // Load main group ONLY if saved by admin. NO hardcoded fallback.
   try { if (fs.existsSync(MAIN_GROUP_FILE)){
     const saved = fs.readFileSync(MAIN_GROUP_FILE,'utf8').trim();
     if (saved) mainGroupJid = saved;
   } } catch(e){}
-  pushLog('info','state',`queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} main=${mainGroupJid||'-'}`);
+  pushLog('info','state',`queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} main=${mainGroupJid||'NOT SET'}`);
 }
 function setMainGroup(jid){
   mainGroupJid = jid;
   try { fs.writeFileSync(MAIN_GROUP_FILE, jid); } catch(e){}
   pushLog('success','main',`Main group set: ${jid}`);
+}
+function clearMainGroup(){
+  mainGroupJid = null;
+  try { if (fs.existsSync(MAIN_GROUP_FILE)) fs.unlinkSync(MAIN_GROUP_FILE); } catch(e){}
+  pushLog('warn','main','Main group cleared');
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1230,7 +1289,7 @@ async function probeMainGroup(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  WELCOME / GOODBYE
+ *  WELCOME / GOODBYE — ONLY in main group
  * ══════════════════════════════════════════════════════════════ */
 async function generateWelcome(userName){
   const ai = await askAI(
@@ -1270,10 +1329,10 @@ async function handleParticipants(update){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  ANTI-LINK
+ *  ANTI-LINK — only in main group, only if bot is admin
  * ══════════════════════════════════════════════════════════════ */
 async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
-  if (jid === mainGroupJid) return false;
+  if (!mainGroupJid || jid !== mainGroupJid) return false; // only main group
   const s = getGroupSetting(jid);
   if (!s.antilink || isAdmin) return false;
   const matches = text.match(/(https?:\/\/[^\s]+)/gi);
@@ -1298,13 +1357,6 @@ async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
 /* ══════════════════════════════════════════════════════════════
  *  JOIN QUEUE
  * ══════════════════════════════════════════════════════════════ */
-function extractInviteCodes(text){
-  if (!text) return [];
-  const s=new Set();
-  const re = /chat\.whatsapp\.com\/([A-Za-z0-9]{15,30})/gi;
-  let m; while ((m = re.exec(text)) !== null) s.add(m[1]);
-  return [...s];
-}
 function queueJoin(code, addedBy='unknown', source='unknown'){
   if (!code) return false;
   const gate = policyCanJoin();
@@ -1350,8 +1402,9 @@ function pickGreeting(p){ const pool = GREETING_PHRASES[p] || GREETING_PHRASES.m
 
 function scheduleGreetings(){
   setInterval(async function(){
-    if (!sock || connectionStatus!=='connected' || !joinedGroups.size || botPaused) return;
+    if (!sock || connectionStatus!=='connected' || !mainGroupJid || botPaused) return;
     if (Date.now() < botOfflineUntil) return;
+    if (isAdminActive()) return; // don't greet while admin is active
     const now = Date.now();
     const minMs = GREETING_MIN_HOURS*3600000, maxMs = GREETING_MAX_HOURS*3600000;
     for (const [jid] of joinedGroups){
@@ -1378,7 +1431,7 @@ function scheduleDailyReport(){
     lastDailyReportDate = today; resetDailyStats(); const s = dailyStats;
     try {
       await sock.sendMessage(ADMIN_JID, { text:
-        `Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}\nBroadcasts: ${s.broadcastsSent}\nDeletes: ${s.deletesDone}\nReads: ${s.readsSent}\nTypings: ${s.typingsSent}\nPolicy blocks: ${s.policyBlocks}\nReply rate: ${(replyRate()*100).toFixed(0)}%` });
+        `Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}\nBroadcasts: ${s.broadcastsSent}\nDeletes: ${s.deletesDone}\nReads: ${s.readsSent}\nTypings: ${s.typingsSent}\nPolicy blocks: ${s.policyBlocks}\nReply rate: ${(replyRate()*100).toFixed(0)}%\nMain group: ${mainGroupJid||'NOT SET'}` });
     } catch(e){}
   }, 60000);
   pushLog('info','system','scheduleDailyReport started');
@@ -1391,6 +1444,7 @@ function scheduleGroupJoins(){
     if (h < JOIN_ACTIVE_HOUR_START || h >= JOIN_ACTIVE_HOUR_END) return;
     if (joinInProgress || !sock || connectionStatus !== 'connected' || !joinQueue.length) return;
     if (Date.now() - lastJoinAt < nextJoinGapMs) return;
+    if (isAdminActive()) return;
 
     joinInProgress = true;
     const item = joinQueue.shift();
@@ -1525,33 +1579,48 @@ const replyCache = new NodeCache({ stdTTL:600 });
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v61 - Admin
+const COMMAND_LIST = `BreadBot v62 — Admin
 
+MAIN GROUP
+!setmain <invite-link>  — resolve link, set as main group
+!setmain                — run inside the group to set it
+!main                   — show current main group
+!clearmain              — unset main group
+
+JOIN
+!join <invite-link>     — join a group manually
+
+BASICS
 !help / !ping / !status / !jobs / !flow
 !test / !testall / !aitest
 !scraperstatus / !whoami / !stats / !summary
 !logs / !errors / !count / !groups / !inbox
 
-!setmain / !main / !invite / !mylink
+MESSAGING
 !broadcast <msg> / !bcgroup <msg> / !bcdm <msg> / !all <msg>
 !send <jid> <msg> / !grouplink <link>
 
+GROUP MANAGEMENT (main group only)
 !antilink on|off / !welcome on|off / !goodbye on|off
 !setwelcome / !setgoodbye
 !promote / !demote / !kick @user
 !tagall / !mute / !unmute / !lock / !unlock
 
+MEDIA
 !pic <q> / !nextpic / !bcastpic <cap>
 !gif <q> / !nextgif / !bcastgif <cap>
 !allimg <url> | <cap>
 
+DOWNLOADS
 !dl <q> / !download <url> / !music <q>
 !nsfwvideo <q> / !nsfw <url> / !nsfwroleplay on|off / !cleanup
 
+CONTROL
 !pause / !resume / !offline <mins> / !online
 !limit <n> / !unlimit
 
-AI: Rewind only. Typing: ${ENABLE_TYPING?'ON':'OFF'}. Reads: ${ENABLE_READ_RECEIPTS?'ON':'OFF'}. Blocklist: ${ENABLE_CONTENT_BLOCK?'ON':'OFF'}.`;
+AI: Rewind only. Typing: ON. Reads: ON. Blocklist: OFF.
+Main group: ${mainGroupJid || 'NOT SET — use !setmain'}`;
 
 function logRepeatedCmd(cmd, chatJid){
   const now = Date.now();
@@ -1575,9 +1644,82 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'online': botOfflineUntil = 0; await reply('Online.'); break;
     case 'limit': { const n = Math.max(1, parseInt(args[1],10)||20); MESSAGE_FLOOD_THRESHOLD = n; await reply(`Limit ${n}/s.`); break; }
     case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('No limit.'); break;
+
+    /* ───── MAIN GROUP ───── */
+    case 'setmain': {
+      // Case 1: link provided
+      const linkArg = args.slice(1).join(' ').trim();
+      if (linkArg && /chat\.whatsapp\.com/i.test(linkArg)){
+        try {
+          const { code, jid, subject, size } = await resolveInviteToJid(linkArg);
+          pushLog('info','main',`Resolved ${code} → ${jid} (${subject}, ${size})`);
+          // If bot isn't already in the group, join it
+          if (!joinedGroups.has(jid)){
+            try {
+              const joined = await sock.groupAcceptInvite(code);
+              if (joined){
+                joinedGroups.set(joined, { name: subject, joinedAt: Date.now(), discovered: false });
+                lastGreetingAt.set(joined, Date.now());
+                saveGroups();
+                pushLog('success','main',`Joined ${joined}`);
+              }
+            } catch(e){
+              pushLog('warn','main',`Could not join ${jid}: ${e.message}`);
+            }
+          }
+          setMainGroup(jid);
+          await reply(`✅ Main group set\n${jid}\n${subject} (${size} members)`);
+        } catch(e){
+          await reply(`❌ Could not resolve link: ${e.message}`);
+        }
+        break;
+      }
+      // Case 2: run inside a group
+      if (chatJid.endsWith('@g.us')){
+        setMainGroup(chatJid);
+        await reply(`✅ Main group set to this group: ${chatJid}`);
+        break;
+      }
+      await reply('❌ Usage: `!setmain https://chat.whatsapp.com/...` from DM, OR `!setmain` inside the group.');
+      break;
+    }
+    case 'clearmain': {
+      clearMainGroup();
+      await reply('✅ Main group cleared. Bot will ignore all group messages until a new one is set.');
+      break;
+    }
+    case 'main': {
+      if (!mainGroupJid){ await reply('Main group: NOT SET\nUse `!setmain <link>` or run `!setmain` inside the group.'); break; }
+      try {
+        const meta = await sock.groupMetadata(mainGroupJid);
+        await reply(`Main group: ${mainGroupJid}\n${meta.subject || '?'} (${meta.participants?.length || 0} members)`);
+      } catch(e){
+        await reply(`Main group: ${mainGroupJid} (metadata unavailable: ${e.message})`);
+      }
+      break;
+    }
+    case 'join': {
+      const linkArg = args.slice(1).join(' ').trim();
+      if (!linkArg){ await reply('❌ Usage: `!join <invite-link>`'); break; }
+      try {
+        const { code, jid, subject, size } = await resolveInviteToJid(linkArg);
+        const joined = await sock.groupAcceptInvite(code);
+        if (joined){
+          joinedGroups.set(joined, { name: subject, joinedAt: Date.now(), discovered: false });
+          lastGreetingAt.set(joined, Date.now());
+          saveGroups();
+          pushLog('success','main',`Joined ${joined}`);
+        }
+        await reply(`✅ Joined\n${joined}\n${subject} (${size} members)`);
+      } catch(e){
+        await reply(`❌ ${e.message}`);
+      }
+      break;
+    }
+
     case 'jobs': {
       const s = jobs.stats();
-      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}`);
+      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}\nAdmin active: ${isAdminActive() ? 'YES ('+Math.ceil((adminActiveUntil-Date.now())/1000)+'s)' : 'no'}`);
       break;
     }
     case 'flow': {
@@ -1594,7 +1736,8 @@ async function handleAdminCommand(text, chatJid, msg){
         `Reply rate (${replyTracker.sends.length}): ${rate}%`,
         `Broadcasts paused: ${paused}`,
         `Deletes: ${deleteHist.min.length}/5m · ${deleteHist.hour.length}/30h · ${deleteHist.day.length}/100d`,
-        `Main LIDs cached: ${recentGroupLids.size}`,
+        `Main group: ${mainGroupJid||'NOT SET'}`,
+        `Admin active: ${isAdminActive() ? 'YES' : 'no'}`,
         `Typing: ${ENABLE_TYPING?'ON':'OFF'} · Reads: ${ENABLE_READ_RECEIPTS?'ON':'OFF'}`
       ].join('\n'));
       break;
@@ -1614,10 +1757,11 @@ async function handleAdminCommand(text, chatJid, msg){
         'Time: '+describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm(),
         'Paused: '+botPaused+' Offline: '+(botOfflineUntil>Date.now()?'yes':'no'),
         '','Groups: '+joinedGroups.size+' DMs: '+activeDMs.size,
-        'Main: '+(mainGroupJid||'not set'),'Queue: '+joinQueue.length+'/'+JOIN_QUEUE_MAX,
+        'Main: '+(mainGroupJid||'NOT SET'),'Queue: '+joinQueue.length+'/'+JOIN_QUEUE_MAX,
         'Fast: '+s.fast.queued+' Slow: '+s.slow.queued,
         'Focus: '+f.currentState,
         'AI: '+(activeProvider||'NONE'),
+        'Admin active: '+(isAdminActive()?'YES':'no'),
         '','Today','DM: '+st.dmsReplied+' Media: '+(st.picsSent+st.videosSent),
         'Reads: '+st.readsSent+' Typings: '+st.typingsSent,
         'Broadcasts: '+st.broadcastsSent+' Deletes: '+st.deletesDone,
@@ -1625,10 +1769,10 @@ async function handleAdminCommand(text, chatJid, msg){
       ].join('\n'));
       break;
     }
-    case 'count': await reply('Groups: '+joinedGroups.size+'\nDMs: '+activeDMs.size+'\nQueue: '+joinQueue.length+'\nPending: '+pendingRequests.size+'\nMain: '+(mainGroupJid||'not set')+'\nAI: '+(activeProvider||'NONE')); break;
+    case 'count': await reply('Groups: '+joinedGroups.size+'\nDMs: '+activeDMs.size+'\nQueue: '+joinQueue.length+'\nPending: '+pendingRequests.size+'\nMain: '+(mainGroupJid||'NOT SET')+'\nAI: '+(activeProvider||'NONE')); break;
     case 'groups': {
       if (!joinedGroups.size){ await reply('No groups.'); return; }
-      const list = [...joinedGroups.entries()].map(function(kv,i){return (i+1)+'. '+(kv[0]===mainGroupJid?'* ':'')+kv[0];}).join('\n');
+      const list = [...joinedGroups.entries()].map(function(kv,i){return (i+1)+'. '+(kv[0]===mainGroupJid?'⭐ ':'')+kv[0];}).join('\n');
       await reply('Groups ('+joinedGroups.size+')\n'+list);
       break;
     }
@@ -1638,12 +1782,6 @@ async function handleAdminCommand(text, chatJid, msg){
       await reply('DMs ('+activeDMs.size+')\n'+list);
       break;
     }
-    case 'setmain': {
-      if (!chatJid.endsWith('@g.us')){ await reply('Run this in the group.'); return; }
-      setMainGroup(chatJid); await reply('Main group set.');
-      break;
-    }
-    case 'main': await reply('Main: '+(mainGroupJid||'not set')); break;
     case 'mylink': await adminReply(chatJid, 'Join my group:\n'+ADMIN_GROUP_LINK); break;
     case 'send': {
       const t = args[1]; const body = args.slice(2).join(' ').trim();
@@ -1655,6 +1793,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'broadcast': case 'bcgroup': {
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
+      if (!mainGroupJid){ await reply('Set main group first: `!setmain`'); break; }
       const m = args.slice(1).join(' ');
       if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
       await reply('Broadcasting to '+joinedGroups.size+' groups...');
@@ -1669,6 +1808,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'all': case 'bcdm': {
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
+      if (!mainGroupJid){ await reply('Set main group first: `!setmain`'); break; }
       const m = args.slice(1).join(' ');
       if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
       const mode = cmd === 'all' ? 'all' : 'dms';
@@ -1772,6 +1912,7 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'setgoodbye': { const t = args.slice(1).join(' '); if (!t){ await reply('Provide text.'); return; } getGroupSetting(chatJid).goodbyeMsg = t; saveGroupSettingsDebounced(); await reply('Set.'); break; }
     case 'promote': case 'demote': case 'kick': {
       if (!chatJid.endsWith('@g.us')){ await reply('Group only.'); return; }
+      if (chatJid !== mainGroupJid){ await reply('Only in main group.'); return; }
       const botIsAdmin = await botIsAdminIn(chatJid);
       if (!botIsAdmin){ await reply('Bot is not admin here.'); return; }
       const t = msg.message?.extendedTextMessage?.contextInfo?.participant
@@ -1783,6 +1924,7 @@ async function handleAdminCommand(text, chatJid, msg){
       break;
     }
     case 'tagall': {
+      if (chatJid !== mainGroupJid){ await reply('Only in main group.'); return; }
       try {
         const meta = await sock.groupMetadata(chatJid);
         const mentions = meta.participants.map(p=>p.id);
@@ -1791,10 +1933,10 @@ async function handleAdminCommand(text, chatJid, msg){
       } catch(e){ await reply('Err: '+e.message); }
       break;
     }
-    case 'mute':   { if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'announcement'); await reply('Muted.'); } catch(e){ await reply('Err: '+e.message); } break; }
-    case 'unmute': { if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'not_announcement'); await reply('Unmuted.'); } catch(e){ await reply('Err: '+e.message); } break; }
-    case 'lock':   { if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'locked'); await reply('Locked.'); } catch(e){ await reply('Err: '+e.message); } break; }
-    case 'unlock': { if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'unlocked'); await reply('Unlocked.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'mute':   { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'announcement'); await reply('Muted.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'unmute': { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'not_announcement'); await reply('Unmuted.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'lock':   { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'locked'); await reply('Locked.'); } catch(e){ await reply('Err: '+e.message); } break; }
+    case 'unlock': { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'unlocked'); await reply('Unlocked.'); } catch(e){ await reply('Err: '+e.message); } break; }
     case 'dl': {
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('Usage: !dl <song or video>'); return; }
@@ -1908,7 +2050,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'test': {
       const s = jobs.stats();
-      await reply('Bot: '+botNumber+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
+      await reply('Bot: '+botNumber+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nMain: '+(mainGroupJid||'NOT SET')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
       break;
     }
     case 'testall': {
@@ -1919,7 +2061,7 @@ async function handleAdminCommand(text, chatJid, msg){
       const rw = await testAllProviders();
       tests.push('rewind: '+(rw.rewind?.ok ? 'OK '+rw.rewind.ms+'ms' : 'FAIL '+(rw.rewind?.status||'')));
       tests.push('WA: '+(connectionStatus==='connected'?'OK':'FAIL'));
-      tests.push('Main: '+(mainGroupJid?'OK':'FAIL'));
+      tests.push('Main: '+(mainGroupJid?'OK '+mainGroupJid:'NOT SET'));
       tests.push('NSFW DL: '+(RedgifsDownloader?'OK':'FAIL'));
       tests.push('Reply rate: '+(replyRate()*100).toFixed(0)+'%');
       tests.push('Groups: '+joinedGroups.size+' DMs: '+activeDMs.size);
@@ -2113,7 +2255,8 @@ async function handleMessage(msg){
   const pushName  = msg.pushName || (msg.key.fromMe?'You':'Unknown');
   const chatType  = isGroup ? 'group' : 'dm';
 
-  if (isGroup){ discoverGroup(chatJid); recordGroupMessage(chatJid, text); }
+  if (isGroup) discoverGroup(chatJid);
+  if (isGroup) recordGroupMessage(chatJid, text);
   else activeDMs.add(chatJid);
 
   if (!msg.key.fromMe){
@@ -2123,15 +2266,19 @@ async function handleMessage(msg){
 
   const isAdmin = isAdminSender(msg, senderJid);
 
+  // ADMIN ACTIVE — every admin message touches the preemption flag
+  if (isAdmin) touchAdminActive();
+
   pushLiveMessage({
     id:msgId, ts:new Date().toISOString(), chatJid, chatType,
     senderJid, senderName:pushName, phone:phone||'-', lid:lid||'-',
     text:text.slice(0,200)||'['+mediaType+']', mediaType, isAdmin
   });
 
+  /* ═══ 1. ADMIN COMMANDS — accepted in admin DM OR main group ═══ */
   if (isAdmin && text.startsWith('!')){
     const inDM = !isGroup;
-    const inMainGroup = chatJid === mainGroupJid;
+    const inMainGroup = mainGroupJid && chatJid === mainGroupJid;
     if (!inDM && !inMainGroup){
       pushLog('warn','admin',`Cmd ignored in non-main group ${chatJid}`);
       return;
@@ -2145,6 +2292,18 @@ async function handleMessage(msg){
     }
     pushLog('info','admin','Cmd: '+text.split(' ')[0]);
     await handleAdminCommand(text, chatJid, msg);
+    return;
+  }
+
+  /* ═══ 2. NO MAIN GROUP → IGNORE ALL GROUP MESSAGES ═══ */
+  if (isGroup && !mainGroupJid){
+    // bot isn't configured yet — silently ignore
+    return;
+  }
+
+  /* ═══ 3. NOT MAIN GROUP → IGNORE ALL GROUP MESSAGES ═══ */
+  if (isGroup && chatJid !== mainGroupJid){
+    // bot only operates in main group
     return;
   }
 
@@ -2199,12 +2358,12 @@ async function handleMessage(msg){
     return;
   }
 
+  /* ═══ GROUP MESSAGES — main group only ═══ */
   if (isGroup){
     await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
-    const isMain = chatJid === mainGroupJid;
     const directed = isDirectedAtBot(msg, text);
 
-    if (isMain && text){
+    if (text){
       if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
       const isNsfw = detectNsfw(text);
       if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group', true); return; }
@@ -2267,14 +2426,17 @@ async function handleMessage(msg){
     return;
   }
 
+  /* ═══ ADMIN DM WITHOUT COMMAND — ignored, admin knows to use ! ═══ */
   if (isAdmin) return;
+
+  /* ═══ NON-ADMIN DM ═══ */
   if (!isDmAiWindow()) return;
   enqueueDM({ msg, text, chatJid, senderJid, pushName, phone,
     intent: detectMediaIntent(text), lang: detectLanguage(text) });
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  CONNECT BOT — faster
+ *  CONNECT BOT
  * ══════════════════════════════════════════════════════════════ */
 let cachedVersion = null;
 async function getVersion(){
@@ -2284,7 +2446,7 @@ async function getVersion(){
     cachedVersion = version;
     return version;
   } catch(e){
-    cachedVersion = [2, 3000, 1043857760]; // fallback known-good
+    cachedVersion = [2, 3000, 1043857760];
     return cachedVersion;
   }
 }
@@ -2320,7 +2482,7 @@ async function connectBot(){
       if (qr){
         qrDataUri = await QRCode.toDataURL(qr);
         connectionStatus = 'qr';
-        pushLog('info','bot','QR generated — scan from admin phone');
+        pushLog('info','bot','QR generated');
       }
       if (connection === 'open'){
         isConnecting = false; connectionStatus = 'connected';
@@ -2330,6 +2492,7 @@ async function connectBot(){
         consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0;
         pushLog('success','bot','Connected as '+botNumber);
         pushLog('info','time',describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm());
+        pushLog('info','main',`Main group: ${mainGroupJid || 'NOT SET — use !setmain'}`);
 
         try { await sock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
         try { await sock.updateLastSeenPrivacy('none'); } catch(e){}
@@ -2337,9 +2500,8 @@ async function connectBot(){
 
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
 
-        setTimeout(() => { probeMainGroup().catch(()=>{}); }, 8000);
+        if (mainGroupJid) setTimeout(() => { probeMainGroup().catch(()=>{}); }, 8000);
 
-        // Detect AI AFTER connect — doesn't delay QR
         detectAIBackend().catch(e => pushLog('error','ai','detect: '+e.message));
 
         const lidList = [...adminLids];
@@ -2348,23 +2510,22 @@ async function connectBot(){
           chatJid: ADMIN_JID, chatType: 'system',
           senderJid: botJid, senderName: 'BOT ONLINE',
           phone: ADMIN_PHONE, lid: lidList.join(', ') || 'none',
-          text: 'Bot ONLINE as ' + botNumber + '\nAdmin: ' + ADMIN_PHONE + '\nAI: pending...\n' + describeWindow(),
+          text: 'Bot ONLINE as ' + botNumber + '\nMain group: ' + (mainGroupJid || 'NOT SET') + '\n' + describeWindow(),
           mediaType: 'system', isAdmin: true
         });
         pushLog('success','admin','Live-log: ONLINE announcement');
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v61 ONLINE\n' +
+            'BreadBot v62 ONLINE\n' +
             'Bot: ' + botNumber + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
-            'Main: ' + (mainGroupJid||'not set') + '\n' +
+            'Main group: ' + (mainGroupJid || 'NOT SET — send !setmain <link>') + '\n' +
             'Groups: ' + joinedGroups.size + '\n' +
             'Account age: ' + getAccountAgeDays() + 'd\n' +
-            'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n' +
-            'Joins limit: ' + dailyJoinLimit(getAccountAgeDays()) + '\n' +
-            describeWindow() + '\n\n' +
-            'Send !flow for status.'
+            'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n\n' +
+            'Admin commands accepted in DM and main group only.\n' +
+            'Other groups are ignored.'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin','DM: '+e.message); }
@@ -2375,9 +2536,9 @@ async function connectBot(){
         pushLog('warn','bot',`Disconnected (${code ?? '?'}) — ${msg}`);
 
         if (manualDisconnect){ connectionStatus = 'disconnected'; return; }
-        if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out — delete auth_info to rescan'); return; }
+        if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
         if (code === 403){ connectionStatus = 'disconnected'; pushLog('error','bot','403 Forbidden — likely banned'); return; }
-        if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired — click Refresh QR'); return; }
+        if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired'); return; }
         if (code === 428 || code === 440){ connectionStatus = 'disconnected'; pushLog('error','bot','Conflict '+code); return; }
 
         if (code === DisconnectReason.restartRequired || code === 515){
@@ -2415,7 +2576,7 @@ async function connectBot(){
           setTimeout(function(){ try { sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error','bot','Max retries — click Refresh QR');
+          pushLog('error','bot','Max retries');
         }
       }
     });
@@ -2457,7 +2618,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v61</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v62</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -2474,16 +2635,19 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
 .sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
 .ai-badge{background:#238636;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
+.alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
+.alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v61</h1>
-<div class="sub">Admin: <b id="ap">-</b> | LIDs: <b id="al">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b></div>
+<h1>BreadBot v62</h1>
+<div class="alert" id="noMain">⚠️ Main group NOT SET — bot ignores all group messages. Send <b>!setmain &lt;link&gt;</b> from DM.</div>
+<div class="sub">Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2>
 <div><span class="dot" id="dot"></span><span id="st">-</span></div>
 <div class="row"><span>Bot</span><span class="val" id="bn">-</span></div>
 <div class="row"><span>Uptime</span><span class="val" id="up">-</span></div>
 <div class="row"><span>Paused</span><span class="val" id="pz">-</span></div>
-<div class="row"><span>515</span><span class="val" id="c5">-</span></div>
+<div class="row"><span>Admin active</span><span class="val" id="aa">-</span></div>
 <img id="qrImg" src="" style="display:none">
 <div style="margin-top:10px">
 <button class="primary" onclick="a('connect')">Start</button>
@@ -2492,6 +2656,11 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <button class="danger" onclick="a('disconnect')">Disconnect</button>
 <button onclick="a('pause')">Pause</button><button onclick="a('resume')">Resume</button>
 </div></div>
+<div class="card"><h2>Main Group</h2>
+<div class="row"><span>Status</span><span class="val" id="mgStatus">-</span></div>
+<div class="row"><span>JID</span><span class="val" id="mgJid" style="font-size:11px">-</span></div>
+<div class="row"><span>LIDs cached</span><span class="val" id="mainLids">-</span></div>
+</div>
 <div class="card"><h2>AI — Rewind only</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
 <div style="margin-top:8px"><button onclick="testAI()">Test Rewind</button></div></div>
 <div class="card"><h2>Policy</h2>
@@ -2499,8 +2668,6 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="row"><span>Recipients today</span><span class="val" id="recip">-</span></div>
 <div class="row"><span>Joins today</span><span class="val" id="joins">-</span></div>
 <div class="row"><span>Reply rate</span><span class="val" id="reply">-</span></div>
-<div class="row"><span>Broadcasts</span><span class="val" id="bcastPaused">-</span></div>
-<div class="row"><span>Main LIDs</span><span class="val" id="mainLids">-</span></div>
 </div>
 <div class="card"><h2>Lanes</h2>
 <div class="row"><span>Fast queue</span><span class="val" id="fq">-</span></div>
@@ -2513,15 +2680,12 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="row"><span>DMs</span><span class="val" id="d">-</span></div>
 <div class="row"><span>Join queue</span><span class="val" id="jq">-</span></div>
 <div class="row"><span>Pending</span><span class="val" id="pd">-</span></div>
-<div class="row"><span>Main</span><span class="val" id="mg">-</span></div>
 </div>
 <div class="card"><h2>Today</h2>
 <div class="row"><span>DM</span><span class="val" id="dms">-</span></div>
-<div class="row"><span>Reads sent</span><span class="val" id="reads">-</span></div>
-<div class="row"><span>Typings sent</span><span class="val" id="typs">-</span></div>
-<div class="row"><span>Broadcasts</span><span class="val" id="bc">-</span></div>
+<div class="row"><span>Reads</span><span class="val" id="reads">-</span></div>
+<div class="row"><span>Typings</span><span class="val" id="typs">-</span></div>
 <div class="row"><span>Deletes</span><span class="val" id="del">-</span></div>
-<div class="row"><span>Blocks</span><span class="val" id="blk">-</span></div>
 </div>
 <div class="card full"><h2>Live Messages</h2><div id="msgs"></div></div>
 <div class="card full"><h2>Logs</h2><div id="logs"></div></div>
@@ -2535,25 +2699,33 @@ async function testAI(){var b=$('aiList');b.innerHTML='Testing...';var r=await a
   var x=r.rewind;if(x&&x.ok)b.innerHTML='<div>OK rewind: '+x.ms+'ms ACTIVE</div>';
   else b.innerHTML='<div style="color:#f85149">FAIL rewind: '+(x?.status||'')+' '+esc(x?.error||'')+'</div>';}
 async function refresh(){try{var d=await api('stats');setS(d.status);
-$('ap').textContent=d.adminPhone||'-';$('al').textContent=(d.adminLids||[]).join(', ')||'none';
-$('w').textContent=(d.window&&d.window.time)||'-';$('ns').textContent=(d.window&&d.window.nsfw)||'-';
-$('dm').textContent=(d.window&&d.window.dmAI)||'-';$('ai').textContent=(d.ai&&d.ai.active)||'NONE';
+$('ap').textContent=d.adminPhone||'-';
+$('w').textContent=(d.window&&d.window.time)||'-';
+$('ns').textContent=(d.window&&d.window.nsfw)||'-';
+$('dm').textContent=(d.window&&d.window.dmAI)||'-';
+$('ai').textContent=(d.ai&&d.ai.active)||'NONE';
+$('mg').textContent=d.mainGroup||'NOT SET';
 $('bn').textContent=d.botNumber||'-';
 var u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
-$('up').textContent=h+'h '+m+'m '+s+'s';$('pz').textContent=d.paused?'yes':'no';$('c5').textContent=d.consecutive515||0;
+$('up').textContent=h+'h '+m+'m '+s+'s';
+$('pz').textContent=d.paused?'yes':'no';
+$('aa').textContent=d.adminActive?'YES':'no';
+if(!d.mainGroup){$('noMain').classList.add('show');}else{$('noMain').classList.remove('show');}
+$('mgStatus').textContent=d.mainGroup?'SET':'NOT SET';
+$('mgJid').textContent=d.mainGroup||'-';
+$('mainLids').textContent=(d.mainGroupLids||0);
 var p=d.policy||{};$('age').textContent=(p.ageDays||0)+'d';
 $('recip').textContent=(p.recipientsToday||0)+' / '+(p.recipientLimit||0);
 $('joins').textContent=(p.joinsToday||0)+' / '+(p.joinLimit||0);
 $('reply').textContent=((p.replyRate||0)*100).toFixed(0)+'%';
-$('bcastPaused').textContent=p.broadcastsAllowed?'no':'yes';
-$('mainLids').textContent=(d.mainGroupLids||0);
-var L=d.lanes||{fast:{},slow:{}};$('fq').textContent=L.fast.queued||0;$('fd').textContent=L.fast.done||0;
+var L=d.lanes||{fast:{},slow:{}};
+$('fq').textContent=L.fast.queued||0;$('fd').textContent=L.fast.done||0;
 $('sq').textContent=L.slow.queued||0;$('sd').textContent=L.slow.done||0;
 $('g').textContent=d.joinedGroups||0;$('d').textContent=d.dmCount||0;
-$('jq').textContent=d.queueSize||0;$('pd').textContent=d.pendingCount||0;$('mg').textContent=d.mainGroup||'not set';
-var t=d.dailyStats||{};$('dms').textContent=t.dmsReplied||0;$('reads').textContent=t.readsSent||0;
-$('typs').textContent=t.typingsSent||0;$('bc').textContent=t.broadcastsSent||0;
-$('del').textContent=t.deletesDone||0;$('blk').textContent=t.policyBlocks||0;
+$('jq').textContent=d.queueSize||0;$('pd').textContent=d.pendingCount||0;
+var t=d.dailyStats||{};$('dms').textContent=t.dmsReplied||0;
+$('reads').textContent=t.readsSent||0;$('typs').textContent=t.typingsSent||0;
+$('del').textContent=t.deletesDone||0;
 var pr=(d.ai&&d.ai.providers)||{};var x=pr.rewind;
 if(x){if(x.ok)$('aiList').innerHTML='<div>OK rewind: '+x.ms+'ms <span class="ai-badge">ACTIVE</span></div>';
 else $('aiList').innerHTML='<div style="color:#f85149">FAIL rewind: '+(x.status||'')+' '+esc(x.error||'')+'</div>';}
@@ -2584,7 +2756,7 @@ app.get('/health', function(req,res){ res.json({
   uptime: Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
   window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
-  paused: botPaused,
+  paused: botPaused, adminActive: isAdminActive(),
   mainGroup: mainGroupJid,
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
   ai: { active: activeProvider, providers: providerReport },
@@ -2618,6 +2790,7 @@ app.post('/admin/offline', function(req,res){
   res.json({ ok:true, until: new Date(botOfflineUntil).toISOString() });
 });
 app.post('/admin/online', function(req,res){ botOfflineUntil = 0; res.json({ ok:true }); });
+app.post('/admin/clear-main', function(req,res){ clearMainGroup(); res.json({ ok:true }); });
 
 app.get('/admin/logs', function(req,res){
   res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive' });
@@ -2631,8 +2804,6 @@ app.get('/admin/messages-stream', function(req,res){
 });
 
 app.get('/admin/aitest', async function(req,res){ res.json(await testAllProviders()); });
-app.get('/admin/providers', function(req,res){ res.json({ active: activeProvider, report: providerReport }); });
-app.get('/admin/scraperstatus', async function(req,res){ res.json(await scraperStatus()); });
 app.get('/admin/flow', function(req,res){
   const age = getAccountAgeDays();
   res.json({
@@ -2642,13 +2813,13 @@ app.get('/admin/flow', function(req,res){
     joinsToday: policyState.dailyJoins,
     joinLimit: dailyJoinLimit(age),
     replyRate: replyRate(),
-    replySamples: replyTracker.sends.length,
     broadcastsAllowed: broadcastsAllowed(),
+    mainGroup: mainGroupJid,
+    adminActive: isAdminActive(),
+    adminActiveUntil: new Date(adminActiveUntil).toISOString(),
     deletes: { min: deleteHist.min.length, hour: deleteHist.hour.length, day: deleteHist.day.length },
     fibIdx: { ...fibIdx },
-    mainGroupLids: recentGroupLids.size,
-    typingEnabled: ENABLE_TYPING,
-    readReceiptsEnabled: ENABLE_READ_RECEIPTS
+    mainGroupLids: recentGroupLids.size
   });
 });
 app.get('/admin/stats', function(req,res){
@@ -2665,6 +2836,7 @@ app.get('/admin/stats', function(req,res){
     window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
     dmQueueLength: dmQueue.length, dmQueueMax: DM_QUEUE_MAX,
     paused: botPaused,
+    adminActive: isAdminActive(),
     mainGroup: mainGroupJid,
     mainGroupLids: recentGroupLids.size,
     mainGroupPhones: recentGroupPhones.size,
@@ -2707,15 +2879,15 @@ loadPolicy();
 app.listen(PORT, async function(){
   console.log('Port '+PORT);
   console.log('Admin: '+ADMIN_PHONE);
-  console.log('Main: '+(mainGroupJid||'not set'));
+  console.log('Main group: '+(mainGroupJid||'NOT SET'));
   console.log('AI: Rewind only');
   console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?'ON':'OFF'));
-  console.log('Policy: age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
+  console.log('Admin active window: '+ADMIN_ACTIVE_MS/1000+'s');
   console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
 
   pushLog('info','system','Boot port '+PORT);
   pushLog('info','system','Admin: '+ADMIN_PHONE);
-  pushLog('info','system','Main: '+(mainGroupJid||'not set'));
+  pushLog('info','system','Main: '+(mainGroupJid||'NOT SET — use !setmain'));
   pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
   pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
   pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
@@ -2730,7 +2902,6 @@ app.listen(PORT, async function(){
   scheduleGroupJoins();
   scheduleHumanPresence();
 
-  // Connect immediately — AI test runs after
   connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
 });
 

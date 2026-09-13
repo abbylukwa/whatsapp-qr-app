@@ -1,10 +1,11 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v60 — Option B (dotenv enabled)
+ *  BreadBot v61
+ *  - Only Rewind AI (no extra API calls)
+ *  - Read receipts + typing indicator
+ *  - Faster WhatsApp connect
  * ============================================================ */
-
-require('dotenv').config();
 
 const express = require('express');
 const fs      = require('fs');
@@ -23,9 +24,11 @@ const pino   = require('pino');
 const axios  = require('axios');
 
 /* ══════════════════════════════════════════════════════════════
- *  MASTER TOGGLES
+ *  TOGGLES
  * ══════════════════════════════════════════════════════════════ */
 const ENABLE_CONTENT_BLOCK = false;
+const ENABLE_TYPING = true;
+const ENABLE_READ_RECEIPTS = true;
 
 /* ══════════════════════════════════════════════════════════════
  *  CONFIG
@@ -86,16 +89,88 @@ let botOfflineUntil = 0;
 let nsfwRoleplayEnabled = true;
 
 /* ══════════════════════════════════════════════════════════════
- *  ENV KEYS  — dotenv loads them from .env on local, from Render
- *  dashboard on cloud. Both paths put them in process.env.
+ *  AI — REWIND ONLY
  * ══════════════════════════════════════════════════════════════ */
 const REWIND_KEY_ENV = process.env.REWIND_KEY;
-const OPENAI_KEY_ENV = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
-const VENICE_KEY_ENV = process.env.VENICE_KEY;
-const GEMINI_KEY_ENV = process.env.GEMINI_KEY;
+const REWIND_MODEL   = process.env.REWIND_MODEL || 'rewind-uncensored';
+
+let activeProvider = null;
+let activeKey = null;
+let providerReport = {};
+
+async function testRewind(){
+  const key = REWIND_KEY_ENV;
+  if (!key){ providerReport.rewind = { ok:false, error:'no key', skipped:true }; return null; }
+  const t0 = Date.now();
+  try {
+    const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
+      model: REWIND_MODEL,
+      messages: [
+        { role:'system', content:'You are a test bot.' },
+        { role:'user', content:'Reply with exactly: OK' }
+      ],
+      max_tokens: 20, temperature: 0
+    }, { headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' }, timeout: 15000 });
+    const reply = r.data?.choices?.[0]?.message?.content;
+    const ms = Date.now() - t0;
+    if (reply && reply.trim().length){
+      providerReport.rewind = { ok:true, ms, sample: reply.trim().slice(0,40) };
+      return { name:'rewind', key };
+    }
+    providerReport.rewind = { ok:false, error:'empty response', ms };
+    return null;
+  } catch(e){
+    providerReport.rewind = { ok:false, ms: Date.now()-t0, status:e.response?.status,
+      error: e.response?.data?.error?.message || e.message };
+    return null;
+  }
+}
+
+async function detectAIBackend(){
+  pushLog('info','ai','Testing Rewind...');
+  providerReport = {};
+  const found = await testRewind();
+  if (found){
+    activeProvider = 'rewind';
+    activeKey = found.key;
+    pushLog('success','ai',`rewind: OK ${providerReport.rewind.ms}ms — active`);
+  } else {
+    activeProvider = null;
+    activeKey = null;
+    pushLog('error','ai',`Rewind unavailable: ${providerReport.rewind?.error || 'unknown'}`);
+  }
+  return activeProvider;
+}
+
+async function askAI(prompt, system){
+  if (!activeProvider || !activeKey) return null;
+  try {
+    const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
+      model: REWIND_MODEL,
+      messages: [
+        { role:'system', content: system },
+        { role:'user', content: prompt }
+      ],
+      max_tokens: 250, temperature: 0.95
+    }, { headers: { 'Authorization': `Bearer ${activeKey}`, 'Content-Type':'application/json' }, timeout: 25000 });
+    const raw = r.data?.choices?.[0]?.message?.content;
+    if (!raw) return null;
+    const c = humanize(raw);
+    return (c && !containsForbidden(c)) ? c : null;
+  } catch(e){
+    pushLog('error','ai',`rewind: ${e.response?.status||''} ${e.message}`);
+    resetDailyStats(); dailyStats.aiErrors++;
+    return null;
+  }
+}
+
+async function testAllProviders(){
+  await testRewind();
+  return { rewind: providerReport.rewind || { ok:false, error:'not tested' } };
+}
 
 /* ══════════════════════════════════════════════════════════════
- *  FIBONACCI TASK-TYPE DELAYS
+ *  FIBONACCI TASK DELAYS
  * ══════════════════════════════════════════════════════════════ */
 const FIB_TABLES = {
   broadcast: [10, 20, 30, 50, 80, 130, 210],
@@ -141,11 +216,8 @@ function pickRotationSlot(jobType){
  *  REPLY RATIO MONITOR
  * ══════════════════════════════════════════════════════════════ */
 const replyTracker = {
-  sends: [],
-  MAX: 50,
-  MIN_RATE: 0.15,
-  BROADCAST_PAUSE_MS: 6 * 60 * 60 * 1000,
-  pausedUntil: 0
+  sends: [], MAX: 50, MIN_RATE: 0.15,
+  BROADCAST_PAUSE_MS: 6 * 60 * 60 * 1000, pausedUntil: 0
 };
 function recordOutbound(jid){
   const entry = { jid, ts: Date.now(), replied: false };
@@ -191,9 +263,7 @@ function dailyJoinLimit(_ageDays){ return JOIN_MAX_PER_DAY; }
 let policyState = {
   firstRunAt: Date.now(),
   day: new Date().toISOString().slice(0,10),
-  dailyRecipients: {},
-  dailyJoins: 0,
-  recipientLastSent: {}
+  dailyRecipients: {}, dailyJoins: 0, recipientLastSent: {}
 };
 function loadPolicy(){
   try {
@@ -275,17 +345,9 @@ function recordDelete(){
  *  CONTENT BLOCK
  * ══════════════════════════════════════════════════════════════ */
 const CONTENT_BLOCKLIST = [
-  /\bteen(s|ager|agers)?\b/i,
-  /\bchild(ren)?\b/i,
-  /\bunderage\b/i,
-  /\bminor(s)?\b/i,
-  /\bpreteen\b/i,
-  /\bloli\b/i,
-  /\bshota\b/i,
-  /\bschool\s*(girl|boy)/i,
-  /\bhorny\b/i,
-  /\bhrny\b/i,
-  /\bdtf\b/i,
+  /\bteen(s|ager|agers)?\b/i, /\bchild(ren)?\b/i, /\bunderage\b/i,
+  /\bminor(s)?\b/i, /\bpreteen\b/i, /\bloli\b/i, /\bshota\b/i,
+  /\bschool\s*(girl|boy)/i, /\bhorny\b/i, /\bhrny\b/i, /\bdtf\b/i,
   /\bsext(ing)?\b/i
 ];
 function contentBlocked(text){
@@ -296,16 +358,25 @@ function contentBlocked(text){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  getDisconnectStatusCode
+ *  DISCONNECT CODE HELPER
  * ══════════════════════════════════════════════════════════════ */
 function getDisconnectStatusCode(lastDisconnect) {
   if (!lastDisconnect) return undefined;
-  if (lastDisconnect.error?.output?.statusCode) return lastDisconnect.error.output.statusCode;
-  if (lastDisconnect.error?.output?.payload?.statusCode) return lastDisconnect.error.output.payload.statusCode;
-  if (lastDisconnect.error?.data?.statusCode) return lastDisconnect.error.data.statusCode;
-  if (lastDisconnect.error?.statusCode) return lastDisconnect.error.statusCode;
-  if (lastDisconnect.statusCode) return lastDisconnect.statusCode;
-  return undefined;
+  return (
+    lastDisconnect.error?.output?.statusCode ??
+    lastDisconnect.error?.output?.payload?.statusCode ??
+    lastDisconnect.error?.data?.statusCode ??
+    lastDisconnect.error?.statusCode ??
+    lastDisconnect.statusCode
+  );
+}
+function describeDisconnect(lastDisconnect){
+  const code = getDisconnectStatusCode(lastDisconnect);
+  const msg = lastDisconnect?.error?.message
+    || lastDisconnect?.error?.output?.payload?.message
+    || lastDisconnect?.error?.output?.payload?.error
+    || 'no reason';
+  return { code, msg };
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -341,127 +412,6 @@ function isDmAiWindow() {
 function describeWindow() { return `${String(localHour()).padStart(2,'0')}:xx`; }
 function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLOCKED (08:00-21:00)'; }
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
-
-/* ══════════════════════════════════════════════════════════════
- *  AI PROVIDERS
- * ══════════════════════════════════════════════════════════════ */
-const PROVIDERS = {
-  rewind: {
-    name: 'rewind',
-    getKey: () => REWIND_KEY_ENV,
-    call: async (key, prompt, system) => {
-      const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
-        model: process.env.REWIND_MODEL || 'rewind-uncensored',
-        messages: [
-          { role:'system', content: system },
-          { role:'user',   content: prompt }
-        ],
-        max_tokens: 250, temperature: 0.95
-      }, { headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' }, timeout: 25000 });
-      return r.data?.choices?.[0]?.message?.content || null;
-    }
-  },
-  openai: {
-    name: 'openai',
-    getKey: () => OPENAI_KEY_ENV,
-    call: async (key, prompt, system) => {
-      const r = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-        messages: [
-          { role:'system', content: system },
-          { role:'user',   content: prompt }
-        ],
-        max_tokens: 250, temperature: 0.95
-      }, { headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' }, timeout: 25000 });
-      return r.data?.choices?.[0]?.message?.content || null;
-    }
-  },
-  venice: {
-    name: 'venice',
-    getKey: () => VENICE_KEY_ENV,
-    call: async (key, prompt, system) => {
-      const r = await axios.post('https://api.venice.ai/api/v1/chat/completions', {
-        model: process.env.VENICE_MODEL || 'llama-3.3-70b',
-        messages: [
-          { role:'system', content: system },
-          { role:'user',   content: prompt }
-        ],
-        max_tokens: 250, temperature: 0.9
-      }, { headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' }, timeout: 25000 });
-      return r.data?.choices?.[0]?.message?.content || null;
-    }
-  },
-  gemini: {
-    name: 'gemini',
-    getKey: () => GEMINI_KEY_ENV,
-    call: async (key, prompt, system) => {
-      const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-      const r = await axios.post(url, {
-        contents: [{ role:'user', parts:[{ text: prompt }] }],
-        systemInstruction: { parts:[{ text: system }] },
-        generationConfig: { maxOutputTokens: 250, temperature: 0.9 }
-      }, { headers: { 'Content-Type':'application/json' }, timeout: 25000 });
-      return r.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    }
-  }
-};
-const PROVIDER_ORDER = ['rewind', 'openai', 'venice', 'gemini'];
-
-let activeProvider = null, activeKey = null, providerReport = {};
-
-async function testProvider(name, key){
-  const p = PROVIDERS[name];
-  if (!p) return { ok:false, error:'unknown provider' };
-  const t0 = Date.now();
-  try {
-    const reply = await p.call(key, 'Reply with exactly: OK', 'You are a test bot.');
-    const ms = Date.now() - t0;
-    if (reply && reply.trim().length) return { ok:true, ms, sample: reply.trim().slice(0,40) };
-    return { ok:false, error:'empty response', ms };
-  } catch(e){
-    return { ok:false, ms: Date.now()-t0, status:e.response?.status,
-      error: e.response?.data?.error?.message || e.message };
-  }
-}
-async function detectAIBackend(){
-  pushLog('info','ai','Testing AI providers...');
-  providerReport = {};
-  let found = null;
-  for (const name of PROVIDER_ORDER){
-    const key = PROVIDERS[name].getKey();
-    if (!key){ providerReport[name] = { ok:false, error:'no key', skipped:true }; pushLog('info','ai',`${name}: skipped (no key)`); continue; }
-    const result = await testProvider(name, key);
-    providerReport[name] = result;
-    if (result.ok){ pushLog('success','ai',`${name}: OK ${result.ms}ms`); if (!found) found = { name, key }; }
-    else pushLog('warn','ai',`${name}: FAIL ${result.status||''} ${result.error}`);
-  }
-  if (found){ activeProvider = found.name; activeKey = found.key; pushLog('success','ai',`Active: ${activeProvider}`); }
-  else { activeProvider = null; activeKey = null; pushLog('error','ai','No AI backend works'); }
-  return activeProvider;
-}
-async function askAI(prompt, system){
-  if (!activeProvider || !activeKey) return null;
-  try {
-    const raw = await PROVIDERS[activeProvider].call(activeKey, prompt, system);
-    if (!raw) return null;
-    const c = humanize(raw);
-    return (c && !containsForbidden(c)) ? c : null;
-  } catch(e){
-    pushLog('error','ai',`${activeProvider}: ${e.response?.status||''} ${e.message}`);
-    resetDailyStats(); dailyStats.aiErrors++;
-    return null;
-  }
-}
-async function testAllProviders(){
-  const results = {};
-  for (const name of PROVIDER_ORDER){
-    const key = PROVIDERS[name].getKey();
-    if (!key){ results[name] = { ok:false, error:'no key' }; continue; }
-    results[name] = await testProvider(name, key);
-  }
-  return results;
-}
 
 /* ══════════════════════════════════════════════════════════════
  *  STATE
@@ -508,7 +458,7 @@ function resetDailyStats(){
       scraperSearches:0, scraperGifs:0, picsSent:0, videosSent:0, nsfwSent:0, aiErrors:0,
       pendingCreated:0, pendingResolved:0, discovered:0, imageBroadcasts:0, badMacs:0,
       focusRuns:0, downloads:0, nsfwDownloads:0, adminBroadcasts:0, groupLinksShared:0,
-      messagesDropped:0, errors:0, invitesSent:0, policyBlocks:0, deletesDone:0 };
+      messagesDropped:0, errors:0, invitesSent:0, policyBlocks:0, deletesDone:0, readsSent:0, typingsSent:0 };
   }
 }
 resetDailyStats();
@@ -726,6 +676,29 @@ async function botIsAdminIn(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  PRESENCE — READ + TYPING
+ * ══════════════════════════════════════════════════════════════ */
+async function markRead(msg){
+  if (!ENABLE_READ_RECEIPTS || !sock || !msg?.key) return;
+  try {
+    await sock.readMessages([msg.key]);
+    resetDailyStats(); dailyStats.readsSent++;
+  } catch(e){}
+}
+async function showTyping(jid){
+  if (!ENABLE_TYPING || !sock || !jid) return 0;
+  try {
+    await sock.sendPresenceUpdate('composing', jid);
+    const ms = 1500 + Math.random() * 4500;
+    await new Promise(r => setTimeout(r, ms));
+    try { await sock.sendPresenceUpdate('paused', jid); } catch(e){}
+    await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+    resetDailyStats(); dailyStats.typingsSent++;
+    return ms;
+  } catch(e){ return 0; }
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  34 MB ENFORCEMENT
  * ══════════════════════════════════════════════════════════════ */
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
@@ -741,33 +714,33 @@ async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'i
   const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
   return { buffer: buf, mimetype, sizeBytes: buf.length };
 }
-async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group'){
+async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false){
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
-    await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType);
+    await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing);
     return true;
   } catch(e){
     pushLog('warn','media',`image skip: ${e.message}`);
-    try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane, taskType); } catch(_){}
+    try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane, taskType, typing); } catch(_){}
     return false;
   }
 }
-async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskType='group'){
+async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false){
   try {
     const { buffer } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'gif');
-    await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType);
+    await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType, typing);
     return true;
   } catch(e){
     pushLog('warn','media',`gif skip: ${e.message}`);
-    try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane, taskType); } catch(_){}
+    try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane, taskType, typing); } catch(_){}
     return false;
   }
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  LANE-AWARE SEND
+ *  LANE-AWARE SEND — with optional typing indicator
  * ══════════════════════════════════════════════════════════════ */
-function sendBuffer(jid, content, priority=2, lane='auto', taskType='group'){
+function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false){
   if (priority >= 2){
     const gate = policyCanSend(jid);
     if (!gate.ok){
@@ -787,6 +760,9 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group'){
   const actualLane = lane === 'auto' ? (priority === 0 ? 'fast' : 'slow') : lane;
   if (priority >= 2) recordOutbound(jid);
 
+  // Typing indicator for user-facing sends (priority >= 2)
+  const showTyping_ = typing && priority >= 2 && ENABLE_TYPING;
+
   return new Promise((resolve, reject)=>{
     const job = {
       name:`send:${jid}`, priority, taskType,
@@ -794,6 +770,17 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group'){
         if (!sock){ reject(new Error('Bot disconnected')); return; }
         if (botPaused && priority > 0){ reject(new Error('Bot paused')); return; }
         if (Date.now() < botOfflineUntil && priority > 0){ reject(new Error('Bot offline')); return; }
+
+        // Show typing before the actual send
+        if (showTyping_){
+          try { await sock.sendPresenceUpdate('composing', jid); } catch(e){}
+          const ms = 1500 + Math.random() * 4500;
+          await new Promise(r => setTimeout(r, ms));
+          try { await sock.sendPresenceUpdate('paused', jid); } catch(e){}
+          await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+          resetDailyStats(); dailyStats.typingsSent++;
+        }
+
         try {
           const sent = await sock.sendMessage(jid, content);
           if (sent?.key?.id) markBotSent(sent.key.id);
@@ -807,7 +794,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group'){
   });
 }
 function adminReply(jid, text){
-  return sendBuffer(jid, { text }, 0, 'fast', 'admin').catch(e => pushLog('warn','adminreply',e.message));
+  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false).catch(e => pushLog('warn','adminreply',e.message));
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -976,7 +963,7 @@ async function y2mateDownloadMusic(videoId, format='mp3'){
   if (st.size > MEDIA_MAX_BYTES){ try{ fs.unlinkSync(fp); }catch(e){} throw new Error('File too big'); }
   return { filePath:fp, format, sizeBytes:st.size };
 }
-async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow', taskType='group'){
+async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow', taskType='group', typing=false){
   try {
     const buf = fs.readFileSync(filePath);
     if (buf.length > MEDIA_MAX_BYTES){ try{ fs.unlinkSync(filePath); }catch(e){} throw new Error('File too big'); }
@@ -985,7 +972,7 @@ async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow',
     const content = isAudio
       ? { audio: buf, mimetype: 'audio/mpeg', caption }
       : { video: buf, mimetype: 'video/mp4', caption };
-    await sendBuffer(jid, content, priority, lane, taskType);
+    await sendBuffer(jid, content, priority, lane, taskType, typing);
     try{ fs.unlinkSync(filePath); }catch(e){}
     return true;
   } catch(e){
@@ -997,15 +984,15 @@ async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow',
 /* ══════════════════════════════════════════════════════════════
  *  NSFW
  * ══════════════════════════════════════════════════════════════ */
-async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow', taskType='group'){
+async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow', taskType='group', typing=false){
   if (!RedgifsDownloader){
-    await sendBuffer(chatJid, { text: 'NSFW downloader not installed. Run: npm i redgifs-downloader' }, priority, lane, taskType);
+    await sendBuffer(chatJid, { text: 'NSFW downloader not installed. Run: npm i redgifs-downloader' }, priority, lane, taskType, typing);
     return false;
   }
   try {
     const links = await RedgifsDownloader.getSearchLinks(query, { numberToDownload: 3 });
     if (!links || !links.length){
-      await sendBuffer(chatJid, { text: `No NSFW results for "${query}"` }, priority, lane, taskType);
+      await sendBuffer(chatJid, { text: `No NSFW results for "${query}"` }, priority, lane, taskType, typing);
       return false;
     }
     for (const link of links.slice(0, 2)){
@@ -1017,7 +1004,7 @@ async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow', t
         });
         const buf = Buffer.from(resp.data);
         if (buf.length > MEDIA_MAX_BYTES) continue;
-        await sendBuffer(chatJid, { video: buf, mimetype: 'video/mp4', caption: `NSFW ${query}` }, priority, lane, taskType);
+        await sendBuffer(chatJid, { video: buf, mimetype: 'video/mp4', caption: `NSFW ${query}` }, priority, lane, taskType, typing);
         resetDailyStats(); dailyStats.nsfwSent++;
         return true;
       } catch(e){ pushLog('warn','nsfw',e.message); }
@@ -1025,7 +1012,7 @@ async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow', t
     return false;
   } catch(e){
     pushLog('error','nsfw',e.message);
-    await sendBuffer(chatJid, { text: `NSFW search failed: ${e.message}` }, priority, lane, taskType);
+    await sendBuffer(chatJid, { text: `NSFW search failed: ${e.message}` }, priority, lane, taskType, typing);
     return false;
   }
 }
@@ -1223,23 +1210,20 @@ async function probeMainGroup(){
   try {
     const sent = await sock.sendMessage(mainGroupJid, { text: 'Anyone online? 👋' });
     if (sent?.key?.id) markBotSent(sent.key.id);
-    pushLog('success','main',`Probe sent to ${mainGroupJid} — awaiting LID resolution`);
-
+    pushLog('success','main',`Probe sent to ${mainGroupJid}`);
     setTimeout(async () => {
       try {
         const meta = await sock.groupMetadata(mainGroupJid);
-        const partCount = meta.participants?.length || 0;
-        pushLog('info','main',`Main group metadata: id=${meta.id} participants=${partCount} subject="${meta.subject || '?'}"`);
-        let lidCount = 0, phoneCount = 0;
+        pushLog('info','main',`Main group: ${meta.subject || '?'} (${meta.participants?.length || 0} members)`);
         for (const p of meta.participants || []){
           const lid = p.id.includes('@lid') ? p.id.split('@')[0] : null;
           const pn = p.id.includes('@s.whatsapp.net') ? p.id.split('@')[0] : null;
-          if (lid){ recentGroupLids.set(lid, Date.now()); lidCount++; }
-          if (pn){ recentGroupPhones.set(pn, Date.now()); phoneCount++; }
+          if (lid) recentGroupLids.set(lid, Date.now());
+          if (pn) recentGroupPhones.set(pn, Date.now());
         }
-        pushLog('success','main',`Resolved ${lidCount} LIDs, ${phoneCount} phones from main group participants`);
-      } catch(e){ pushLog('warn','main','metadata re-read failed: '+e.message); }
-    }, 20000);
+        pushLog('success','main',`Cached ${recentGroupLids.size} LIDs, ${recentGroupPhones.size} phones`);
+      } catch(e){ pushLog('warn','main','metadata: '+e.message); }
+    }, 15000);
   } catch(e){
     pushLog('warn','main','Probe failed: '+e.message);
   }
@@ -1272,14 +1256,14 @@ async function handleParticipants(update){
     if (action === 'add'){
       try {
         const msg = await generateWelcome(user);
-        await sendBuffer(id, { text: msg, mentions:[p] }, 0, 'fast', 'admin');
+        await sendBuffer(id, { text: msg, mentions:[p] }, 0, 'fast', 'admin', false);
         pushLog('success','welcome',`Welcomed ${user}`);
       } catch(e){ pushLog('warn','welcome',e.message); }
     }
     if (action === 'remove'){
       try {
         const msg = await generateGoodbye(user);
-        await sendBuffer(id, { text: msg }, 0, 'fast', 'admin');
+        await sendBuffer(id, { text: msg }, 0, 'fast', 'admin', false);
       } catch(e){ pushLog('warn','goodbye',e.message); }
     }
   }
@@ -1294,25 +1278,18 @@ async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
   if (!s.antilink || isAdmin) return false;
   const matches = text.match(/(https?:\/\/[^\s]+)/gi);
   if (!matches || !matches.length) return false;
-  if (!deleteAllowed()){
-    pushLog('warn','antilink','Delete rate cap hit — skipping');
-    return false;
-  }
+  if (!deleteAllowed()){ pushLog('warn','antilink','Delete rate cap hit'); return false; }
   const botIsAdmin = await botIsAdminIn(jid);
-  if (!botIsAdmin){
-    pushLog('info','antilink',`Skipped delete in ${jid} — bot not admin`);
-    return false;
-  }
+  if (!botIsAdmin){ pushLog('info','antilink',`Skip delete in ${jid} — not admin`); return false; }
   try { await sock.sendMessage(jid, { delete: msg.key }); recordDelete(); resetDailyStats(); dailyStats.deletesDone++; } catch(e){}
   pushLog('info','antilink',`Deleted link from ${senderJid.split('@')[0]}`);
-
   const key = `${jid}:${senderJid}`;
   const now = Date.now();
   const last = antilinkWarnCooldown.get(key) || 0;
   if (now - last > 5 * 60 * 1000){
     antilinkWarnCooldown.set(key, now);
     try {
-      await sendBuffer(jid, { text: `Links not allowed here, @${senderJid.split('@')[0]}`, mentions: [senderJid] }, 3, 'slow', 'group');
+      await sendBuffer(jid, { text: `Links not allowed here, @${senderJid.split('@')[0]}`, mentions: [senderJid] }, 3, 'slow', 'group', false);
     } catch(e){}
   }
   return true;
@@ -1331,10 +1308,7 @@ function extractInviteCodes(text){
 function queueJoin(code, addedBy='unknown', source='unknown'){
   if (!code) return false;
   const gate = policyCanJoin();
-  if (!gate.ok){
-    pushLog('warn','join',`Rejected ${code} — ${gate.reason}`);
-    return false;
-  }
+  if (!gate.ok){ pushLog('warn','join',`Rejected ${code} — ${gate.reason}`); return false; }
   if (joinQueue.some(q => q.code === code)) return false;
   const last = recentJoinAttempts.get(code);
   if (last && Date.now() - last < 60 * 60 * 1000){
@@ -1387,7 +1361,7 @@ function scheduleGreetings(){
       const progress = (sinceLast - minMs) / (maxMs - minMs);
       if (Math.random() > Math.min(progress, 1)) continue;
       try {
-        await sendBuffer(jid, { text: pickGreeting(getTimeOfDay()) }, 3, 'slow', 'group');
+        await sendBuffer(jid, { text: pickGreeting(getTimeOfDay()) }, 3, 'slow', 'group', false);
         lastGreetingAt.set(jid, now); resetDailyStats(); dailyStats.greetingsSent++;
       } catch(e){}
     }
@@ -1404,7 +1378,7 @@ function scheduleDailyReport(){
     lastDailyReportDate = today; resetDailyStats(); const s = dailyStats;
     try {
       await sock.sendMessage(ADMIN_JID, { text:
-        `Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}\nBroadcasts: ${s.broadcastsSent}\nDeletes: ${s.deletesDone}\nPolicy blocks: ${s.policyBlocks}\nReply rate: ${(replyRate()*100).toFixed(0)}%` });
+        `Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}\nBroadcasts: ${s.broadcastsSent}\nDeletes: ${s.deletesDone}\nReads: ${s.readsSent}\nTypings: ${s.typingsSent}\nPolicy blocks: ${s.policyBlocks}\nReply rate: ${(replyRate()*100).toFixed(0)}%` });
     } catch(e){}
   }, 60000);
   pushLog('info','system','scheduleDailyReport started');
@@ -1422,12 +1396,11 @@ function scheduleGroupJoins(){
     const item = joinQueue.shift();
     saveQueue(); resetDailyStats();
     lastJoinAt = Date.now();
-
     nextJoinGapMs = JOIN_MIN_GAP_MS + Math.random() * (JOIN_MAX_GAP_MS - JOIN_MIN_GAP_MS);
-
     recentJoinAttempts.set(item.code, Date.now());
+
     try {
-      pushLog('info','join',`Joining ${item.code} (${policyState.dailyJoins+1}/${JOIN_MAX_PER_DAY}, queue ${joinQueue.length})...`);
+      pushLog('info','join',`Joining ${item.code} (${policyState.dailyJoins+1}/${JOIN_MAX_PER_DAY})...`);
       const res = await sock.groupAcceptInvite(item.code);
       if (res){
         joinedGroups.set(res, { name:null, joinedAt:Date.now(), discovered:false });
@@ -1444,7 +1417,7 @@ function scheduleGroupJoins(){
       for (const [k, t] of recentJoinAttempts){ if (now - t > 30 * 60 * 1000) recentJoinAttempts.delete(k); }
     }
   }, 60 * 1000);
-  pushLog('info','system',`scheduleGroupJoins started — ${JOIN_MAX_PER_DAY}/day, hours ${JOIN_ACTIVE_HOUR_START}-${JOIN_ACTIVE_HOUR_END}, gap 25-75min`);
+  pushLog('info','system',`scheduleGroupJoins started — ${JOIN_MAX_PER_DAY}/day, hours ${JOIN_ACTIVE_HOUR_START}-${JOIN_ACTIVE_HOUR_END}`);
 }
 
 function scheduleHumanPresence(){
@@ -1472,13 +1445,13 @@ async function resolvePending(id, action, payload, adminChatJid){
   if (!p) return { ok:false, error:`No pending ${id}` };
   try {
     if (action === 'skip'){
-      await sendBuffer(p.userJid, { text: 'sorry, could not find that' }, 2, 'slow', 'dmreply');
+      await sendBuffer(p.userJid, { text: 'sorry, could not find that' }, 2, 'slow', 'dmreply', true);
       pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
       adminReply(adminChatJid, `Replied casually to ${p.userName}.`);
       return { ok:true };
     }
     if (action === 'say'){
-      await sendBuffer(p.userJid, { text: payload }, 2, 'slow', 'dmreply');
+      await sendBuffer(p.userJid, { text: payload }, 2, 'slow', 'dmreply', true);
       pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
       adminReply(adminChatJid, `Sent to ${p.userName}.`);
       return { ok:true };
@@ -1487,11 +1460,11 @@ async function resolvePending(id, action, payload, adminChatJid){
     if (p.intent.type === 'video' || p.intent.type === 'gif'){
       const r = await scraperGif(query);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
-      await sendGifSafe(p.userJid, r.gifs[0], '', 2, 'slow', 'dmreply');
+      await sendGifSafe(p.userJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
-      await sendImageSafe(p.userJid, r.images[0], '', 2, 'slow', 'dmreply');
+      await sendImageSafe(p.userJid, r.images[0], '', 2, 'slow', 'dmreply', true);
     }
     pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
     adminReply(adminChatJid, `Sent to ${p.userName}.`);
@@ -1503,12 +1476,12 @@ async function resolvePending(id, action, payload, adminChatJid){
 async function startDownloadSearch(chatJid, query, priority=1, lane='slow'){
   const results = await ytSearch(query, 6);
   if (!results.length){
-    await sendBuffer(chatJid, { text: `Could not find "${query}"` }, priority, lane, 'admin');
+    await sendBuffer(chatJid, { text: `Could not find "${query}"` }, priority, lane, 'admin', false);
     return;
   }
   downloadPicks.set(chatJid, { query, results, ts:Date.now() });
   const list = results.map((r,i)=>`${i+1}. ${r.title}`).join('\n');
-  await sendBuffer(chatJid, { text: `Found ${results.length} for *${query}*:\n\n${list}\n\nReply with a number (1-${results.length}) or "1,2,3" for multiple.` }, priority, lane, 'admin');
+  await sendBuffer(chatJid, { text: `Found ${results.length} for *${query}*:\n\n${list}\n\nReply with a number (1-${results.length}) or "1,2,3" for multiple.` }, priority, lane, 'admin', false);
 }
 async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
   const entry = downloadPicks.get(chatJid);
@@ -1518,17 +1491,17 @@ async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
   if (!nums.length) return false;
   const picks = [...new Set(nums)].slice(0, DOWNLOAD_MAX_PICKS);
   downloadPicks.delete(chatJid);
-  await sendBuffer(chatJid, { text: `Downloading ${picks.length} video(s)...` }, priority, lane, 'admin');
+  await sendBuffer(chatJid, { text: `Downloading ${picks.length} video(s)...` }, priority, lane, 'admin', false);
   for (const n of picks){
     const r = entry.results[n-1];
     if (!r) continue;
     try {
-      await sendBuffer(chatJid, { text: `Playing ${r.title}` }, priority, lane, 'admin');
+      await sendBuffer(chatJid, { text: `Playing ${r.title}` }, priority, lane, 'admin', false);
       const { filePath, quality, sizeBytes } = await y2mateDownload(r.id, '360p');
-      await sendMediaFile(chatJid, filePath, `${r.title}\n(${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, priority, lane, 'admin');
+      await sendMediaFile(chatJid, filePath, `${r.title}\n(${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, priority, lane, 'admin', false);
       resetDailyStats(); dailyStats.downloads++;
     } catch(e){
-      await sendBuffer(chatJid, { text: `${r.title}: ${e.message}` }, priority, lane, 'admin');
+      await sendBuffer(chatJid, { text: `${r.title}: ${e.message}` }, priority, lane, 'admin', false);
       pushLog('error','download',e.message);
     }
   }
@@ -1552,10 +1525,10 @@ const replyCache = new NodeCache({ stdTTL:600 });
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v60 - Admin
+const COMMAND_LIST = `BreadBot v61 - Admin
 
 !help / !ping / !status / !jobs / !flow
-!test / !testall / !aitest / !providers
+!test / !testall / !aitest
 !scraperstatus / !whoami / !stats / !summary
 !logs / !errors / !count / !groups / !inbox
 
@@ -1578,7 +1551,7 @@ const COMMAND_LIST = `BreadBot v60 - Admin
 !pause / !resume / !offline <mins> / !online
 !limit <n> / !unlimit
 
-Policy: 24h cooldown, daily cap ${dailyRecipientLimit(getAccountAgeDays())}, join cap ${dailyJoinLimit(getAccountAgeDays())}.`;
+AI: Rewind only. Typing: ${ENABLE_TYPING?'ON':'OFF'}. Reads: ${ENABLE_READ_RECEIPTS?'ON':'OFF'}. Blocklist: ${ENABLE_CONTENT_BLOCK?'ON':'OFF'}.`;
 
 function logRepeatedCmd(cmd, chatJid){
   const now = Date.now();
@@ -1610,32 +1583,27 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'flow': {
       const age = getAccountAgeDays();
       const rate = (replyRate()*100).toFixed(0);
-      const paused = broadcastsAllowed() ? 'no' : 'yes (low reply rate)';
+      const paused = broadcastsAllowed() ? 'no' : 'yes';
       const todayCount = Object.keys(policyState.dailyRecipients).length;
       await reply([
         `Flow stats`,
         `Account age: ${age}d`,
-        `Recipient limit today: ${dailyRecipientLimit(age)}`,
-        `Recipients used today: ${todayCount}`,
-        `Joins today: ${policyState.dailyJoins}/${dailyJoinLimit(age)}`,
-        `Reply rate (last ${replyTracker.sends.length}): ${rate}%`,
+        `Recipient limit: ${dailyRecipientLimit(age)}`,
+        `Recipients used: ${todayCount}`,
+        `Joins: ${policyState.dailyJoins}/${dailyJoinLimit(age)}`,
+        `Reply rate (${replyTracker.sends.length}): ${rate}%`,
         `Broadcasts paused: ${paused}`,
-        `Deletes: ${deleteHist.min.length}/5 min · ${deleteHist.hour.length}/30 hr · ${deleteHist.day.length}/100 day`,
-        `Main group LIDs cached: ${recentGroupLids.size}`,
-        `Fib indices: bc=${fibIdx.broadcast} dm=${fibIdx.dmreply} grp=${fibIdx.group}`
+        `Deletes: ${deleteHist.min.length}/5m · ${deleteHist.hour.length}/30h · ${deleteHist.day.length}/100d`,
+        `Main LIDs cached: ${recentGroupLids.size}`,
+        `Typing: ${ENABLE_TYPING?'ON':'OFF'} · Reads: ${ENABLE_READ_RECEIPTS?'ON':'OFF'}`
       ].join('\n'));
       break;
     }
-    case 'providers': {
-      const lines = PROVIDER_ORDER.map(function(n){
-        var r = providerReport[n] || {};
-        var hasKey = PROVIDERS[n].getKey() ? 'KEY' : '-';
-        var active = n === activeProvider ? ' ACTIVE' : '';
-        if (r.skipped) return hasKey + ' ' + n + ': no key';
-        if (r.ok) return hasKey + ' ' + n + ': OK ' + r.ms + 'ms' + active;
-        return hasKey + ' ' + n + ': FAIL ' + (r.status || '') + ' ' + (r.error || '');
-      }).join('\n');
-      await reply('AI Providers\n\n' + lines + '\n\nActive: ' + (activeProvider || 'NONE'));
+    case 'providers': case 'aitest': {
+      const r = await testAllProviders();
+      const x = r.rewind;
+      if (x.ok) await reply(`Rewind OK ${x.ms}ms — active`);
+      else await reply(`Rewind FAIL ${x.status||''} ${x.error||''}`);
       break;
     }
     case 'status': case 'diag': {
@@ -1651,8 +1619,8 @@ async function handleAdminCommand(text, chatJid, msg){
         'Focus: '+f.currentState,
         'AI: '+(activeProvider||'NONE'),
         '','Today','DM: '+st.dmsReplied+' Media: '+(st.picsSent+st.videosSent),
-        'Downloads: '+st.downloads+' Broadcasts: '+st.broadcastsSent,
-        'Deletes: '+st.deletesDone+' Blocks: '+st.policyBlocks,
+        'Reads: '+st.readsSent+' Typings: '+st.typingsSent,
+        'Broadcasts: '+st.broadcastsSent+' Deletes: '+st.deletesDone,
         '','Admin LIDs: '+([...adminLids].join(', ')||'none')
       ].join('\n'));
       break;
@@ -1681,26 +1649,26 @@ async function handleAdminCommand(text, chatJid, msg){
       const t = args[1]; const body = args.slice(2).join(' ').trim();
       if (!t || !body){ await reply('Usage: !send <jid> <msg>'); return; }
       if (!joinedGroups.has(t)){ await reply('Not in '+t); return; }
-      await sendBuffer(t, { text: body }, 0, 'fast', 'admin');
+      await sendBuffer(t, { text: body }, 0, 'fast', 'admin', false);
       await reply('Sent.');
       break;
     }
     case 'broadcast': case 'bcgroup': {
-      if (!broadcastsAllowed()){ await reply('Broadcasts paused (low reply rate).'); break; }
+      if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
       const m = args.slice(1).join(' ');
       if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
       await reply('Broadcasting to '+joinedGroups.size+' groups...');
       let sent=0;
       for (const jid of joinedGroups.keys()){
         if (jid === mainGroupJid) continue;
-        try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast'); sent++; } catch(e){}
+        try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast', false); sent++; } catch(e){}
       }
       resetDailyStats(); dailyStats.broadcastsSent += sent;
       await reply('Queued '+sent+'/'+joinedGroups.size);
       break;
     }
     case 'all': case 'bcdm': {
-      if (!broadcastsAllowed()){ await reply('Broadcasts paused (low reply rate).'); break; }
+      if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
       const m = args.slice(1).join(' ');
       if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
       const mode = cmd === 'all' ? 'all' : 'dms';
@@ -1708,7 +1676,7 @@ async function handleAdminCommand(text, chatJid, msg){
         ? [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs]
         : [...activeDMs];
       if (!targets.length){ await reply('None.'); return; }
-      for (const jid of targets){ try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast'); } catch(e){} }
+      for (const jid of targets){ try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast', false); } catch(e){} }
       resetDailyStats(); dailyStats.broadcastsSent += targets.length;
       await reply('Done.');
       break;
@@ -1720,14 +1688,14 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      await sendImageSafe(chatJid, r.images[0], 'Preview 1/'+r.images.length, 0, 'fast', 'admin');
+      await sendImageSafe(chatJid, r.images[0], 'Preview 1/'+r.images.length, 0, 'fast', 'admin', false);
       break;
     }
     case 'nextpic': {
       if (!previewCache.imageUrls.length){ await reply('No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex+1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
-      await sendImageSafe(chatJid, previewCache.currentUrl, 'Preview '+(previewCache.imageIndex+1)+'/'+previewCache.imageUrls.length, 0, 'fast', 'admin');
+      await sendImageSafe(chatJid, previewCache.currentUrl, 'Preview '+(previewCache.imageIndex+1)+'/'+previewCache.imageUrls.length, 0, 'fast', 'admin', false);
       break;
     }
     case 'gif': {
@@ -1737,14 +1705,14 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      await sendGifSafe(chatJid, r.gifs[0], 'GIF 1/'+r.gifs.length, 0, 'fast', 'admin');
+      await sendGifSafe(chatJid, r.gifs[0], 'GIF 1/'+r.gifs.length, 0, 'fast', 'admin', false);
       break;
     }
     case 'nextgif': {
       if (!previewCache.gifUrls.length){ await reply('No preview.'); return; }
       previewCache.gifIndex = (previewCache.gifIndex+1) % previewCache.gifUrls.length;
       previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
-      await sendGifSafe(chatJid, previewCache.currentUrl, 'GIF '+(previewCache.gifIndex+1)+'/'+previewCache.gifUrls.length, 0, 'fast', 'admin');
+      await sendGifSafe(chatJid, previewCache.currentUrl, 'GIF '+(previewCache.gifIndex+1)+'/'+previewCache.gifUrls.length, 0, 'fast', 'admin', false);
       break;
     }
     case 'bcastpic': case 'bcastpicdm': case 'bcastpicgroup': {
@@ -1756,7 +1724,7 @@ async function handleAdminCommand(text, chatJid, msg){
         ? [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs]
         : mode === 'groups' ? [...joinedGroups.keys()].filter(j=>j!==mainGroupJid) : [...activeDMs];
       if (!targets.length){ await reply('No '+mode+'.'); return; }
-      for (const jid of targets){ await sendImageSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast'); }
+      for (const jid of targets){ await sendImageSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast', false); }
       await reply('Done.');
       break;
     }
@@ -1765,7 +1733,7 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
       const cap = args.slice(1).join(' ') || '';
       const targets = [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs];
-      for (const jid of targets){ await sendGifSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast'); }
+      for (const jid of targets){ await sendGifSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast', false); }
       await reply('Done.');
       break;
     }
@@ -1775,7 +1743,7 @@ async function handleAdminCommand(text, chatJid, msg){
       const url = parts[0]; const cap = parts[1] || '';
       if (!url){ await reply('Usage: !allimg <url> | <cap>'); return; }
       const targets = [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs];
-      for (const jid of targets){ await sendImageSafe(jid, url, cap, 3, 'slow', 'broadcast'); }
+      for (const jid of targets){ await sendImageSafe(jid, url, cap, 3, 'slow', 'broadcast', false); }
       await reply('Done.');
       break;
     }
@@ -1793,7 +1761,7 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!ad){ await reply('No ad.'); return; }
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
       const targets = [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs];
-      for (const jid of targets){ await sendBuffer(jid, { text:ad }, 3, 'slow', 'broadcast'); }
+      for (const jid of targets){ await sendBuffer(jid, { text:ad }, 3, 'slow', 'broadcast', false); }
       await reply('Done.');
       break;
     }
@@ -1819,7 +1787,7 @@ async function handleAdminCommand(text, chatJid, msg){
         const meta = await sock.groupMetadata(chatJid);
         const mentions = meta.participants.map(p=>p.id);
         const list = mentions.map(j=>'@'+j.split('@')[0]).join(' ');
-        await sendBuffer(chatJid, { text: 'Attention:\n\n'+list, mentions }, 0, 'fast', 'admin');
+        await sendBuffer(chatJid, { text: 'Attention:\n\n'+list, mentions }, 0, 'fast', 'admin', false);
       } catch(e){ await reply('Err: '+e.message); }
       break;
     }
@@ -1841,7 +1809,7 @@ async function handleAdminCommand(text, chatJid, msg){
         const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
         if (!vid){ await reply('Bad URL.'); return; }
         const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '360p');
-        await sendMediaFile(chatJid, filePath, '('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin');
+        await sendMediaFile(chatJid, filePath, '('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin', false);
         resetDailyStats(); dailyStats.downloads++;
         await reply('Sent.');
       } catch(e){ await reply('Err: '+e.message); }
@@ -1857,7 +1825,7 @@ async function handleAdminCommand(text, chatJid, msg){
         const top = results[0];
         await reply(top.title+' - downloading...');
         const { filePath, sizeBytes } = await y2mateDownloadMusic(top.id, 'mp3');
-        await sendMediaFile(chatJid, filePath, top.title+'\n('+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin');
+        await sendMediaFile(chatJid, filePath, top.title+'\n('+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin', false);
         resetDailyStats(); dailyStats.downloads++;
         await reply('Sent.');
       } catch(e){ await reply('Err: '+e.message); }
@@ -1867,7 +1835,7 @@ async function handleAdminCommand(text, chatJid, msg){
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('Usage: !nsfwvideo <query>'); return; }
       await reply('Searching "'+q+'"...');
-      const ok = await nsfwVideoSearchAndSend(chatJid, q, 0, 'fast', 'admin');
+      const ok = await nsfwVideoSearchAndSend(chatJid, q, 0, 'fast', 'admin', false);
       if (ok) await reply('Sent.');
       break;
     }
@@ -1880,7 +1848,7 @@ async function handleAdminCommand(text, chatJid, msg){
         const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
         if (!vid){ await reply('Bad URL.'); return; }
         const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '720p');
-        await sendMediaFile(chatJid, filePath, 'NSFW ('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin');
+        await sendMediaFile(chatJid, filePath, 'NSFW ('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin', false);
         resetDailyStats(); dailyStats.nsfwDownloads++;
         await reply('Sent.');
       } catch(e){ await reply('Err: '+e.message); }
@@ -1938,17 +1906,6 @@ async function handleAdminCommand(text, chatJid, msg){
       await reply(st.ok ? 'Up ('+(st.data?.status||'ok')+')' : 'Err: '+st.error);
       break;
     }
-    case 'aitest': {
-      const r = await testAllProviders();
-      const lines = PROVIDER_ORDER.map(function(n){
-        var x = r[n];
-        if (!x) return n+': -';
-        if (x.ok) return n+': OK '+x.ms+'ms';
-        return n+': FAIL '+(x.status||'')+' '+(x.error||'fail');
-      }).join('\n');
-      await reply('AI Test Results\n\n'+lines+'\n\nActive: '+(activeProvider||'NONE'));
-      break;
-    }
     case 'test': {
       const s = jobs.stats();
       await reply('Bot: '+botNumber+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
@@ -1960,13 +1917,7 @@ async function handleAdminCommand(text, chatJid, msg){
       const s1 = await scraperSearch('test'); tests.push('Search: '+(s1.ok?'OK '+s1.images.length:'FAIL'));
       const s2 = await scraperGif('funny'); tests.push('GIF: '+(s2.ok?'OK '+s2.gifs.length:'FAIL'));
       const rw = await testAllProviders();
-      for (const n of PROVIDER_ORDER){
-        const x = rw[n];
-        if (!x) continue;
-        if (x.skipped) tests.push(n+': no key');
-        else if (x.ok) tests.push(n+': OK '+x.ms+'ms');
-        else tests.push(n+': FAIL '+(x.status||''));
-      }
+      tests.push('rewind: '+(rw.rewind?.ok ? 'OK '+rw.rewind.ms+'ms' : 'FAIL '+(rw.rewind?.status||'')));
       tests.push('WA: '+(connectionStatus==='connected'?'OK':'FAIL'));
       tests.push('Main: '+(mainGroupJid?'OK':'FAIL'));
       tests.push('NSFW DL: '+(RedgifsDownloader?'OK':'FAIL'));
@@ -1977,7 +1928,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'stats': case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply('Today\nJoined: '+s.joined+'\nDM: '+s.dmsReplied+'\nMedia: '+(s.picsSent+s.videosSent)+'\nNSFW: '+s.nsfwSent+'\nDownloads: '+s.downloads+'\nBroadcasts: '+s.broadcastsSent+'\nDeletes: '+s.deletesDone+'\nBlocks: '+s.policyBlocks+'\nAI: '+(activeProvider||'NONE'));
+      await reply('Today\nJoined: '+s.joined+'\nDM: '+s.dmsReplied+'\nMedia: '+(s.picsSent+s.videosSent)+'\nNSFW: '+s.nsfwSent+'\nDownloads: '+s.downloads+'\nBroadcasts: '+s.broadcastsSent+'\nDeletes: '+s.deletesDone+'\nReads: '+s.readsSent+'\nTypings: '+s.typingsSent+'\nAI: '+(activeProvider||'NONE'));
       break;
     }
     case 'whoami': {
@@ -2018,29 +1969,29 @@ async function processDM(item){
   if (intent && intent.type === 'music'){
     try {
       const results = await ytSearch(intent.query + ' audio', 3);
-      if (!results.length){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow', 'dmreply'); return; }
+      if (!results.length){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow', 'dmreply', true); return; }
       const top = results[0];
-      await sendBuffer(chatJid, { text:'Found '+top.title+'. Downloading...' }, 2, 'slow', 'dmreply');
+      await sendBuffer(chatJid, { text:'Found '+top.title+'. Downloading...' }, 2, 'slow', 'dmreply', true);
       const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
-      await sendMediaFile(chatJid, filePath, top.title, 2, 'slow', 'dmreply');
+      await sendMediaFile(chatJid, filePath, top.title, 2, 'slow', 'dmreply', true);
       resetDailyStats(); dailyStats.downloads++;
-    } catch(e){ await sendBuffer(chatJid, { text:'Err: '+e.message }, 2, 'slow', 'dmreply'); }
+    } catch(e){ await sendBuffer(chatJid, { text:'Err: '+e.message }, 2, 'slow', 'dmreply', true); }
     return;
   }
 
   if (detectNsfw(text) && nsfwRoleplayEnabled){
     if (isNsfwWindow() || isAdminSender(msg, senderJid)){
       const rp = await nsfwRoleplay(pushName, text);
-      if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow', 'dmreply'); resetDailyStats(); dailyStats.dmsReplied++; }
+      if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow', 'dmreply', true); resetDailyStats(); dailyStats.dmsReplied++; }
       return;
     } else {
-      await sendBuffer(chatJid, { text: 'Not right now, try after 9pm' }, 2, 'slow', 'dmreply');
+      await sendBuffer(chatJid, { text: 'Not right now, try after 9pm' }, 2, 'slow', 'dmreply', true);
       return;
     }
   }
 
   if (detectGroupLinkRequest(text)){
-    await sendBuffer(chatJid, { text:'Join our group:\n'+ADMIN_GROUP_LINK }, 2, 'slow', 'dmreply');
+    await sendBuffer(chatJid, { text:'Join our group:\n'+ADMIN_GROUP_LINK }, 2, 'slow', 'dmreply', true);
     resetDailyStats(); dailyStats.dmsReplied++;
     return;
   }
@@ -2050,7 +2001,7 @@ async function processDM(item){
       if (intent.type === 'video' || intent.type === 'gif'){
         const r = await scraperGif(intent.query, false);
         if (r.ok && r.gifs.length){
-          await sendGifSafe(chatJid, r.gifs[0], '', 2, 'slow', 'dmreply');
+          await sendGifSafe(chatJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
           resetDailyStats();
           if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
           return;
@@ -2058,7 +2009,7 @@ async function processDM(item){
       } else {
         const r = await scraperSearch(intent.query, false);
         if (r.ok && r.images.length){
-          await sendImageSafe(chatJid, r.images[0], '', 2, 'slow', 'dmreply');
+          await sendImageSafe(chatJid, r.images[0], '', 2, 'slow', 'dmreply', true);
           resetDailyStats(); dailyStats.picsSent++;
           return;
         }
@@ -2066,7 +2017,7 @@ async function processDM(item){
     }
     const history = userHistories.get(senderJid) || [];
     const id = createPendingRequest(senderJid, pushName, phone, history, intent);
-    await sendBuffer(chatJid, { text: 'checking...' }, 2, 'slow', 'dmreply');
+    await sendBuffer(chatJid, { text: 'checking...' }, 2, 'slow', 'dmreply', true);
     return;
   }
 
@@ -2093,7 +2044,7 @@ async function processDM(item){
   while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
   userHistories.set(senderJid, hist);
 
-  await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow', 'dmreply');
+  await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow', 'dmreply', true);
   resetDailyStats(); dailyStats.dmsReplied++; dailyStats.focusRuns++;
 }
 async function processDMQueue(){
@@ -2165,7 +2116,10 @@ async function handleMessage(msg){
   if (isGroup){ discoverGroup(chatJid); recordGroupMessage(chatJid, text); }
   else activeDMs.add(chatJid);
 
-  if (!msg.key.fromMe) recordReply(chatJid);
+  if (!msg.key.fromMe){
+    recordReply(chatJid);
+    markRead(msg).catch(()=>{});
+  }
 
   const isAdmin = isAdminSender(msg, senderJid);
 
@@ -2212,7 +2166,7 @@ async function handleMessage(msg){
           : mode === 'groups' ? [...joinedGroups.keys()].filter(j=>j!==mainGroupJid) : [...activeDMs];
         if (!targets.length){ adminReply(chatJid, 'No '+mode+'.'); return; }
         adminReply(chatJid, 'Queued to '+targets.length+'.');
-        for (const jid of targets) await sendBuffer(jid, { image: buffer, caption }, 3, 'slow', 'broadcast');
+        for (const jid of targets) await sendBuffer(jid, { image: buffer, caption }, 3, 'slow', 'broadcast', false);
         adminReply(chatJid, 'Done.');
       } catch(e){ adminReply(chatJid, 'Err: '+e.message); }
       return;
@@ -2231,7 +2185,7 @@ async function handleMessage(msg){
   if (codes.length){
     let added = 0;
     for (const c of codes){ if (queueJoin(c, phone||pushName, chatType)) added++; }
-    if (added && !isGroup) await sendBuffer(chatJid, { text:`Queued ${added}. Total ${joinQueue.length}/${JOIN_QUEUE_MAX}` }, 3, 'slow', 'admin');
+    if (added && !isGroup) await sendBuffer(chatJid, { text:`Queued ${added}. Total ${joinQueue.length}/${JOIN_QUEUE_MAX}` }, 3, 'slow', 'admin', false);
   }
 
   if (text && downloadPicks.has(chatJid)){
@@ -2251,9 +2205,9 @@ async function handleMessage(msg){
     const directed = isDirectedAtBot(msg, text);
 
     if (isMain && text){
-      if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group'); return; }
+      if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
       const isNsfw = detectNsfw(text);
-      if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group'); return; }
+      if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group', true); return; }
       const gIntent = detectMediaIntent(text);
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
@@ -2261,9 +2215,9 @@ async function handleMessage(msg){
             const results = await ytSearch(gIntent.query + ' audio', 3);
             if (results.length){
               const top = results[0];
-              await sendBuffer(chatJid, { text:top.title+' - downloading...' }, 3, 'slow', 'group');
+              await sendBuffer(chatJid, { text:top.title+' - downloading...' }, 3, 'slow', 'group', true);
               const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
-              await sendMediaFile(chatJid, filePath, top.title, 3, 'slow', 'group');
+              await sendMediaFile(chatJid, filePath, top.title, 3, 'slow', 'group', true);
               resetDailyStats(); dailyStats.downloads++;
               return;
             }
@@ -2272,7 +2226,7 @@ async function handleMessage(msg){
         if (gIntent.type === 'video' || gIntent.type === 'gif'){
           const r = await scraperGif(gIntent.query, isNsfw);
           if (r.ok && r.gifs.length){
-            await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group');
+            await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
             resetDailyStats();
             if (gIntent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
             if (isNsfw) dailyStats.nsfwSent++;
@@ -2281,7 +2235,7 @@ async function handleMessage(msg){
         } else {
           const r = await scraperSearch(gIntent.query, isNsfw);
           if (r.ok && r.images.length){
-            await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group');
+            await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
             resetDailyStats(); dailyStats.picsSent++;
             if (isNsfw) dailyStats.nsfwSent++;
             return;
@@ -2292,7 +2246,7 @@ async function handleMessage(msg){
       const lang = detectLanguage(text);
       const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ' + LANG_NAMES[lang] + '. Mix light Shona. Never say you are AI. ' + (analysis?'Members often use: '+analysis.topWords.slice(0,6).join(', '):'');
       const aiReply = await askAI(text, sys);
-      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group'); resetDailyStats(); dailyStats.greetingsSent++; }
+      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
     }
 
@@ -2301,14 +2255,14 @@ async function handleMessage(msg){
       const lang = detectLanguage(text);
       const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. Someone is talking TO you in a group. Reply SHORT, casual, in ' + LANG_NAMES[lang] + '. Never mention AI. ' + (analysis?'Style: '+analysis.topWords.slice(0,5).join(', '):'');
       const aiReply = await askAI(text, sys);
-      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group'); resetDailyStats(); dailyStats.greetingsSent++; }
+      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
     }
 
     if (text && Math.random() < AMBIENT_CHANCE){
       const sys = 'You are Abby Faith Sithole in a group. React casually, 1 short sentence, warm. Never mention AI.';
       const aiReply = await askAI(text, sys);
-      if (aiReply) await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group');
+      if (aiReply) await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true);
     }
     return;
   }
@@ -2320,15 +2274,28 @@ async function handleMessage(msg){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  CONNECT BOT
+ *  CONNECT BOT — faster
  * ══════════════════════════════════════════════════════════════ */
+let cachedVersion = null;
+async function getVersion(){
+  if (cachedVersion) return cachedVersion;
+  try {
+    const { version } = await fetchLatestBaileysVersion();
+    cachedVersion = version;
+    return version;
+  } catch(e){
+    cachedVersion = [2, 3000, 1043857760]; // fallback known-good
+    return cachedVersion;
+  }
+}
+
 async function connectBot(){
   if (isConnecting) return;
   isConnecting = true; manualDisconnect = false;
   try {
     pushLog('info','bot','Initializing...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-    const { version } = await fetchLatestBaileysVersion();
+    const version = await getVersion();
     pushLog('info','bot','WA version '+version.join('.'));
 
     const baseSocket = makeWASocket({
@@ -2339,8 +2306,10 @@ async function connectBot(){
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
       getMessage: async ()=>undefined,
-      qrTimeout: 300000, connectTimeoutMs: 120000,
-      keepAliveIntervalMs: 30000
+      qrTimeout: 90000,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      defaultQueryTimeoutMs: 30000
     });
 
     sock = baseSocket;
@@ -2351,7 +2320,7 @@ async function connectBot(){
       if (qr){
         qrDataUri = await QRCode.toDataURL(qr);
         connectionStatus = 'qr';
-        pushLog('info','bot','QR generated');
+        pushLog('info','bot','QR generated — scan from admin phone');
       }
       if (connection === 'open'){
         isConnecting = false; connectionStatus = 'connected';
@@ -2362,16 +2331,16 @@ async function connectBot(){
         pushLog('success','bot','Connected as '+botNumber);
         pushLog('info','time',describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm());
 
-        try { await sock.updateOnlinePrivacy('match_last_seen'); } catch(e){ pushLog('warn','privacy','online: '+e.message); }
-        try { await sock.updateLastSeenPrivacy('none'); } catch(e){ pushLog('warn','privacy','lastseen: '+e.message); }
-        pushLog('info','privacy','online=hidden lastseen=hidden');
+        try { await sock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
+        try { await sock.updateLastSeenPrivacy('none'); } catch(e){}
+        pushLog('info','privacy','hidden');
 
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
 
         setTimeout(() => { probeMainGroup().catch(()=>{}); }, 8000);
 
-        try { await detectAIBackend(); }
-        catch(e){ pushLog('error','ai','detect failed: '+e.message); }
+        // Detect AI AFTER connect — doesn't delay QR
+        detectAIBackend().catch(e => pushLog('error','ai','detect: '+e.message));
 
         const lidList = [...adminLids];
         pushLiveMessage({
@@ -2379,59 +2348,43 @@ async function connectBot(){
           chatJid: ADMIN_JID, chatType: 'system',
           senderJid: botJid, senderName: 'BOT ONLINE',
           phone: ADMIN_PHONE, lid: lidList.join(', ') || 'none',
-          text: 'Bot ONLINE as ' + botNumber + '\nAdmin: ' + ADMIN_PHONE + '\nLIDs: ' + (lidList.join(', ') || 'none') + '\nAI: ' + (activeProvider || 'NONE') + '\n' + describeWindow() + ' NSFW: ' + describeNsfw() + ' DM: ' + describeDm(),
+          text: 'Bot ONLINE as ' + botNumber + '\nAdmin: ' + ADMIN_PHONE + '\nAI: pending...\n' + describeWindow(),
           mediaType: 'system', isAdmin: true
         });
         pushLog('success','admin','Live-log: ONLINE announcement');
 
         try {
-          const providerSummary = PROVIDER_ORDER.map(function(n){
-            var x = providerReport[n];
-            if (!x) return '';
-            if (x.skipped) return '- ' + n + ': no key';
-            if (x.ok) return (n===activeProvider?'* ':'- ') + n + ': ' + x.ms + 'ms';
-            return 'X ' + n + ': ' + (x.status||'') + ' ' + (x.error||'').slice(0,40);
-          }).filter(Boolean).join('\n');
-
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v60 ONLINE\n' +
+            'BreadBot v61 ONLINE\n' +
             'Bot: ' + botNumber + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
-            'LIDs: ' + (lidList.join(', ') || 'none') + '\n\n' +
-            'AI Providers\n' + providerSummary + '\n\n' +
             'Main: ' + (mainGroupJid||'not set') + '\n' +
             'Groups: ' + joinedGroups.size + '\n' +
-            'DMs: ' + activeDMs.size + '\n' +
             'Account age: ' + getAccountAgeDays() + 'd\n' +
-            'Daily recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n' +
-            'Daily join limit: ' + dailyJoinLimit(getAccountAgeDays()) + '\n' +
-            describeWindow() + '\n' +
-            'NSFW: ' + describeNsfw() + '\n' +
-            'DM AI: ' + describeDm() + '\n\n' +
-            'Send !flow for policy status.'
+            'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n' +
+            'Joins limit: ' + dailyJoinLimit(getAccountAgeDays()) + '\n' +
+            describeWindow() + '\n\n' +
+            'Send !flow for status.'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
-        } catch(e){ pushLog('warn','admin','DM notify failed: '+e.message); }
+        } catch(e){ pushLog('warn','admin','DM: '+e.message); }
       }
       if (connection === 'close'){
         isConnecting = false;
-        const code = getDisconnectStatusCode(lastDisconnect);
-        pushLog('warn','bot','Disconnected ('+code+')');
+        const { code, msg } = describeDisconnect(lastDisconnect);
+        pushLog('warn','bot',`Disconnected (${code ?? '?'}) — ${msg}`);
 
         if (manualDisconnect){ connectionStatus = 'disconnected'; return; }
-        if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
+        if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out — delete auth_info to rescan'); return; }
         if (code === 403){ connectionStatus = 'disconnected'; pushLog('error','bot','403 Forbidden — likely banned'); return; }
-        if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired'); return; }
+        if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired — click Refresh QR'); return; }
         if (code === 428 || code === 440){ connectionStatus = 'disconnected'; pushLog('error','bot','Conflict '+code); return; }
 
         if (code === DisconnectReason.restartRequired || code === 515){
-          if (restart515InFlight){ pushLog('warn','bot','515 in flight - skip'); return; }
+          if (restart515InFlight){ pushLog('warn','bot','515 in flight — skip'); return; }
           restart515InFlight = true;
           const now = Date.now();
-          if (now < spamCooldownUntil){
-            const remain = spamCooldownUntil - now;
-            await new Promise(r=>setTimeout(r, remain));
-          }
+          if (now < spamCooldownUntil) await new Promise(r=>setTimeout(r, spamCooldownUntil - now));
           const t = Date.now();
           recent515Timestamps.push(t);
           recent515Timestamps = recent515Timestamps.filter(ts => t - ts < SPAM_WINDOW_MS);
@@ -2441,6 +2394,7 @@ async function connectBot(){
           }
           consecutive515 += 1;
           const delay = Math.min(RESTART_515_BASE_DELAY_MS * Math.pow(2, consecutive515-1), RESTART_515_MAX_DELAY_MS);
+          pushLog('warn','bot','515 retry '+delay/1000+'s');
           await new Promise(r=>setTimeout(r, delay));
           const since = Date.now() - lastReconnectAt;
           if (since < MIN_RECONNECT_INTERVAL_MS) await new Promise(r=>setTimeout(r, MIN_RECONNECT_INTERVAL_MS - since));
@@ -2455,13 +2409,13 @@ async function connectBot(){
 
         if (reconnectAttempts < MAX_RECONNECT){
           reconnectAttempts++;
-          const delay = Math.min(5000 * reconnectAttempts, 30000);
+          const delay = Math.min(3000 * reconnectAttempts, 20000);
           connectionStatus = 'reconnecting';
           pushLog('warn','bot','Retry '+delay/1000+'s ['+reconnectAttempts+'/'+MAX_RECONNECT+']');
           setTimeout(function(){ try { sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error','bot','Max retries');
+          pushLog('error','bot','Max retries — click Refresh QR');
         }
       }
     });
@@ -2493,7 +2447,7 @@ function refreshQR(){
   isConnecting = false; botNumber = null;
   consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0; restart515InFlight = false;
   pushLog('info','bot','Manual QR refresh');
-  setTimeout(function(){ manualDisconnect = false; connectBot(); }, 1500);
+  setTimeout(function(){ manualDisconnect = false; connectBot(); }, 1000);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2503,7 +2457,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v60</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v61</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -2521,7 +2475,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
 .ai-badge{background:#238636;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
 </style></head><body>
-<h1>BreadBot v60</h1>
+<h1>BreadBot v61</h1>
 <div class="sub">Admin: <b id="ap">-</b> | LIDs: <b id="al">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2>
@@ -2534,27 +2488,25 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div style="margin-top:10px">
 <button class="primary" onclick="a('connect')">Start</button>
 <button onclick="a('refresh-qr')">Refresh QR</button>
+<button class="danger" onclick="a('clear-session')">Clear Session</button>
 <button class="danger" onclick="a('disconnect')">Disconnect</button>
 <button onclick="a('pause')">Pause</button><button onclick="a('resume')">Resume</button>
-<button onclick="a('offline')">Off 30m</button><button onclick="a('online')">Online</button>
 </div></div>
-<div class="card"><h2>AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
-<div style="margin-top:8px"><button onclick="testAI()">Test all</button></div></div>
+<div class="card"><h2>AI — Rewind only</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
+<div style="margin-top:8px"><button onclick="testAI()">Test Rewind</button></div></div>
 <div class="card"><h2>Policy</h2>
 <div class="row"><span>Account age</span><span class="val" id="age">-</span></div>
 <div class="row"><span>Recipients today</span><span class="val" id="recip">-</span></div>
 <div class="row"><span>Joins today</span><span class="val" id="joins">-</span></div>
 <div class="row"><span>Reply rate</span><span class="val" id="reply">-</span></div>
 <div class="row"><span>Broadcasts</span><span class="val" id="bcastPaused">-</span></div>
-<div class="row"><span>Main group LIDs</span><span class="val" id="mainLids">-</span></div>
+<div class="row"><span>Main LIDs</span><span class="val" id="mainLids">-</span></div>
 </div>
 <div class="card"><h2>Lanes</h2>
 <div class="row"><span>Fast queue</span><span class="val" id="fq">-</span></div>
 <div class="row"><span>Fast done</span><span class="val" id="fd">-</span></div>
 <div class="row"><span>Slow queue</span><span class="val" id="sq">-</span></div>
 <div class="row"><span>Slow done</span><span class="val" id="sd">-</span></div>
-<div class="row"><span>Failed</span><span class="val" id="fl">-</span></div>
-<div class="row"><span>Dropped</span><span class="val" id="dr">-</span></div>
 </div>
 <div class="card"><h2>Scope</h2>
 <div class="row"><span>Groups</span><span class="val" id="g">-</span></div>
@@ -2565,8 +2517,8 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 </div>
 <div class="card"><h2>Today</h2>
 <div class="row"><span>DM</span><span class="val" id="dms">-</span></div>
-<div class="row"><span>Media</span><span class="val" id="md">-</span></div>
-<div class="row"><span>Downloads</span><span class="val" id="dls">-</span></div>
+<div class="row"><span>Reads sent</span><span class="val" id="reads">-</span></div>
+<div class="row"><span>Typings sent</span><span class="val" id="typs">-</span></div>
 <div class="row"><span>Broadcasts</span><span class="val" id="bc">-</span></div>
 <div class="row"><span>Deletes</span><span class="val" id="del">-</span></div>
 <div class="row"><span>Blocks</span><span class="val" id="blk">-</span></div>
@@ -2576,93 +2528,52 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 </div>
 <script>
 var $ = function(id){ return document.getElementById(id); };
-async function api(p,m,body){
-  var o = { method: m || 'GET' };
-  if (body){ o.headers = { 'Content-Type':'application/json' }; o.body = JSON.stringify(body); }
-  var r = await fetch('/admin/' + p, o); return r.json();
-}
-function esc(s){ return String(s||'').replace(/[&<>"']/g, function(c){ var m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}; return m[c]; }); }
-function setS(s){ $('dot').className = 'dot s-' + s; $('st').textContent = s; }
-async function testAI(){ var b = $('aiList'); b.innerHTML = 'Testing...'; var r = await api('aitest');
-  b.innerHTML = Object.keys(r).map(function(k){ var v = r[k];
-    if (v.ok) return '<div>OK ' + k + ': ' + v.ms + 'ms</div>';
-    return '<div style="color:#f85149">FAIL ' + k + ': ' + (v.status||'') + ' ' + esc(v.error||'') + '</div>';
-  }).join('');
-}
-async function refresh(){
-  try{
-    var d = await api('stats'); setS(d.status);
-    $('ap').textContent = d.adminPhone || '-';
-    $('al').textContent = (d.adminLids||[]).join(', ') || 'none';
-    $('w').textContent = (d.window && d.window.time) || '-';
-    $('ns').textContent = (d.window && d.window.nsfw) || '-';
-    $('dm').textContent = (d.window && d.window.dmAI) || '-';
-    $('ai').textContent = (d.ai && d.ai.active) || 'NONE';
-    $('bn').textContent = d.botNumber || '-';
-    var u = d.uptime || 0, h = Math.floor(u/3600), m = Math.floor((u%3600)/60), s = u%60;
-    $('up').textContent = h+'h '+m+'m '+s+'s';
-    $('pz').textContent = d.paused ? 'yes' : 'no';
-    $('c5').textContent = d.consecutive515 || 0;
-    var p = d.policy || {};
-    $('age').textContent = (p.ageDays || 0) + 'd';
-    $('recip').textContent = (p.recipientsToday || 0) + ' / ' + (p.recipientLimit || 0);
-    $('joins').textContent = (p.joinsToday || 0) + ' / ' + (p.joinLimit || 0);
-    $('reply').textContent = ((p.replyRate || 0) * 100).toFixed(0) + '%';
-    $('bcastPaused').textContent = p.broadcastsAllowed ? 'no' : 'yes';
-    $('mainLids').textContent = (d.mainGroupLids || 0);
-    var L = d.lanes || { fast:{}, slow:{}, total:{} };
-    $('fq').textContent = L.fast.queued || 0; $('fd').textContent = L.fast.done || 0;
-    $('sq').textContent = L.slow.queued || 0; $('sd').textContent = L.slow.done || 0;
-    $('fl').textContent = L.total.failed || 0; $('dr').textContent = L.total.dropped || 0;
-    $('g').textContent = d.joinedGroups || 0; $('d').textContent = d.dmCount || 0;
-    $('jq').textContent = d.queueSize || 0; $('pd').textContent = d.pendingCount || 0;
-    $('mg').textContent = d.mainGroup || 'not set';
-    var t = d.dailyStats || {};
-    $('dms').textContent = t.dmsReplied || 0;
-    $('md').textContent = (t.picsSent||0) + (t.videosSent||0);
-    $('dls').textContent = t.downloads || 0;
-    $('bc').textContent = t.broadcastsSent || 0;
-    $('del').textContent = t.deletesDone || 0;
-    $('blk').textContent = t.policyBlocks || 0;
-    var pr = (d.ai && d.ai.providers) || {};
-    $('aiList').innerHTML = Object.keys(pr).map(function(n){
-      var v = pr[n]; var active = (d.ai && d.ai.active) === n ? ' <span class="ai-badge">ACTIVE</span>' : '';
-      if (v.skipped) return '<div style="opacity:0.5">- ' + n + ': no key</div>';
-      if (v.ok) return '<div>OK ' + n + ': ' + v.ms + 'ms' + active + '</div>';
-      return '<div style="color:#f85149">FAIL ' + n + ': ' + (v.status||'') + ' ' + esc(v.error||'') + '</div>';
-    }).join('') || '<div style="opacity:0.5">Not tested</div>';
-    var q = await api('qr-data');
-    if (q.qr && q.status === 'qr'){ $('qrImg').src = '/admin/qr?t=' + Date.now(); $('qrImg').style.display = 'block'; }
-    else { $('qrImg').style.display = 'none'; }
-  }catch(e){}
-}
-async function a(x){ await api(x,'POST'); setTimeout(refresh, 1000); }
-function logs(){
-  var es = new EventSource('/admin/logs');
-  es.onmessage = function(e){ try{
-    var en = JSON.parse(e.data); var div = document.createElement('div');
-    var t = new Date(en.ts).toLocaleTimeString();
-    div.innerHTML = '<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);
-    var b = $('logs'); b.appendChild(div); b.scrollTop = b.scrollHeight;
-    while (b.children.length > 300) b.removeChild(b.firstChild);
-  }catch(e){} };
-  es.onerror = function(){ es.close(); setTimeout(logs, 5000); };
-}
-function msgs(){
-  var es = new EventSource('/admin/messages-stream');
-  es.onmessage = function(e){ try{
-    var m = JSON.parse(e.data); var div = document.createElement('div');
-    div.style.padding = '6px 10px'; div.style.margin = '4px 0'; div.style.borderRadius = '4px';
-    div.style.borderLeft = '3px solid ' + (m.chatType === 'group' ? '#a371f7' : (m.isAdmin ? '#da3633' : '#3fb950'));
-    div.style.background = m.mediaType === 'system' ? '#1a1d3a' : (m.isAdmin ? '#2d1517' : 'transparent');
-    var badge = m.mediaType === 'system' ? '<span class="sys-badge">SYSTEM</span>' : (m.isAdmin ? '<span class="admin-badge">ADMIN</span>' : '');
-    div.innerHTML = '<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' | <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' | '+esc(m.phone)+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
-    var b = $('msgs'); b.appendChild(div); b.scrollTop = b.scrollHeight;
-    while (b.children.length > 250) b.removeChild(b.firstChild);
-  }catch(e){} };
-  es.onerror = function(){ es.close(); setTimeout(msgs, 5000); };
-}
-refresh(); logs(); msgs(); setInterval(refresh, 5000);
+async function api(p,m,body){var o={method:m||'GET'};if(body){o.headers={'Content-Type':'application/json'};o.body=JSON.stringify(body);}var r=await fetch('/admin/'+p,o);return r.json();}
+function esc(s){return String(s||'').replace(/[&<>"']/g,function(c){var m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};return m[c];});}
+function setS(s){$('dot').className='dot s-'+s;$('st').textContent=s;}
+async function testAI(){var b=$('aiList');b.innerHTML='Testing...';var r=await api('aitest');
+  var x=r.rewind;if(x&&x.ok)b.innerHTML='<div>OK rewind: '+x.ms+'ms ACTIVE</div>';
+  else b.innerHTML='<div style="color:#f85149">FAIL rewind: '+(x?.status||'')+' '+esc(x?.error||'')+'</div>';}
+async function refresh(){try{var d=await api('stats');setS(d.status);
+$('ap').textContent=d.adminPhone||'-';$('al').textContent=(d.adminLids||[]).join(', ')||'none';
+$('w').textContent=(d.window&&d.window.time)||'-';$('ns').textContent=(d.window&&d.window.nsfw)||'-';
+$('dm').textContent=(d.window&&d.window.dmAI)||'-';$('ai').textContent=(d.ai&&d.ai.active)||'NONE';
+$('bn').textContent=d.botNumber||'-';
+var u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
+$('up').textContent=h+'h '+m+'m '+s+'s';$('pz').textContent=d.paused?'yes':'no';$('c5').textContent=d.consecutive515||0;
+var p=d.policy||{};$('age').textContent=(p.ageDays||0)+'d';
+$('recip').textContent=(p.recipientsToday||0)+' / '+(p.recipientLimit||0);
+$('joins').textContent=(p.joinsToday||0)+' / '+(p.joinLimit||0);
+$('reply').textContent=((p.replyRate||0)*100).toFixed(0)+'%';
+$('bcastPaused').textContent=p.broadcastsAllowed?'no':'yes';
+$('mainLids').textContent=(d.mainGroupLids||0);
+var L=d.lanes||{fast:{},slow:{}};$('fq').textContent=L.fast.queued||0;$('fd').textContent=L.fast.done||0;
+$('sq').textContent=L.slow.queued||0;$('sd').textContent=L.slow.done||0;
+$('g').textContent=d.joinedGroups||0;$('d').textContent=d.dmCount||0;
+$('jq').textContent=d.queueSize||0;$('pd').textContent=d.pendingCount||0;$('mg').textContent=d.mainGroup||'not set';
+var t=d.dailyStats||{};$('dms').textContent=t.dmsReplied||0;$('reads').textContent=t.readsSent||0;
+$('typs').textContent=t.typingsSent||0;$('bc').textContent=t.broadcastsSent||0;
+$('del').textContent=t.deletesDone||0;$('blk').textContent=t.policyBlocks||0;
+var pr=(d.ai&&d.ai.providers)||{};var x=pr.rewind;
+if(x){if(x.ok)$('aiList').innerHTML='<div>OK rewind: '+x.ms+'ms <span class="ai-badge">ACTIVE</span></div>';
+else $('aiList').innerHTML='<div style="color:#f85149">FAIL rewind: '+(x.status||'')+' '+esc(x.error||'')+'</div>';}
+else $('aiList').innerHTML='<div style="opacity:0.5">Not tested</div>';
+var q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
+else $('qrImg').style.display='none';}catch(e){}}
+async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
+function logs(){var es=new EventSource('/admin/logs');es.onmessage=function(e){try{var en=JSON.parse(e.data);var div=document.createElement('div');var t=new Date(en.ts).toLocaleTimeString();
+div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);
+var b=$('logs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};
+es.onerror=function(){es.close();setTimeout(logs,5000);};}
+function msgs(){var es=new EventSource('/admin/messages-stream');es.onmessage=function(e){try{var m=JSON.parse(e.data);var div=document.createElement('div');
+div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4px';
+div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
+div.style.background=m.mediaType==='system'?'#1a1d3a':(m.isAdmin?'#2d1517':'transparent');
+var badge=m.mediaType==='system'?'<span class="sys-badge">SYSTEM</span>':(m.isAdmin?'<span class="admin-badge">ADMIN</span>':'');
+div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' | <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' | '+esc(m.phone)+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
+var b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);}catch(e){}};
+es.onerror=function(){es.close();setTimeout(msgs,5000);};}
+refresh();logs();msgs();setInterval(refresh,5000);
 </script></body></html>`;
 
 app.get('/', function(req,res){ res.send(PANEL_HTML); });
@@ -2695,7 +2606,7 @@ app.get('/admin/qr', async function(req,res){
 });
 app.get('/admin/qr-data', function(req,res){ res.json({ qr: qrDataUri, status: connectionStatus, botNumber }); });
 app.post('/admin/connect', function(req,res){ if (!sock) connectBot(); res.json({ ok:true }); });
-app.post('/admin/reconnect', async function(req,res){ await disconnectBot(); setTimeout(function(){ manualDisconnect=false; connectBot(); },1500); res.json({ ok:true }); });
+app.post('/admin/reconnect', async function(req,res){ await disconnectBot(); setTimeout(function(){ manualDisconnect=false; connectBot(); },1000); res.json({ ok:true }); });
 app.post('/admin/disconnect', async function(req,res){ await disconnectBot(); res.json({ ok:true }); });
 app.post('/admin/refresh-qr', function(req,res){ refreshQR(); res.json({ ok:true }); });
 app.post('/admin/clear-session', function(req,res){ try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
@@ -2733,22 +2644,12 @@ app.get('/admin/flow', function(req,res){
     replyRate: replyRate(),
     replySamples: replyTracker.sends.length,
     broadcastsAllowed: broadcastsAllowed(),
-    pausedUntil: replyTracker.pausedUntil ? new Date(replyTracker.pausedUntil).toISOString() : null,
     deletes: { min: deleteHist.min.length, hour: deleteHist.hour.length, day: deleteHist.day.length },
     fibIdx: { ...fibIdx },
     mainGroupLids: recentGroupLids.size,
-    mainGroupPhones: recentGroupPhones.size
+    typingEnabled: ENABLE_TYPING,
+    readReceiptsEnabled: ENABLE_READ_RECEIPTS
   });
-});
-app.get('/admin/sched', function(req,res){ res.json({
-  lanes: jobs.stats(), focus: focus.stats(),
-  window: describeWindow(), dmQueue: dmQueue.length,
-  consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
-}); });
-app.get('/admin/pending', function(req,res){ res.json({ pending: [...pendingRequests.values()] }); });
-app.post('/admin/pending/:id/resolve', async function(req,res){
-  const id = req.params.id; const body = req.body || {};
-  res.json(await resolvePending(id, body.action || 'search', body.payload, ADMIN_JID));
 });
 app.get('/admin/stats', function(req,res){
   resetDailyStats();
@@ -2806,36 +2707,30 @@ loadPolicy();
 app.listen(PORT, async function(){
   console.log('Port '+PORT);
   console.log('Admin: '+ADMIN_PHONE);
-  console.log('Admin LIDs: '+([...adminLids].join(', ')||'none'));
   console.log('Main: '+(mainGroupJid||'not set'));
-  console.log(describeWindow()+' DM: '+describeDm()+' NSFW: '+describeNsfw());
-  console.log('Media max: 34 MB');
-  console.log('Scraper: '+SCRAPER_URL);
-  console.log('NSFW DL: '+(RedgifsDownloader?'enabled':'not installed'));
-  console.log('Content block: '+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
-  console.log('Policy: account age '+getAccountAgeDays()+'d, limit '+dailyRecipientLimit(getAccountAgeDays())+'/day, joins '+dailyJoinLimit(getAccountAgeDays())+'/night');
-  console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING')+' OPENAI='+(OPENAI_KEY_ENV?'set':'MISSING')+' VENICE='+(VENICE_KEY_ENV?'set':'MISSING')+' GEMINI='+(GEMINI_KEY_ENV?'set':'MISSING'));
+  console.log('AI: Rewind only');
+  console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?'ON':'OFF'));
+  console.log('Policy: age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
+  console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
 
   pushLog('info','system','Boot port '+PORT);
-  pushLog('info','system','Admin: '+ADMIN_PHONE+' LIDs: '+([...adminLids].join(', ')||'none'));
+  pushLog('info','system','Admin: '+ADMIN_PHONE);
   pushLog('info','system','Main: '+(mainGroupJid||'not set'));
-  pushLog('info','policy','Age '+getAccountAgeDays()+'d — limit '+dailyRecipientLimit(getAccountAgeDays())+' rec/day, '+dailyJoinLimit(getAccountAgeDays())+' joins/night');
-  pushLog('info','policy','Content block: '+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
-  pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING')+' OPENAI='+(OPENAI_KEY_ENV?'set':'MISSING')+' VENICE='+(VENICE_KEY_ENV?'set':'MISSING')+' GEMINI='+(GEMINI_KEY_ENV?'set':'MISSING'));
+  pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
+  pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
+  pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
 
   findWorkingY2MateHost().then(h => {
     if (h) pushLog('success','yt','y2mate host: '+h);
-    else pushLog('error','yt','no y2mate host reachable');
+    else pushLog('error','yt','no y2mate host');
   });
-
-  await detectAIBackend();
-  console.log('Active AI: '+(activeProvider||'NONE'));
-  pushLog('info','system','AI backend: '+(activeProvider||'NONE'));
 
   scheduleGreetings();
   scheduleDailyReport();
   scheduleGroupJoins();
   scheduleHumanPresence();
+
+  // Connect immediately — AI test runs after
   connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
 });
 

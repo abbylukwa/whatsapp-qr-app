@@ -1,8 +1,9 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v55 — SyntaxError FIXED
- *  - Panel HTML: no nested backticks
+ *  BreadBot v56 — Panel HTML syntax fixed
+ *  - PANEL_HTML is a single template literal (no nested backticks)
+ *  - Browser JS uses single quotes; HTML uses double quotes
  *  - Rewind endpoint corrected to api.rewind.ai
  *  - All v54 features intact
  * ============================================================ */
@@ -469,11 +470,11 @@ function announceAdminToLive(reason, extraLid){
     chatJid: ADMIN_JID, chatType: 'system',
     senderJid: ADMIN_JID, senderName: 'ADMIN',
     phone: ADMIN_PHONE,
-    lid: extraLid ? `${extraLid}${lidList.length>1?' (+'+(lidList.length-1)+' more)':''}` : (lidList.join(', ')||'—'),
+    lid: extraLid ? `${extraLid}${lidList.length>1?' (+'+(lidList.length-1)+' more)':''}` : (lidList.join(', ')||'-'),
     text: `Admin ${reason}\nPhone: ${ADMIN_PHONE}\nLIDs: ${lidList.join(', ')||'none'}`,
     mediaType: 'system', isAdmin: true
   });
-  pushLog('success','admin',`Live-log: ${reason} — LIDs [${lidList.join(', ')||'none'}]`);
+  pushLog('success','admin',`Live-log: ${reason} - LIDs [${lidList.join(', ')||'none'}]`);
 }
 function isAdminSender(msg, senderJid){
   const candidates = extractAllPhoneCandidates(msg, senderJid);
@@ -1076,7 +1077,7 @@ function queueJoin(code, addedBy='unknown', source='dm'){
   if (joinQueue.some(q => q.code === code)) return false;
   const last = recentJoinAttempts.get(code);
   if (last && Date.now() - last < 15 * 60 * 1000){
-    pushLog('info','join',`Skipping ${code} — attempted recently`);
+    pushLog('info','join',`Skipping ${code} - attempted recently`);
     return false;
   }
   joinQueue.push({ code, addedAt:Date.now(), addedBy, source });
@@ -1167,7 +1168,7 @@ async function resolvePending(id, action, payload, adminChatJid){
 async function startDownloadSearch(chatJid, query, priority=1, lane='slow'){
   const results = await ytSearch(query, 6);
   if (!results.length){
-    await sendBuffer(chatJid, { text: `Couldn't find "${query}"` }, priority, lane);
+    await sendBuffer(chatJid, { text: `Could not find "${query}"` }, priority, lane);
     return;
   }
   downloadPicks.set(chatJid, { query, results, ts:Date.now() });
@@ -1203,7 +1204,7 @@ async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v55 - Admin Commands
+const COMMAND_LIST = `BreadBot v56 - Admin Commands
 
 BASICS
 !help / !ping / !status / !jobs
@@ -2145,12 +2146,242 @@ function refreshQR(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  EXPRESS PANEL
+ *  EXPRESS PANEL — single template literal, no nested backticks
+ * ══════════════════════════════════════════════════════════════ */
+const PANEL_HTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BreadBot v56</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+h1 { font-size: 20px; color: #58a6ff; }
+.sub { font-size: 12px; color: #8b949e; margin-bottom: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+.card h2 { font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 10px; }
+button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; cursor: pointer; margin: 3px; font-family: inherit; }
+button:hover { background: #30363d; }
+button.primary { background: #238636; color: #fff; }
+button.danger { background: #da3633; color: #fff; }
+.row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; border-bottom: 1px solid #21262d; }
+.val { color: #58a6ff; font-weight: 600; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+.s-connected { background: #3fb950; }
+.s-qr { background: #d29922; }
+.s-disconnected, .s-error { background: #f85149; }
+.s-reconnecting { background: #d29922; }
+#logs, #msgs { height: 300px; overflow-y: auto; font-size: 12px; background: #0d1117; border-radius: 6px; padding: 8px; }
+#qrImg { max-width: 220px; background: #fff; padding: 8px; border-radius: 8px; display: block; margin: auto; }
+.full { grid-column: 1 / -1; }
+.admin-badge { background: #da3633; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; font-weight: 700; }
+.sys-badge { background: #6e40c9; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; font-weight: 700; }
+.ai-badge { background: #238636; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>BreadBot v56</h1>
+<div class="sub">Admin: <b id="ap">-</b> | LIDs: <b id="al">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b></div>
+<div class="grid">
+<div class="card">
+<h2>Connection</h2>
+<div><span class="dot" id="dot"></span><span id="st">-</span></div>
+<div class="row"><span>Bot</span><span class="val" id="bn">-</span></div>
+<div class="row"><span>Uptime</span><span class="val" id="up">-</span></div>
+<div class="row"><span>Paused</span><span class="val" id="pz">-</span></div>
+<div class="row"><span>Offline</span><span class="val" id="off">-</span></div>
+<div class="row"><span>515</span><span class="val" id="c5">-</span></div>
+<img id="qrImg" src="" style="display:none">
+<div style="margin-top:10px">
+<button class="primary" onclick="a('connect')">Start</button>
+<button onclick="a('refresh-qr')">Refresh QR</button>
+<button class="danger" onclick="a('disconnect')">Disconnect</button>
+<button onclick="a('pause')">Pause</button>
+<button onclick="a('resume')">Resume</button>
+<button onclick="a('offline')">Off 30m</button>
+<button onclick="a('online')">Online</button>
+</div>
+</div>
+<div class="card">
+<h2>AI Providers</h2>
+<div id="aiList" style="font-size:12px;line-height:1.7"></div>
+<div style="margin-top:8px"><button onclick="testAI()">Test all</button></div>
+</div>
+<div class="card">
+<h2>Lanes</h2>
+<div class="row"><span>Fast queue</span><span class="val" id="fq">-</span></div>
+<div class="row"><span>Fast done</span><span class="val" id="fd">-</span></div>
+<div class="row"><span>Slow queue</span><span class="val" id="sq">-</span></div>
+<div class="row"><span>Slow done</span><span class="val" id="sd">-</span></div>
+<div class="row"><span>Failed</span><span class="val" id="fl">-</span></div>
+<div class="row"><span>Dropped</span><span class="val" id="dr">-</span></div>
+</div>
+<div class="card">
+<h2>Scope</h2>
+<div class="row"><span>Groups</span><span class="val" id="g">-</span></div>
+<div class="row"><span>DMs</span><span class="val" id="d">-</span></div>
+<div class="row"><span>Join queue</span><span class="val" id="jq">-</span></div>
+<div class="row"><span>Pending</span><span class="val" id="pd">-</span></div>
+<div class="row"><span>DM queue</span><span class="val" id="dmq">-</span></div>
+<div class="row"><span>Main</span><span class="val" id="mg">-</span></div>
+</div>
+<div class="card">
+<h2>Today</h2>
+<div class="row"><span>DM</span><span class="val" id="dms">-</span></div>
+<div class="row"><span>Media</span><span class="val" id="md">-</span></div>
+<div class="row"><span>NSFW</span><span class="val" id="nsf">-</span></div>
+<div class="row"><span>Downloads</span><span class="val" id="dls">-</span></div>
+<div class="row"><span>Broadcasts</span><span class="val" id="bc">-</span></div>
+<div class="row"><span>Dropped</span><span class="val" id="drp">-</span></div>
+</div>
+<div class="card full"><h2>Live Messages</h2><div id="msgs"></div></div>
+<div class="card full"><h2>Logs</h2><div id="logs"></div></div>
+</div>
+<script>
+var $ = function(id) { return document.getElementById(id); };
+
+async function api(p, m, body) {
+  var o = { method: m || 'GET' };
+  if (body) { o.headers = { 'Content-Type': 'application/json' }; o.body = JSON.stringify(body); }
+  var r = await fetch('/admin/' + p, o);
+  return r.json();
+}
+
+function esc(s) {
+  return String(s || '').replace(/[&<>"']/g, function(c) {
+    var m = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return m[c];
+  });
+}
+
+function setS(s) { $('dot').className = 'dot s-' + s; $('st').textContent = s; }
+
+async function testAI() {
+  var b = $('aiList');
+  b.innerHTML = 'Testing...';
+  var r = await api('aitest');
+  b.innerHTML = Object.keys(r).map(function(k) {
+    var v = r[k];
+    if (v.ok) return '<div>OK ' + k + ': ' + v.ms + 'ms</div>';
+    return '<div style="color:#f85149">FAIL ' + k + ': ' + (v.status || '') + ' ' + esc(v.error || '') + '</div>';
+  }).join('');
+}
+
+async function refresh() {
+  try {
+    var d = await api('stats');
+    setS(d.status);
+    $('ap').textContent = d.adminPhone || '-';
+    $('al').textContent = (d.adminLids || []).join(', ') || 'none';
+    $('w').textContent = (d.window && d.window.time) || '-';
+    $('ns').textContent = (d.window && d.window.nsfw) || '-';
+    $('dm').textContent = (d.window && d.window.dmAI) || '-';
+    $('ai').textContent = (d.ai && d.ai.active) || 'NONE';
+    $('bn').textContent = d.botNumber || '-';
+    var u = d.uptime || 0, h = Math.floor(u / 3600), m = Math.floor((u % 3600) / 60), s = u % 60;
+    $('up').textContent = h + 'h ' + m + 'm ' + s + 's';
+    $('pz').textContent = d.paused ? 'yes' : 'no';
+    $('off').textContent = d.offlineUntil ? 'yes' : 'no';
+    $('c5').textContent = d.consecutive515 || 0;
+    var L = d.lanes || { fast: {}, slow: {}, total: {} };
+    $('fq').textContent = L.fast.queued || 0;
+    $('fd').textContent = L.fast.done || 0;
+    $('sq').textContent = L.slow.queued || 0;
+    $('sd').textContent = L.slow.done || 0;
+    $('fl').textContent = L.total.failed || 0;
+    $('dr').textContent = L.total.dropped || 0;
+    $('g').textContent = d.joinedGroups || 0;
+    $('d').textContent = d.dmCount || 0;
+    $('jq').textContent = d.queueSize || 0;
+    $('pd').textContent = d.pendingCount || 0;
+    $('dmq').textContent = (d.dmQueueLength || 0) + '/' + (d.dmQueueMax || 1000);
+    $('mg').textContent = d.mainGroup || 'not set';
+    var t = d.dailyStats || {};
+    $('dms').textContent = t.dmsReplied || 0;
+    $('md').textContent = (t.picsSent || 0) + (t.videosSent || 0);
+    $('nsf').textContent = t.nsfwSent || 0;
+    $('dls').textContent = t.downloads || 0;
+    $('bc').textContent = t.broadcastsSent || 0;
+    $('drp').textContent = t.messagesDropped || 0;
+    var pr = (d.ai && d.ai.providers) || {};
+    $('aiList').innerHTML = Object.keys(pr).map(function(n) {
+      var v = pr[n];
+      var active = (d.ai && d.ai.active) === n ? ' <span class="ai-badge">ACTIVE</span>' : '';
+      if (v.skipped) return '<div style="opacity:0.5">- ' + n + ': no key</div>';
+      if (v.ok) return '<div>OK ' + n + ': ' + v.ms + 'ms' + active + '</div>';
+      return '<div style="color:#f85149">FAIL ' + n + ': ' + (v.status || '') + ' ' + esc(v.error || '') + '</div>';
+    }).join('') || '<div style="opacity:0.5">Not tested yet</div>';
+    var q = await api('qr-data');
+    if (q.qr && q.status === 'qr') {
+      $('qrImg').src = '/admin/qr?t=' + Date.now();
+      $('qrImg').style.display = 'block';
+    } else {
+      $('qrImg').style.display = 'none';
+    }
+  } catch (e) {}
+}
+
+async function a(x) { await api(x, 'POST'); setTimeout(refresh, 1000); }
+
+function logs() {
+  var es = new EventSource('/admin/logs');
+  es.onmessage = function(e) {
+    try {
+      var en = JSON.parse(e.data);
+      var div = document.createElement('div');
+      var t = new Date(en.ts).toLocaleTimeString();
+      div.innerHTML = '<span style="color:#484f58">' + t + '</span> <span style="color:#58a6ff">[' + en.level + ']</span> <span style="color:#8b949e">' + esc(en.source) + '</span> ' + esc(en.message);
+      var b = $('logs');
+      b.appendChild(div);
+      b.scrollTop = b.scrollHeight;
+      while (b.children.length > 300) b.removeChild(b.firstChild);
+    } catch (e) {}
+  };
+  es.onerror = function() { es.close(); setTimeout(logs, 5000); };
+}
+
+function msgs() {
+  var es = new EventSource('/admin/messages-stream');
+  es.onmessage = function(e) {
+    try {
+      var m = JSON.parse(e.data);
+      var div = document.createElement('div');
+      div.style.padding = '6px 10px';
+      div.style.margin = '4px 0';
+      div.style.borderRadius = '4px';
+      div.style.borderLeft = '3px solid ' + (m.chatType === 'group' ? '#a371f7' : (m.isAdmin ? '#da3633' : '#3fb950'));
+      div.style.background = m.mediaType === 'system' ? '#1a1d3a' : (m.isAdmin ? '#2d1517' : 'transparent');
+      var badge = m.mediaType === 'system' ? '<span class="sys-badge">SYSTEM</span>' : (m.isAdmin ? '<span class="admin-badge">ADMIN</span>' : '');
+      div.innerHTML = '<div style="color:#8b949e;font-size:11px">' + new Date(m.ts).toLocaleTimeString() + ' | <span style="color:#58a6ff">' + esc(m.senderName) + '</span>' + badge + ' | ' + esc(m.phone) + ' | ' + esc(m.lid) + '</div><div style="white-space:pre-wrap">' + esc(m.text) + '</div>';
+      var b = $('msgs');
+      b.appendChild(div);
+      b.scrollTop = b.scrollHeight;
+      while (b.children.length > 250) b.removeChild(b.firstChild);
+    } catch (e) {}
+  };
+  es.onerror = function() { es.close(); setTimeout(msgs, 5000); };
+}
+
+refresh();
+logs();
+msgs();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>`;
+
+app.get('/', function(req, res){ res.send(PANEL_HTML); });
+app.get('/admin', function(req, res){ res.send(PANEL_HTML); });
+
+/* ══════════════════════════════════════════════════════════════
+ *  EXPRESS ROUTES
  * ══════════════════════════════════════════════════════════════ */
 const app = express();
 app.use(express.json());
 
-app.get('/health',function(req,res){ res.json({
+app.get('/health', function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,
   uptime:Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
@@ -2163,58 +2394,60 @@ app.get('/health',function(req,res){ res.json({
   ai: { active: activeProvider, providers: providerReport },
   consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
 }); });
-app.get('/api/status',function(req,res){ res.json({
+
+app.get('/api/status', function(req,res){ res.json({
   status: connectionStatus, botNumber,
   groups: joinedGroups.size, dms: activeDMs.size,
   queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
   adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
 }); });
-app.get('/admin/qr',async function(req,res){
+
+app.get('/admin/qr', async function(req,res){
   if (!qrDataUri) return res.status(404).json({ error:'No QR' });
   const b64 = qrDataUri.replace(/^data:image\/\w+;base64,/,'');
   res.writeHead(200, { 'Content-Type':'image/png' });
   res.end(Buffer.from(b64, 'base64'));
 });
-app.get('/admin/qr-data',function(req,res){ res.json({ qr: qrDataUri, status: connectionStatus, botNumber }); });
-app.post('/admin/connect',function(req,res){ if (!sock) connectBot(); res.json({ ok:true }); });
-app.post('/admin/reconnect',async function(req,res){ await disconnectBot(); setTimeout(function(){ manualDisconnect=false; connectBot(); },1500); res.json({ ok:true }); });
-app.post('/admin/disconnect',async function(req,res){ await disconnectBot(); res.json({ ok:true }); });
-app.post('/admin/refresh-qr',function(req,res){ refreshQR(); res.json({ ok:true }); });
-app.post('/admin/clear-session',function(req,res){ try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
-app.post('/admin/pause',function(req,res){ botPaused = true; res.json({ ok:true }); });
-app.post('/admin/resume',function(req,res){ botPaused = false; res.json({ ok:true }); });
-app.post('/admin/offline',function(req,res){
+app.get('/admin/qr-data', function(req,res){ res.json({ qr: qrDataUri, status: connectionStatus, botNumber }); });
+app.post('/admin/connect', function(req,res){ if (!sock) connectBot(); res.json({ ok:true }); });
+app.post('/admin/reconnect', async function(req,res){ await disconnectBot(); setTimeout(function(){ manualDisconnect=false; connectBot(); },1500); res.json({ ok:true }); });
+app.post('/admin/disconnect', async function(req,res){ await disconnectBot(); res.json({ ok:true }); });
+app.post('/admin/refresh-qr', function(req,res){ refreshQR(); res.json({ ok:true }); });
+app.post('/admin/clear-session', function(req,res){ try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
+app.post('/admin/pause', function(req,res){ botPaused = true; res.json({ ok:true }); });
+app.post('/admin/resume', function(req,res){ botPaused = false; res.json({ ok:true }); });
+app.post('/admin/offline', function(req,res){
   const mins = parseInt(req.body && req.body.minutes, 10) || 30;
   botOfflineUntil = Date.now() + mins*60000;
   res.json({ ok:true, until: new Date(botOfflineUntil).toISOString() });
 });
-app.post('/admin/online',function(req,res){ botOfflineUntil = 0; res.json({ ok:true }); });
+app.post('/admin/online', function(req,res){ botOfflineUntil = 0; res.json({ ok:true }); });
 
-app.get('/admin/logs',function(req,res){
+app.get('/admin/logs', function(req,res){
   res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive' });
   for (const e of logBuffer.slice(-100)) res.write('data: '+JSON.stringify(e)+'\n\n');
-  logClients.add(res); req.on('close',function(){ logClients.delete(res); });
+  logClients.add(res); req.on('close', function(){ logClients.delete(res); });
 });
-app.get('/admin/messages-stream',function(req,res){
+app.get('/admin/messages-stream', function(req,res){
   res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive' });
   for (const m of liveMessages.slice(-100)) res.write('data: '+JSON.stringify(m)+'\n\n');
-  msgClients.add(res); req.on('close',function(){ msgClients.delete(res); });
+  msgClients.add(res); req.on('close', function(){ msgClients.delete(res); });
 });
 
-app.get('/admin/aitest',async function(req,res){ res.json(await testAllProviders()); });
-app.get('/admin/providers',function(req,res){ res.json({ active: activeProvider, report: providerReport }); });
-app.get('/admin/scraperstatus',async function(req,res){ res.json(await scraperStatus()); });
-app.get('/admin/sched',function(req,res){ res.json({
+app.get('/admin/aitest', async function(req,res){ res.json(await testAllProviders()); });
+app.get('/admin/providers', function(req,res){ res.json({ active: activeProvider, report: providerReport }); });
+app.get('/admin/scraperstatus', async function(req,res){ res.json(await scraperStatus()); });
+app.get('/admin/sched', function(req,res){ res.json({
   lanes: jobs.stats(), focus: focus.stats(),
   window: describeWindow(), dmQueue: dmQueue.length,
   consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
 }); });
-app.get('/admin/pending',function(req,res){ res.json({ pending: [...pendingRequests.values()] }); });
-app.post('/admin/pending/:id/resolve',async function(req,res){
+app.get('/admin/pending', function(req,res){ res.json({ pending: [...pendingRequests.values()] }); });
+app.post('/admin/pending/:id/resolve', async function(req,res){
   const id = req.params.id; const body = req.body || {};
   res.json(await resolvePending(id, body.action || 'search', body.payload, ADMIN_JID));
 });
-app.get('/admin/stats',function(req,res){
+app.get('/admin/stats', function(req,res){
   resetDailyStats();
   res.json({
     status: connectionStatus, botNumber,
@@ -2235,105 +2468,6 @@ app.get('/admin/stats',function(req,res){
     ai: { active: activeProvider, providers: providerReport }
   });
 });
-
-/* ─── HTML panel (NO NESTED BACKTICKS) ─── */
-const PANEL_HTML = [
-'<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v55</title>',
-'<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.ai-badge{background:#238636;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}</style></head><body>',
-'<h1>BreadBot v55</h1><div class="sub">Admin: <b id="ap">-</b> | LIDs: <b id="al">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b></div>',
-'<div class="grid">',
-'<div class="card"><h2>Connection</h2><div><span class="dot" id="dot"></span><span id="st">-</span></div>',
-'<div class="row"><span>Bot</span><span class="val" id="bn">-</span></div>',
-'<div class="row"><span>Uptime</span><span class="val" id="up">-</span></div>',
-'<div class="row"><span>Paused</span><span class="val" id="pz">-</span></div>',
-'<div class="row"><span>Offline</span><span class="val" id="off">-</span></div>',
-'<div class="row"><span>515</span><span class="val" id="c5">-</span></div>',
-'<img id="qrImg" src="" style="display:none">',
-'<div style="margin-top:10px"><button class="primary" onclick="a(\\'connect\\')">Start</button>',
-'<button onclick="a(\\'refresh-qr\\')">Refresh QR</button>',
-'<button class="danger" onclick="a(\\'disconnect\\')">Disconnect</button>',
-'<button onclick="a(\\'pause\\')">Pause</button><button onclick="a(\\'resume\\')">Resume</button>',
-'<button onclick="a(\\'offline\\')">Off 30m</button><button onclick="a(\\'online\\')">Online</button></div></div>',
-'<div class="card"><h2>AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>',
-'<div style="margin-top:8px"><button onclick="testAI()">Test all</button></div></div>',
-'<div class="card"><h2>Lanes</h2>',
-'<div class="row"><span>Fast queue</span><span class="val" id="fq">-</span></div>',
-'<div class="row"><span>Fast done</span><span class="val" id="fd">-</span></div>',
-'<div class="row"><span>Slow queue</span><span class="val" id="sq">-</span></div>',
-'<div class="row"><span>Slow done</span><span class="val" id="sd">-</span></div>',
-'<div class="row"><span>Failed</span><span class="val" id="fl">-</span></div>',
-'<div class="row"><span>Dropped</span><span class="val" id="dr">-</span></div></div>',
-'<div class="card"><h2>Scope</h2>',
-'<div class="row"><span>Groups</span><span class="val" id="g">-</span></div>',
-'<div class="row"><span>DMs</span><span class="val" id="d">-</span></div>',
-'<div class="row"><span>Join queue</span><span class="val" id="jq">-</span></div>',
-'<div class="row"><span>Pending</span><span class="val" id="pd">-</span></div>',
-'<div class="row"><span>DM queue</span><span class="val" id="dmq">-</span></div>',
-'<div class="row"><span>Main</span><span class="val" id="mg">-</span></div></div>',
-'<div class="card"><h2>Today</h2>',
-'<div class="row"><span>DM</span><span class="val" id="dms">-</span></div>',
-'<div class="row"><span>Media</span><span class="val" id="md">-</span></div>',
-'<div class="row"><span>NSFW</span><span class="val" id="nsf">-</span></div>',
-'<div class="row"><span>Downloads</span><span class="val" id="dls">-</span></div>',
-'<div class="row"><span>Broadcasts</span><span class="val" id="bc">-</span></div>',
-'<div class="row"><span>Dropped</span><span class="val" id="drp">-</span></div></div>',
-'<div class="card full"><h2>Live Messages</h2><div id="msgs"></div></div>',
-'<div class="card full"><h2>Logs</h2><div id="logs"></div></div>',
-'</div>',
-'<script>',
-'var $=function(id){return document.getElementById(id);};',
-'async function api(p,m,body){var o={method:m||"GET"};if(body){o.headers={"Content-Type":"application/json"};o.body=JSON.stringify(body);}var r=await fetch("/admin/"+p,o);return r.json();}',
-'function esc(s){return String(s||"").replace(/[&<>"\']/g,function(c){var map={"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","\\x27":"&#39;"};return map[c];});}',
-'function setS(s){$("dot").className="dot s-"+s;$("st").textContent=s;}',
-'async function testAI(){var b=$("aiList");b.innerHTML="Testing...";var r=await api("aitest");b.innerHTML=Object.keys(r).map(function(k){var v=r[k];if(v.ok)return "<div>OK "+k+": "+v.ms+"ms</div>";return "<div style=\\"color:#f85149\\">FAIL "+k+": "+(v.status||"")+" "+esc(v.error||"")+"</div>";}).join("");}',
-'async function refresh(){try{var d=await api("stats");setS(d.status);',
-'$("ap").textContent=d.adminPhone||"-";',
-'$("al").textContent=(d.adminLids||[]).join(", ")||"none";',
-'$("w").textContent=(d.window&&d.window.time)||"-";',
-'$("ns").textContent=(d.window&&d.window.nsfw)||"-";',
-'$("dm").textContent=(d.window&&d.window.dmAI)||"-";',
-'$("ai").textContent=(d.ai&&d.ai.active)||"NONE";',
-'$("bn").textContent=d.botNumber||"-";',
-'var u=d.uptime||0,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;',
-'$("up").textContent=h+"h "+m+"m "+s+"s";',
-'$("pz").textContent=d.paused?"yes":"no";',
-'$("off").textContent=d.offlineUntil?"yes":"no";',
-'$("c5").textContent=d.consecutive515||0;',
-'var L=d.lanes||{fast:{},slow:{},total:{}};',
-'$("fq").textContent=L.fast.queued||0;$("fd").textContent=L.fast.done||0;',
-'$("sq").textContent=L.slow.queued||0;$("sd").textContent=L.slow.done||0;',
-'$("fl").textContent=L.total.failed||0;$("dr").textContent=L.total.dropped||0;',
-'$("g").textContent=d.joinedGroups||0;$("d").textContent=d.dmCount||0;',
-'$("jq").textContent=d.queueSize||0;$("pd").textContent=d.pendingCount||0;',
-'$("dmq").textContent=(d.dmQueueLength||0)+"/"+(d.dmQueueMax||1000);',
-'$("mg").textContent=d.mainGroup||"not set";',
-'var t=d.dailyStats||{};',
-'$("dms").textContent=t.dmsReplied||0;',
-'$("md").textContent=(t.picsSent||0)+(t.videosSent||0);',
-'$("nsf").textContent=t.nsfwSent||0;$("dls").textContent=t.downloads||0;',
-'$("bc").textContent=t.broadcastsSent||0;$("drp").textContent=t.messagesDropped||0;',
-'var pr=(d.ai&&d.ai.providers)||{};',
-'$("aiList").innerHTML=Object.keys(pr).map(function(n){var v=pr[n];var active=(d.ai&&d.ai.active)===n?" <span class=\\"ai-badge\\">ACTIVE</span>":"";if(v.skipped)return "<div style=\\"opacity:0.5\\">- "+n+": no key</div>";if(v.ok)return "<div>OK "+n+": "+v.ms+"ms"+active+"</div>";return "<div style=\\"color:#f85149\\">FAIL "+n+": "+(v.status||"")+" "+esc(v.error||"")+"</div>";}).join("")||"<div style=\\"opacity:0.5\\">Not tested yet</div>";',
-'var q=await api("qr-data");',
-'if(q.qr&&q.status==="qr"){$("qrImg").src="/admin/qr?t="+Date.now();$("qrImg").style.display="block";}',
-'else{$("qrImg").style.display="none";}',
-'}catch(e){}}',
-'async function a(x){await api(x,"POST");setTimeout(refresh,1000);}',
-'function logs(){var es=new EventSource("/admin/logs");es.onmessage=function(e){try{var en=JSON.parse(e.data);var div=document.createElement("div");var t=new Date(en.ts).toLocaleTimeString();div.innerHTML="<span style=\\"color:#484f58\\">"+t+"</span> <span style=\\"color:#58a6ff\\">["+en.level+"]</span> <span style=\\"color:#8b949e\\">"+esc(en.source)+"</span> "+esc(en.message);var b=$("logs");b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};es.onerror=function(){es.close();setTimeout(logs,5000);};}',
-'function msgs(){var es=new EventSource("/admin/messages-stream");es.onmessage=function(e){try{var m=JSON.parse(e.data);var div=document.createElement("div");',
-'div.style.padding="6px 10px";div.style.margin="4px 0";div.style.borderRadius="4px";',
-'div.style.borderLeft="3px solid "+(m.chatType==="group"?"#a371f7":(m.isAdmin?"#da3633":"#3fb950"));',
-'div.style.background=m.mediaType==="system"?"#1a1d3a":(m.isAdmin?"#2d1517":"transparent");',
-'var badge=m.mediaType==="system"?"<span class=\\"sys-badge\\">SYSTEM</span>":(m.isAdmin?"<span class=\\"admin-badge\\">ADMIN</span>":"");',
-'div.innerHTML="<div style=\\"color:#8b949e;font-size:11px\\">"+new Date(m.ts).toLocaleTimeString()+" | <span style=\\"color:#58a6ff\\">"+esc(m.senderName)+"</span>"+badge+" | "+esc(m.phone)+" | "+esc(m.lid)+"</div><div style=\\"white-space:pre-wrap\\">"+esc(m.text)+"</div>";',
-'var b=$("msgs");b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);',
-'}catch(e){}};es.onerror=function(){es.close();setTimeout(msgs,5000);};}',
-'refresh();logs();msgs();setInterval(refresh,5000);',
-'</script></body></html>'
-].join('\n');
-
-app.get('/',function(req,res){ res.send(PANEL_HTML); });
-app.get('/admin',function(req,res){ res.send(PANEL_HTML); });
 
 /* ══════════════════════════════════════════════════════════════
  *  PERIODIC TASKS

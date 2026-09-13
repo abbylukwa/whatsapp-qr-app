@@ -1,10 +1,14 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "44.0.0",
-  "description": "WhatsApp bot — serial human-like behavior with Fibonacci timing",
+  "version": "45.0.0",
+  "description": "WhatsApp bot — group management, video downloader, admin controls, human behavior",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.18",
     "axios": "^1.7.0",

@@ -450,6 +450,60 @@ const MAX_RECONNECT = 10;
 let isConnecting = false;
 let manualDisconnect = false;
 
+/* ============================================================
+ *  ANTI-SPAM RECONNECTION STATE  (515 fix)
+ *  Prevents WhatsApp from being hammered with rapid reconnects.
+ * ============================================================ */
+let restart515InFlight = false;       // guard against parallel restart handlers
+let lastReconnectAt = 0;              // timestamp of last reconnect attempt
+let consecutive515 = 0;               // how many 515s in a row (for backoff)
+let recent515Timestamps = [];         // sliding window of 515 events
+let spamCooldownUntil = 0;            // when to resume after spam detected
+const RESTART_515_BASE_DELAY_MS = 1500;   // first 515 wait
+const RESTART_515_MAX_DELAY_MS = 30000;   // backoff cap
+const MIN_RECONNECT_INTERVAL_MS = 10000;  // never reconnect faster than this
+const SPAM_WINDOW_MS = 60000;             // sliding window
+const SPAM_THRESHOLD = 3;                 // >3× 515 in window → cool down
+const SPAM_COOLDOWN_MS = 60000;           // pause duration
+
+/* ---------- anti-spam helper functions ---------- */
+function getDisconnectStatusCode(lastDisconnect) {
+  return (
+    lastDisconnect?.error?.output?.statusCode ??
+    lastDisconnect?.error?.output?.payload?.statusCode ??
+    lastDisconnect?.error?.statusCode ??
+    lastDisconnect?.statusCode
+  );
+}
+function record515() {
+  const now = Date.now();
+  recent515Timestamps.push(now);
+  recent515Timestamps = recent515Timestamps.filter(t => now - t < SPAM_WINDOW_MS);
+  if (recent515Timestamps.length > SPAM_THRESHOLD) {
+    spamCooldownUntil = now + SPAM_COOLDOWN_MS;
+    pushLog('warn', 'antispam', `${recent515Timestamps.length}x 515 in ${SPAM_WINDOW_MS / 1000}s — pausing ${SPAM_COOLDOWN_MS / 1000}s`);
+    recent515Timestamps = [];
+    consecutive515 = 0;
+  }
+}
+function next515Delay() {
+  consecutive515 += 1;
+  return Math.min(
+    RESTART_515_BASE_DELAY_MS * Math.pow(2, consecutive515 - 1),
+    RESTART_515_MAX_DELAY_MS
+  );
+}
+async function enforceMinReconnectInterval() {
+  const now = Date.now();
+  const sinceLast = now - lastReconnectAt;
+  if (sinceLast < MIN_RECONNECT_INTERVAL_MS) {
+    const wait = MIN_RECONNECT_INTERVAL_MS - sinceLast;
+    pushLog('warn', 'antispam', `throttling reconnect — waiting ${wait}ms`);
+    await new Promise(r => setTimeout(r, wait));
+  }
+  lastReconnectAt = Date.now();
+}
+
 const processedMessages = new Set();
 const activeChats = new Set();
 const activeDMs = new Set();
@@ -1285,6 +1339,11 @@ async function connectBot() {
       if (connection === 'open') {
         isConnecting = false; connectionStatus = 'connected'; reconnectAttempts = 0; botStartTime = Date.now();
         botJid = sock.user?.id || null; botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
+        // reset anti-spam counters on successful connect
+        consecutive515 = 0;
+        recent515Timestamps = [];
+        spamCooldownUntil = 0;
+        lastReconnectAt = 0;
         pushLog('success', 'bot', `Connected as ${botNumber}`);
         pushLog('info', 'time', `${timeGate.describe()} | ${timeGate.describeGroup()} | ${timeGate.describeNsfw()}`);
         if (createHumanEntropyService) {
@@ -1299,7 +1358,7 @@ async function connectBot() {
       }
       if (connection === 'close') {
         isConnecting = false;
-        const code = lastDisconnect?.error?.output?.statusCode;
+        const code = getDisconnectStatusCode(lastDisconnect) ?? lastDisconnect?.error?.output?.statusCode;
         let cls = null;
         if (classifyDisconnect) { try { cls = classifyDisconnect(code); } catch (e) {} }
         if (cls) pushLog('warn', 'bot', `Disconnected (${code}) — ${cls.message} [${cls.category}]`);
@@ -1309,13 +1368,55 @@ async function connectBot() {
         if (code === DisconnectReason.loggedOut) { connectionStatus = 'disconnected'; pushLog('error', 'bot', 'Logged out'); return; }
         if (code === 408 && connectionStatus === 'qr' && !botNumber) { connectionStatus = 'disconnected'; pushLog('warn', 'bot', 'QR expired'); return; }
         if (code === 428 || code === 440) { connectionStatus = 'disconnected'; pushLog('error', 'bot', `Conflict ${code}`); return; }
+
+        // ─────────────────────────────────────────────
+        //  🔑 515 FIX — WhatsApp wants a restart
+        //  + anti-spam guard (cooldown, backoff, in-flight lock)
+        // ─────────────────────────────────────────────
+        if (code === DisconnectReason.restartRequired || code === 515) {
+          if (restart515InFlight) {
+            pushLog('warn', 'bot', '515 handler already in flight — skipping duplicate');
+            return;
+          }
+          restart515InFlight = true;
+
+          // wait out any active spam cooldown first
+          const now = Date.now();
+          if (now < spamCooldownUntil) {
+            const remain = spamCooldownUntil - now;
+            pushLog('warn', 'antispam', `cooldown active — waiting ${Math.ceil(remain / 1000)}s before reconnect`);
+            await new Promise(r => setTimeout(r, remain));
+          }
+
+          // record this 515 for spam detection
+          record515();
+
+          // exponential backoff for consecutive 515s
+          const delay = next515Delay();
+          pushLog('warn', 'bot', `Retry ${delay/1000}s (515 attempt ${consecutive515})`);
+          await new Promise(r => setTimeout(r, delay));
+
+          // enforce minimum gap between reconnects
+          await enforceMinReconnectInterval();
+
+          try { sock.ev.removeAllListeners('connection.update'); } catch (e) {}
+          try { sock.ev.removeAllListeners('creds.update'); } catch (e) {}
+          try { sock.end(undefined); } catch (e) {}
+          sock = null;
+          restart515InFlight = false;
+
+          // 515 does NOT count as a retry — it's a WhatsApp request
+          connectionStatus = 'reconnecting';
+          return connectBot();
+        }
+
         const shouldReconnect = cls ? cls.shouldReconnect : true;
         if (shouldReconnect && reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
-          const baseDelay = code === 515 ? 2000 : 5000;
+          const baseDelay = 5000;
           const delay = cls?.backoffMs || Math.min(baseDelay * reconnectAttempts, 30000);
           connectionStatus = 'reconnecting';
-          pushLog('warn', 'bot', `Retry ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]${code === 515 ? ' (515)' : ''}`);
+          pushLog('warn', 'bot', `Retry ${delay/1000}s [${reconnectAttempts}/${MAX_RECONNECT}]`);
           setTimeout(() => { try { sock.end(undefined); } catch (e) {} sock = null; connectBot(); }, delay);
         } else { connectionStatus = 'disconnected'; pushLog('error', 'bot', 'Max retries'); }
       }
@@ -1348,6 +1449,12 @@ function refreshQR() {
   qrDataUri = null; connectionStatus = 'disconnected'; manualDisconnect = true;
   if (sock) { try { sock.end(undefined); } catch (e) {} sock = null; }
   isConnecting = false; botNumber = null;
+  // reset anti-spam on manual refresh
+  consecutive515 = 0;
+  recent515Timestamps = [];
+  spamCooldownUntil = 0;
+  lastReconnectAt = 0;
+  restart515InFlight = false;
   pushLog('info', 'bot', 'Manual QR refresh');
   setTimeout(() => { manualDisconnect = false; connectBot(); }, 1500);
 }
@@ -1527,7 +1634,7 @@ async function handleMessage(msg) {
 const app = express();
 app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now(), status: connectionStatus, uptime: Math.floor((Date.now()-botStartTime)/1000), sched: scheduler.stats(), focus: focus.stats(), window: timeGate.window(), groupActive: timeGate.isGroupActive(), nsfwActive: timeGate.isNsfwActive(), paused: botPaused, frozen: scheduler.frozen, dmQueue: dmQueue.length }));
+app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now(), status: connectionStatus, uptime: Math.floor((Date.now()-botStartTime)/1000), sched: scheduler.stats(), focus: focus.stats(), window: timeGate.window(), groupActive: timeGate.isGroupActive(), nsfwActive: timeGate.isNsfwActive(), paused: botPaused, frozen: scheduler.frozen, dmQueue: dmQueue.length, consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null }));
 app.get('/api/status', (req, res) => res.json({ status: connectionStatus, botNumber, groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length, pending: pendingRequests.size }));
 app.get('/admin/qr', async (req, res) => { if (!qrDataUri) return res.status(404).json({ error: 'No QR' }); const b64 = qrDataUri.replace(/^data:image\/\w+;base64,/, ''); res.writeHead(200, { 'Content-Type': 'image/png' }); res.end(Buffer.from(b64, 'base64')); });
 app.get('/admin/qr-data', (req, res) => res.json({ qr: qrDataUri, status: connectionStatus, botNumber }));
@@ -1544,7 +1651,7 @@ app.get('/admin/logs', (req, res) => { res.writeHead(200, { 'Content-Type': 'tex
 app.get('/admin/messages-stream', (req, res) => { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' }); for (const m of liveMessages.slice(-100)) res.write(`data: ${JSON.stringify(m)}\n\n`); msgClients.add(res); req.on('close', () => msgClients.delete(res)); });
 app.get('/admin/aitest', async (req, res) => { const r = await testRewindRaw(); res.json(r); });
 app.get('/admin/scraperstatus', async (req, res) => { const r = await scraperStatus(); res.json(r); });
-app.get('/admin/sched', (req, res) => res.json({ scheduler: scheduler.stats(), focus: focus.stats(), window: timeGate.window(), groupActive: timeGate.isGroupActive(), nsfwActive: timeGate.isNsfwActive(), dmQueue: dmQueue.length, groupBatcher: groupBatcher.stats() }));
+app.get('/admin/sched', (req, res) => res.json({ scheduler: scheduler.stats(), focus: focus.stats(), window: timeGate.window(), groupActive: timeGate.isGroupActive(), nsfwActive: timeGate.isNsfwActive(), dmQueue: dmQueue.length, groupBatcher: groupBatcher.stats(), consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null }));
 app.get('/admin/pending', (req, res) => res.json({ pending: [...pendingRequests.values()] }));
 app.post('/admin/pending/:id/resolve', async (req, res) => { const { id } = req.params; const { action, payload } = req.body || {}; const r = await resolvePending(id, action || 'search', payload, ADMIN_JID); res.json(r); });
 app.get('/admin/stats', (req, res) => {
@@ -1563,7 +1670,9 @@ app.get('/admin/stats', (req, res) => {
     groupBatcher: groupBatcher.stats(),
     paused: botPaused, frozen: scheduler.frozen,
     antibanActive: !!wrapSocket, entropyRunning: !!entropyService,
-    fibonacciIndex: fib.idx
+    fibonacciIndex: fib.idx,
+    consecutive515,
+    spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
   });
 });
 
@@ -1571,7 +1680,7 @@ const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff;margin-bottom:4px}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin:3px;font-family:inherit}button:hover{background:#30363d;border-color:#58a6ff}button.primary{background:#238636;border-color:#2ea043;color:#fff}button.danger{background:#da3633;border-color:#f85149;color:#fff}#qrImg{width:100%;max-width:240px;border-radius:8px;margin:8px auto;display:block;background:#fff;padding:8px}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.s-connected{background:#3fb950;box-shadow:0 0 8px #3fb950}.s-qr{background:#d29922}.s-disconnected{background:#f85149}.s-reconnecting{background:#d29922;animation:pulse 1s infinite}.s-error{background:#f85149}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}#logs,#msgs{height:280px;overflow-y:auto;font-size:12px;line-height:1.6;background:#0d1117;border-radius:6px;padding:8px}.log-entry{padding:3px 0;border-bottom:1px solid #21262d}.log-time{color:#484f58;margin-right:8px}.log-info{color:#58a6ff}.log-success{color:#3fb950}.log-warn{color:#d29922}.log-error{color:#f85149}.log-source{color:#8b949e;margin-right:6px}.stat-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #21262d}.stat-row:last-child{border-bottom:none}.stat-val{color:#58a6ff;font-weight:600}.msg-row{padding:6px 8px;margin:4px 0;border-radius:6px;background:#161b22;border-left:3px solid #58a6ff;font-size:12px}.msg-row.group{border-left-color:#a371f7}.msg-row.dm{border-left-color:#3fb950}.msg-meta{color:#8b949e;font-size:11px;margin-bottom:2px}.msg-name{color:#58a6ff;font-weight:600}.msg-text{color:#c9d1d9;word-break:break-word}.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px;font-weight:600}.tag-group{background:#a371f7;color:#fff}.tag-dm{background:#3fb950;color:#000}.full-width{grid-column:1/-1}</style></head><body>
 <h1>🥖 BreadBot v46</h1><div class="sub">Admin: <b id="adminPhone">—</b> · Window: <b id="windowState">—</b> · Group: <b id="groupState">—</b> · NSFW: <b id="nsfwState">—</b></div>
 <div class="grid">
-<div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><div class="stat-row"><span>Paused</span><span class="stat-val" id="pausedState">—</span></div><div class="stat-row"><span>Frozen</span><span class="stat-val" id="frozenState">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="doAction('pause')">⏸️ Pause</button><button onclick="doAction('resume')">▶️ Resume</button><button onclick="doAction('freeze')">❄️ Freeze</button><button onclick="doAction('unfreeze')">🔥 Unfreeze</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:180px;overflow:auto"></pre></div>
+<div class="card"><h2>Connection</h2><div style="margin-bottom:10px"><span class="status-dot" id="statusDot"></span><span id="statusText">Loading...</span></div><div class="stat-row"><span>Bot</span><span class="stat-val" id="botNum">—</span></div><div class="stat-row"><span>Uptime</span><span class="stat-val" id="statUptime">—</span></div><div class="stat-row"><span>Paused</span><span class="stat-val" id="pausedState">—</span></div><div class="stat-row"><span>Frozen</span><span class="stat-val" id="frozenState">—</span></div><div class="stat-row"><span>515 streak</span><span class="stat-val" id="c515">—</span></div><img id="qrImg" src="" style="display:none"><div style="margin-top:10px"><button class="primary" onclick="doAction('connect')">🔗 Start</button><button onclick="doAction('reconnect')">🔄 Reconnect</button><button onclick="doAction('refresh-qr')">♻️ Refresh QR</button><button class="danger" onclick="doAction('disconnect')">⛔ Disconnect</button><button onclick="doAction('clear-session')">🗑️ Clear Session</button><button onclick="doAction('pause')">⏸️ Pause</button><button onclick="doAction('resume')">▶️ Resume</button><button onclick="doAction('freeze')">❄️ Freeze</button><button onclick="doAction('unfreeze')">🔥 Unfreeze</button><button onclick="testAI()">🧪 Test AI</button><button onclick="testScraper()">🔎 Test Scraper</button></div><pre id="testResult" style="margin-top:8px;font-size:11px;color:#8b949e;white-space:pre-wrap;max-height:180px;overflow:auto"></pre></div>
 <div class="card"><h2>🎯 Focus</h2><div class="stat-row"><span>Busy</span><span class="stat-val" id="focusBusy">—</span></div><div class="stat-row"><span>State</span><span class="stat-val" id="focusCurState">—</span></div><div class="stat-row"><span>JID</span><span class="stat-val" id="focusJid">—</span></div></div>
 <div class="card"><h2>⏰ Time</h2><div class="stat-row"><span>Window</span><span class="stat-val" id="windowName">—</span></div><div class="stat-row"><span>Group</span><span class="stat-val" id="groupWindow">—</span></div><div class="stat-row"><span>NSFW</span><span class="stat-val" id="nsfwWindow">—</span></div></div>
 <div class="card"><h2>⚙️ Scheduler</h2><div class="stat-row"><span>Queued</span><span class="stat-val" id="schedQueued">—</span></div><div class="stat-row"><span>Running</span><span class="stat-val" id="schedRunning">—</span></div><div class="stat-row"><span>Current</span><span class="stat-val" id="schedTask">—</span></div><div class="stat-row"><span>DM queue</span><span class="stat-val" id="dmQueue">—</span></div><div class="stat-row"><span>Next</span><span class="stat-val" id="schedGap">—</span></div></div>
@@ -1589,7 +1698,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function setStatus(st){$('statusDot').className='status-dot s-'+st;const l={connected:'Connected',qr:'Waiting for scan',disconnected:'Disconnected',reconnecting:'Reconnecting',error:'Error'};$('statusText').textContent=l[st]||st;}
 async function testAI(){const b=$('testResult');b.textContent='Testing...';const r=await api('aitest');b.textContent=JSON.stringify(r,null,2);}
 async function testScraper(){const b=$('testResult');b.textContent='Testing...';const r=await api('scraperstatus');b.textContent=JSON.stringify(r,null,2);}
-async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('adminPhone').textContent=d.adminPhone||'—';$('windowState').textContent=d.window||'—';$('groupState').textContent=d.groupActive?'ACTIVE':'IDLE';$('nsfwState').textContent=d.nsfwActive?'ALLOWED':'BLOCKED';$('pausedState').textContent=d.paused?'YES':'no';$('frozenState').textContent=d.frozen?'YES':'no';$('windowName').textContent=d.window||'—';$('groupWindow').textContent=d.groupActive?'ACTIVE':'IDLE';$('nsfwWindow').textContent=d.nsfwActive?'ALLOWED':'BLOCKED';
+async function refreshStats(){try{const d=await api('stats');setStatus(d.status);$('statUptime').textContent=fmt(d.uptime);$('botNum').textContent=d.botNumber||'—';$('statGroups').textContent=d.joinedGroups;$('statDMs').textContent=d.dmCount;$('statQueue').textContent=d.queueSize;$('statPending').textContent=d.pendingCount||0;$('adminPhone').textContent=d.adminPhone||'—';$('windowState').textContent=d.window||'—';$('groupState').textContent=d.groupActive?'ACTIVE':'IDLE';$('nsfwState').textContent=d.nsfwActive?'ALLOWED':'BLOCKED';$('pausedState').textContent=d.paused?'YES':'no';$('frozenState').textContent=d.frozen?'YES':'no';$('c515').textContent=(d.consecutive515||0)+(d.spamCooldownUntil?' (paused)':'');$('windowName').textContent=d.window||'—';$('groupWindow').textContent=d.groupActive?'ACTIVE':'IDLE';$('nsfwWindow').textContent=d.nsfwActive?'ALLOWED':'BLOCKED';
 const f=d.focus||{};$('focusBusy').textContent=f.busy?'YES':'no';$('focusCurState').textContent=f.currentState||'idle';$('focusJid').textContent=f.currentJid||'—';
 const sc=d.sched||{};$('schedQueued').textContent=sc.queued||0;$('schedRunning').textContent=sc.running||0;$('schedTask').textContent=sc.currentTask||'idle';$('dmQueue').textContent=(d.dmQueueLength||0)+'/'+(d.dmQueueMax||50);$('schedGap').textContent=Math.round((sc.nextGapMs||0)/1000)+'s';
 const gb=d.groupBatcher||{};$('gbGroups').textContent=gb.groupsWithPending||0;$('gbTotal').textContent=gb.totalPending||0;

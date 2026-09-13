@@ -1,11 +1,11 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v56 — Panel HTML syntax fixed
- *  - PANEL_HTML is a single template literal (no nested backticks)
- *  - Browser JS uses single quotes; HTML uses double quotes
- *  - Rewind endpoint corrected to api.rewind.ai
- *  - All v54 features intact
+ *  BreadBot v57 — app hoisting fixed
+ *  - const app = express() declared BEFORE any app.get()
+ *  - PANEL_HTML: single template literal, no nested backticks
+ *  - Rewind endpoint: api.rewind.ai (correct)
+ *  - All v54/v55/v56 features intact
  * ============================================================ */
 
 const express = require('express');
@@ -80,7 +80,7 @@ let botOfflineUntil = 0;
 let nsfwRoleplayEnabled = true;
 
 /* ══════════════════════════════════════════════════════════════
- *  getDisconnectStatusCode (hoisted)
+ *  getDisconnectStatusCode
  * ══════════════════════════════════════════════════════════════ */
 function getDisconnectStatusCode(lastDisconnect) {
   if (!lastDisconnect) return undefined;
@@ -1137,7 +1137,7 @@ async function resolvePending(id, action, payload, adminChatJid){
   if (!p) return { ok:false, error:`No pending ${id}` };
   try {
     if (action === 'skip'){
-      await sendBuffer(p.userJid, { text: 'sorry, couldn\'t find that' }, 2, 'slow');
+      await sendBuffer(p.userJid, { text: 'sorry, could not find that' }, 2, 'slow');
       pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
       adminReply(adminChatJid, `Replied casually to ${p.userName}.`);
       return { ok:true };
@@ -1202,9 +1202,24 @@ async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  AD BUILDER
+ * ══════════════════════════════════════════════════════════════ */
+class AdBuilder {
+  static build({ title, body, cta, link, footer, style='fancy' }){
+    if (style === 'bold') return ['*'+title+'*', '', body, cta?'\n*'+cta+'*':'', link?'\n'+link:'', footer?'\n_'+footer+'_':''].filter(Boolean).join('\n');
+    if (style === 'minimal') return [title, body, cta, link].filter(Boolean).join('\n\n');
+    return ['---', title.toUpperCase(), '---', '', body, '', cta?'*'+cta+'*':'', link||'', footer?'\n_'+footer+'_':''].filter(Boolean).join('\n');
+  }
+}
+
+/* Preview cache — declared BEFORE handleAdminCommand runs at runtime */
+let previewCache = { imageUrls:[], imageIndex:0, gifUrls:[], gifIndex:0, currentType:null, currentUrl:null };
+const replyCache = new NodeCache({ stdTTL:600 });
+
+/* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v56 - Admin Commands
+const COMMAND_LIST = `BreadBot v57 - Admin Commands
 
 BASICS
 !help / !ping / !status / !jobs
@@ -1619,17 +1634,6 @@ async function handleAdminCommand(text, chatJid, msg){
     default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
   }
 }
-
-class AdBuilder {
-  static build({ title, body, cta, link, footer, style='fancy' }){
-    if (style === 'bold') return ['*'+title+'*', '', body, cta?'\n*'+cta+'*':'', link?'\n'+link:'', footer?'\n_'+footer+'_':''].filter(Boolean).join('\n');
-    if (style === 'minimal') return [title, body, cta, link].filter(Boolean).join('\n\n');
-    return ['---', title.toUpperCase(), '---', '', body, '', cta?'*'+cta+'*':'', link||'', footer?'\n_'+footer+'_':''].filter(Boolean).join('\n');
-  }
-}
-
-let previewCache = { imageUrls:[], imageIndex:0, gifUrls:[], gifIndex:0, currentType:null, currentUrl:null };
-const replyCache = new NodeCache({ stdTTL:600 });
 
 /* ══════════════════════════════════════════════════════════════
  *  FLOOD
@@ -2146,14 +2150,20 @@ function refreshQR(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  EXPRESS PANEL — single template literal, no nested backticks
+ *  EXPRESS APP — declared BEFORE any routes touch it
+ * ══════════════════════════════════════════════════════════════ */
+const app = express();
+app.use(express.json());
+
+/* ══════════════════════════════════════════════════════════════
+ *  PANEL HTML — single template literal
  * ══════════════════════════════════════════════════════════════ */
 const PANEL_HTML = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BreadBot v56</title>
+<title>BreadBot v57</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
@@ -2182,7 +2192,7 @@ button.danger { background: #da3633; color: #fff; }
 </style>
 </head>
 <body>
-<h1>BreadBot v56</h1>
+<h1>BreadBot v57</h1>
 <div class="sub">Admin: <b id="ap">-</b> | LIDs: <b id="al">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b></div>
 <div class="grid">
 <div class="card">
@@ -2372,14 +2382,11 @@ setInterval(refresh, 5000);
 </body>
 </html>`;
 
+/* ══════════════════════════════════════════════════════════════
+ *  ROUTES — now app is already declared
+ * ══════════════════════════════════════════════════════════════ */
 app.get('/', function(req, res){ res.send(PANEL_HTML); });
 app.get('/admin', function(req, res){ res.send(PANEL_HTML); });
-
-/* ══════════════════════════════════════════════════════════════
- *  EXPRESS ROUTES
- * ══════════════════════════════════════════════════════════════ */
-const app = express();
-app.use(express.json());
 
 app.get('/health', function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,

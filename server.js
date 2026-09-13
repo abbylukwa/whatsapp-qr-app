@@ -1,17 +1,17 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v50 — Full & Fixed
- *  - 34 MB enforced on EVERY media (scraper images/GIFs included)
- *  - Fast lane (admin) + Slow lane (everyone else)
- *  - Serial per lane, one task at a time
- *  - Fixes ReferenceError: getDisconnectStatusCode
- *  - DM queue max 1000
- *  - Anti-spam 515 reconnect preserved
- *  - Music search + download
- *  - NSFW role-play & NSFW video API hooks
- *  - !offline / !online / !limit / !pause admin controls
- *  - Main-group-only welcome & goodbye
+ *  BreadBot v53 — Full & Fixed
+ *  - Admin identity + credentials shown in LIVE MESSAGES on boot
+ *  - Admin detection fires a live-log entry the first time
+ *  - AI uses REWIND_KEY from env (no other API)
+ *  - FIXED: circuitBreaker config (admin replies)
+ *  - FIXED: entropy crash guard
+ *  - FIXED: conversation memory (last 5)
+ *  - FIXED: join queue spam (midnight-only, per-code cooldown)
+ *  - FIXED: anti-link warn spam
+ *  - 34 MB enforced on EVERY file
+ *  - Main group hardcoded (join link)
  * ============================================================ */
 
 const express = require('express');
@@ -32,6 +32,9 @@ try {
   SessionHealthMonitor      = ab.SessionHealthMonitor || null;
 } catch (e) {}
 
+let RedgifsDownloader = null;
+try { RedgifsDownloader = require('redgifs-downloader'); } catch(e){}
+
 const QRCode = require('qrcode');
 const pino   = require('pino');
 const axios  = require('axios');
@@ -49,7 +52,11 @@ const HARDCODED_ADMIN_LIDS   = ['115110005706891'];
 const MAIN_GROUP_FILE        = path.join(__dirname,'main_group_jid.json');
 const ADMIN_GROUP_LINK       = 'https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7?s=sw&p=a&mlu=4&ilr=4';
 
-const JOIN_INTERVAL_MS   = parseInt(process.env.JOIN_INTERVAL_MS || '480000', 10);
+/* Hardcoded main group (your group) */
+const HARDCODED_MAIN_GROUP_JID = '120363252134990834@g.us';
+
+const JOIN_INTERVAL_MS   = parseInt(process.env.JOIN_INTERVAL_MS || '900000', 10);
+const JOIN_HOUR          = 0;   // midnight
 const JOIN_QUEUE_FILE    = path.join(__dirname,'join_queue.json');
 const JOINED_GROUPS_FILE = path.join(__dirname,'joined_groups.json');
 const PENDING_FILE       = path.join(__dirname,'pending_requests.json');
@@ -60,28 +67,27 @@ if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR,{recursive:true});
 
 const GREETING_MIN_HOURS = 4, GREETING_MAX_HOURS = 8;
 const DAILY_REPORT_HOUR  = parseInt(process.env.DAILY_REPORT_HOUR || '22', 10);
-const USER_HISTORY_SIZE  = 4;
+const USER_HISTORY_SIZE  = 5;
 const PENDING_EXPIRY_MS  = 3600000;
 const DM_QUEUE_MAX       = 1000;
 const FOCUS_LOCK_TIMEOUT_MS = 30000;
 const TZ_OFFSET_HOURS    = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);
-const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;   // 34 MB — enforced everywhere
+const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;
 
-/* Flood — mutable so !limit can change */
 let MESSAGE_FLOOD_THRESHOLD = 20;
 let FLOOD_IGNORE_MS         = 5000;
 
-/* Time windows */
-const NSFW_START         = 21;
-const NSFW_END           = 8;
-const DM_AI_START_HOUR   = 21;
-const DM_AI_END_HOUR     = 8;
-const AMBIENT_CHANCE     = 0.02;
+const NSFW_START = 21, NSFW_END = 8;
+const DM_AI_START_HOUR = 21, DM_AI_END_HOUR = 8;
+const AMBIENT_CHANCE = 0.02;
 
-/* AI */
-const AI_KEY      = process.env.OPENAI_API_KEY || process.env.REWIND_KEY || process.env.AI_API_KEY || '';
-const AI_ENDPOINT = process.env.AI_ENDPOINT || 'https://api.openai.com/v1/chat/completions';
-const AI_MODEL    = process.env.AI_MODEL    || 'gpt-4o-mini';
+/* ══════════════════════════════════════════════════════════════
+ *  AI  — uses REWIND_KEY from your env
+ *  No other API. Falls through env vars in priority order.
+ * ══════════════════════════════════════════════════════════════ */
+const AI_KEY      = process.env.REWIND_KEY || process.env.OPENAI_API_KEY || process.env.AI_API_KEY || '';
+const AI_ENDPOINT = process.env.REWIND_ENDPOINT || process.env.AI_ENDPOINT || 'https://api.openai.com/v1/chat/completions';
+const AI_MODEL    = process.env.REWIND_MODEL    || process.env.AI_MODEL    || 'gpt-4o-mini';
 
 /* Scraper */
 const SCRAPER_URL       = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
@@ -96,18 +102,15 @@ const SLOW_LANE_GAP_MAX_MS = 15000;
 const FAST_LANE_MAX = 5000;
 const SLOW_LANE_MAX = 5000;
 
-/* Download */
 const DOWNLOAD_PICK_TTL  = 10 * 60 * 1000;
 const DOWNLOAD_MAX_PICKS = 8;
 
-/* Runtime flags */
 let botPaused = false;
 let botOfflineUntil = 0;
 let nsfwRoleplayEnabled = true;
 
 /* ══════════════════════════════════════════════════════════════
- *  FIX — getDisconnectStatusCode (function declaration, hoisted)
- *  This must exist BEFORE connectBot is called.
+ *  getDisconnectStatusCode (hoisted — fixes ReferenceError)
  * ══════════════════════════════════════════════════════════════ */
 function getDisconnectStatusCode(lastDisconnect) {
   if (!lastDisconnect) return undefined;
@@ -119,10 +122,10 @@ function getDisconnectStatusCode(lastDisconnect) {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  LOGGER
+ *  LOGGER + LIVE MESSAGES
  * ══════════════════════════════════════════════════════════════ */
 const LOG_BUFFER_MAX = 500, logBuffer=[], logClients=new Set();
-const LIVE_MSG_MAX   = 200, liveMessages=[], msgClients=new Set();
+const LIVE_MSG_MAX   = 300, liveMessages=[], msgClients=new Set();
 
 function pushLog(level, source, message, meta={}){
   const entry = { id:Date.now()+Math.random(), ts:new Date().toISOString(),
@@ -160,17 +163,14 @@ let connectionStatus='disconnected', botStartTime=Date.now(), botNumber=null, bo
 let isConnecting=false, manualDisconnect=false;
 let reconnectAttempts=0; const MAX_RECONNECT=10;
 
-/* Anti-spam 515 */
 let restart515InFlight=false, lastReconnectAt=0;
 let consecutive515=0, recent515Timestamps=[], spamCooldownUntil=0;
 const RESTART_515_BASE_DELAY_MS=1500, RESTART_515_MAX_DELAY_MS=30000;
 const MIN_RECONNECT_INTERVAL_MS=10000, SPAM_WINDOW_MS=60000;
 const SPAM_THRESHOLD=3, SPAM_COOLDOWN_MS=60000;
 
-/* Main group */
-let mainGroupJid=null;
+let mainGroupJid = HARDCODED_MAIN_GROUP_JID;
 
-/* Sets & maps */
 const botSentIds       = new Set();
 const processedMessages= new Set();
 const activeChats      = new Set();
@@ -183,11 +183,12 @@ const learningData     = new Map();
 const adminLids        = new Set(HARDCODED_ADMIN_LIDS);
 const recentAdminCmds  = new Map();
 const downloadPicks    = new Map();
+const recentJoinAttempts = new Map();
+const antilinkWarnCooldown = new Map();
 
 let joinQueue=[], joinInProgress=false, lastJoinAt=0;
 let dmQueue=[], dmQueueProcessing=false;
 
-/* Daily stats */
 let dailyStats=null, lastDailyReportDate=null;
 function resetDailyStats(){
   const today = new Date().toISOString().slice(0,10);
@@ -202,8 +203,7 @@ function resetDailyStats(){
 resetDailyStats();
 
 /* ══════════════════════════════════════════════════════════════
- *  DUAL QUEUE  — fast lane (admin) + slow lane (everyone else)
- *  One task at a time PER lane
+ *  DUAL QUEUE
  * ══════════════════════════════════════════════════════════════ */
 class DualQueue {
   constructor(){
@@ -213,20 +213,13 @@ class DualQueue {
     this.slowRun=0; this.slowFail=0; this.slowDrop=0;
   }
   pushFast(job){
-    if (this.fast.length >= FAST_LANE_MAX){
-      this.fast.shift(); this.fastDrop++;
-      pushLog('warn','jobs',`Fast lane full — dropped oldest`);
-    }
-    job.ts = Date.now();
-    this.fast.push(job);
-    this._pumpFast();
+    if (this.fast.length >= FAST_LANE_MAX){ this.fast.shift(); this.fastDrop++; }
+    job.ts = Date.now(); this.fast.push(job); this._pumpFast();
   }
   pushSlow(job){
     if (this.slow.length >= SLOW_LANE_MAX){
-      // drop oldest low priority (high number = low priority)
       this.slow.sort((a,b)=>b.priority-a.priority || a.ts-b.ts);
       this.slow.pop(); this.slowDrop++;
-      pushLog('warn','jobs',`Slow lane full — dropped oldest low-prio`);
     }
     job.ts = Date.now();
     this.slow.push(job);
@@ -250,7 +243,6 @@ class DualQueue {
     this.slowRunning = true;
     while (this.slow.length){
       const job = this.slow.shift();
-      // unpredictability — occasionally inject a distraction
       if (this.slow.length > 1 && Math.random() < 0.05){
         const idx = this.slow.findIndex(j => j.priority >= 2);
         if (idx >= 0){
@@ -281,7 +273,7 @@ class DualQueue {
 const jobs = new DualQueue();
 
 /* ══════════════════════════════════════════════════════════════
- *  FOCUS PIPELINE (DM pacing)
+ *  FOCUS PIPELINE
  * ══════════════════════════════════════════════════════════════ */
 class FocusPipeline {
   constructor(){ this.busy=false; this.currentJid=null; this.currentState='idle'; }
@@ -306,7 +298,7 @@ class FocusPipeline {
 const focus = new FocusPipeline();
 
 /* ══════════════════════════════════════════════════════════════
- *  HELPERS — extraction, IDs, filters
+ *  HELPERS
  * ══════════════════════════════════════════════════════════════ */
 function markBotSent(id){
   if (!id) return;
@@ -333,27 +325,73 @@ function extractLidFromMsg(msg, senderJid){
   for (const x of c) if (typeof x==='string' && x.includes('@lid')) return x.split('@')[0];
   return null;
 }
+
+/* ══════════════════════════════════════════════════════════════
+ *  ADMIN DETECTION  — fires a Live Log entry the first time
+ * ══════════════════════════════════════════════════════════════ */
+function announceAdminToLive(reason, extraLid){
+  const lidList = [...adminLids];
+  pushLiveMessage({
+    id: 'admin-' + Date.now(),
+    ts: new Date().toISOString(),
+    chatJid: ADMIN_JID,
+    chatType: 'system',
+    senderJid: ADMIN_JID,
+    senderName: 'ADMIN',
+    phone: ADMIN_PHONE,
+    lid: extraLid ? `${extraLid}${lidList.length>1?' (+'+(lidList.length-1)+' more)':''}` : (lidList.join(', ')||'—'),
+    text: `👑 Admin ${reason}\n📱 ${ADMIN_PHONE}\n🆔 ${lidList.join(', ')||'none'}`,
+    mediaType: 'system',
+    isAdmin: true
+  });
+  pushLog('success','admin',`Live-log: ${reason} — LIDs [${lidList.join(', ')||'none'}]`);
+}
+
 function isAdminSender(msg, senderJid){
-  const c = extractAllPhoneCandidates(msg, senderJid);
-  if (c.includes(ADMIN_PHONE)){
-    const l = extractLidFromMsg(msg, senderJid);
-    if (l && !adminLids.has(l)){ adminLids.add(l); saveAdminLids(); }
+  const candidates = extractAllPhoneCandidates(msg, senderJid);
+  const lid = extractLidFromMsg(msg, senderJid);
+
+  // 1. Phone match in any candidate
+  if (candidates.includes(ADMIN_PHONE)){
+    if (lid && !adminLids.has(lid)){
+      adminLids.add(lid);
+      saveAdminLids();
+      pushLog('success','admin',`Saved new admin LID: ${lid}`);
+      announceAdminToLive('identified (first time)', lid);
+      if (sock){
+        setTimeout(()=>{
+          sock.sendMessage(ADMIN_JID, {
+            text: `👑 *Admin identified*\n📱 Phone: ${ADMIN_PHONE}\n🆔 New LID saved: ${lid}\n💾 ${adminLids.size} LID(s) total\n\nFull admin commands enabled.`
+          }).then(sent => { if (sent?.key?.id) markBotSent(sent.key.id); })
+            .catch(()=>{});
+        }, 800);
+      }
+    }
     return true;
   }
-  for (const x of c) if (adminLids.has(x)) return true;
-  const l = extractLidFromMsg(msg, senderJid);
-  if (l && adminLids.has(l)) return true;
-  if (typeof senderJid==='string'){
-    const b = senderJid.split('@')[0].split(':')[0];
-    if (adminLids.has(b) || b===ADMIN_PHONE) return true;
+
+  // 2. LID match
+  if (lid && adminLids.has(lid)) return true;
+
+  // 3. Direct JID match
+  if (typeof senderJid === 'string'){
+    const base = senderJid.split('@')[0].split(':')[0];
+    if (base === ADMIN_PHONE) return true;
+    if (adminLids.has(base)) return true;
   }
+
+  // 4. Any candidate matches any saved LID
+  for (const c of candidates) if (adminLids.has(c)) return true;
+
   return false;
 }
+
 function extractPhone(msg, senderJid){
   const c = extractAllPhoneCandidates(msg, senderJid); return c[0] || null;
 }
 function extractLid(msg, senderJid){ return extractLidFromMsg(msg, senderJid); }
 
+/* Filters */
 const FORBIDDEN = [
   /\bas an ai\b/i, /\bi am an ai\b/i, /\blanguage model\b/i, /\bas an assistant\b/i,
   /\bi cannot\b/i, /how can i help you today/i, /is there anything else/i,
@@ -384,7 +422,7 @@ function detectLanguage(t){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI
+ *  AI (Rewind or any OpenAI-compatible endpoint)
  * ══════════════════════════════════════════════════════════════ */
 async function askAI(prompt, system){
   if (!AI_KEY) return null;
@@ -395,7 +433,7 @@ async function askAI(prompt, system){
         { role:'system', content: system },
         { role:'user',   content: prompt }
       ],
-      max_tokens: 250, temperature: 0.9
+      max_tokens: 250, temperature: 0.95
     }, {
       headers:{ 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type': 'application/json' },
       timeout: 25000
@@ -411,7 +449,7 @@ async function askAI(prompt, system){
   }
 }
 async function testAIRaw(){
-  if (!AI_KEY) return { ok:false, error:'AI_KEY missing' };
+  if (!AI_KEY) return { ok:false, error:'REWIND_KEY missing' };
   const t0 = Date.now();
   try {
     const r = await axios.post(AI_ENDPOINT, {
@@ -430,8 +468,7 @@ async function testAIRaw(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  34 MB ENFORCEMENT — download → check → send
- *  This is the ONLY way images/GIFs are sent so 34 MB is guaranteed.
+ *  34 MB ENFORCEMENT
  * ══════════════════════════════════════════════════════════════ */
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
   const resp = await axios.get(url, {
@@ -450,8 +487,6 @@ async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'i
   const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
   return { buffer: buf, mimetype, sizeBytes: buf.length };
 }
-
-/* Send image via buffer (34 MB enforced) */
 async function sendImageSafe(jid, url, caption='', priority=2, lane='slow'){
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
@@ -459,16 +494,13 @@ async function sendImageSafe(jid, url, caption='', priority=2, lane='slow'){
     return true;
   } catch(e){
     pushLog('warn','media',`image skip: ${e.message}`);
-    // fallback: try sending as text URL
     try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane); } catch(_){}
     return false;
   }
 }
-
-/* Send GIF via buffer (34 MB enforced) */
 async function sendGifSafe(jid, url, caption='', priority=2, lane='slow'){
   try {
-    const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'gif');
+    const { buffer } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'gif');
     await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane);
     return true;
   } catch(e){
@@ -482,7 +514,6 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow'){
  *  LANE-AWARE SEND
  * ══════════════════════════════════════════════════════════════ */
 function sendBuffer(jid, content, priority=2, lane='auto'){
-  // lane 'auto' → admin = fast, everyone else = slow
   const actualLane = lane === 'auto' ? (priority === 0 ? 'fast' : 'slow') : lane;
   return new Promise((resolve, reject)=>{
     const job = {
@@ -503,15 +534,12 @@ function sendBuffer(jid, content, priority=2, lane='auto'){
     else jobs.pushSlow(job);
   });
 }
-
-/* Convenience: admin reply (fast lane, always fires) */
 function adminReply(jid, text, quoted){
-  return sendBuffer(jid, { text }, 0, 'fast')
-    .catch(e => pushLog('warn','adminreply',e.message));
+  return sendBuffer(jid, { text }, 0, 'fast').catch(e => pushLog('warn','adminreply',e.message));
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SCRAPER  (SFW + NSFW, size-checked)
+ *  SCRAPER
  * ══════════════════════════════════════════════════════════════ */
 async function scraperSearch(query, nsfw=false){
   const site = nsfw ? SCRAPER_NSFW_SITE : SCRAPER_SFW_SITE;
@@ -542,7 +570,7 @@ async function scraperStatus(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  YOUTUBE + Y2MATE  (34 MB enforced)
+ *  YOUTUBE + Y2MATE
  * ══════════════════════════════════════════════════════════════ */
 const YT_HEADERS = {
   'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -583,7 +611,6 @@ async function ytSearch(query, max=6){
     return [];
   }
 }
-
 async function y2mateResolve(videoId, prefer='360p'){
   const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const analyze = await axios.post(
@@ -614,7 +641,6 @@ async function y2mateResolve(videoId, prefer='360p'){
   }
   throw new Error(`y2mate: no download (${lastErr?.message||'unknown'})`);
 }
-
 async function y2mateDownload(videoId, prefer='360p'){
   const { url, quality } = await y2mateResolve(videoId, prefer);
   const id = Date.now()+'_'+Math.random().toString(36).slice(2,8);
@@ -633,7 +659,6 @@ async function y2mateDownload(videoId, prefer='360p'){
   }
   return { filePath:fp, quality, sizeBytes:st.size };
 }
-
 async function y2mateDownloadMusic(videoId, format='mp3'){
   const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const analyze = await axios.post(
@@ -674,8 +699,6 @@ async function y2mateDownloadMusic(videoId, format='mp3'){
   }
   return { filePath:fp, format, sizeBytes:st.size };
 }
-
-/* Send a video/audio file from disk — 34 MB enforced */
 async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow'){
   try {
     const buf = fs.readFileSync(filePath);
@@ -698,12 +721,50 @@ async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow')
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  NSFW VIDEO (redgifs)
+ * ══════════════════════════════════════════════════════════════ */
+async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow'){
+  if (!RedgifsDownloader){
+    await sendBuffer(chatJid, { text: '🔞 NSFW downloader not installed. Run: npm i redgifs-downloader' }, priority, lane);
+    return false;
+  }
+  try {
+    const links = await RedgifsDownloader.getSearchLinks(query, { numberToDownload: 3 });
+    if (!links || !links.length){
+      await sendBuffer(chatJid, { text: `🔞 No NSFW results for "${query}"` }, priority, lane);
+      return false;
+    }
+    const picked = links.slice(0, 2);
+    for (const link of picked){
+      try {
+        const resp = await axios.get(link.url || link, {
+          responseType: 'arraybuffer',
+          timeout: 90000,
+          maxContentLength: MEDIA_MAX_BYTES + 1,
+          maxBodyLength: MEDIA_MAX_BYTES + 1,
+          headers: { 'User-Agent': YT_HEADERS['User-Agent'] }
+        });
+        const buf = Buffer.from(resp.data);
+        if (buf.length > MEDIA_MAX_BYTES) continue;
+        await sendBuffer(chatJid, { video: buf, mimetype: 'video/mp4', caption: `🔞 ${query}` }, priority, lane);
+        resetDailyStats(); dailyStats.nsfwSent++;
+        return true;
+      } catch(e){ pushLog('warn','nsfw',e.message); }
+    }
+    return false;
+  } catch(e){
+    pushLog('error','nsfw',e.message);
+    await sendBuffer(chatJid, { text: `🔞 Search failed: ${e.message}` }, priority, lane);
+    return false;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  NSFW ROLE-PLAY
  * ══════════════════════════════════════════════════════════════ */
 async function nsfwRoleplay(userName, text){
-  const sys = `You are Abby Faith Sithole, a real Zimbabwean girl, 23. The user wants NSFW roleplay. Be flirty and seductive, 1-2 sentences. Use casual Shona/English. If you feel uncomfortable, stay silent. Never mention AI.`;
-  const prompt = `User ${userName} says: "${text}". Reply as Abby.`;
-  const aiReply = await askAI(prompt, sys);
+  const sys = `You are Abby Faith Sithole, a real Zimbabwean girl, 23. NSFW roleplay. Flirty, seductive, 1-2 sentences. Casual Shona/English. If uncomfortable, stay silent. Never mention AI.`;
+  const aiReply = await askAI(`User ${userName} says: "${text}". Reply as Abby.`, sys);
   if (aiReply && !containsForbidden(aiReply)) return informalize(aiReply);
   return null;
 }
@@ -741,7 +802,6 @@ function detectMediaIntent(text){
   }
   return null;
 }
-
 function detectDownloadIntent(text){
   if (!text) return null;
   const low = text.toLowerCase();
@@ -754,19 +814,16 @@ function detectDownloadIntent(text){
   }
   return null;
 }
-
 function detectNsfw(text){
   if (!text) return false;
   const low = text.toLowerCase();
   return /\b(nsfw|porn|porno|sex|sexy|nude|nudes|xxx|adult|18\+|booty|ass|titties|boobs)\b/.test(low);
 }
-
 function detectGroupLinkRequest(text){
   if (!text) return false;
   return /group\s*link|grouplink|join\s*link|link\s*(ye|re)\s*group|link rekujoina/i.test(text);
 }
 
-/* Direct address */
 const BOT_NAMES = ['bread','breadbot','abby','abby faith','sithole'];
 function isReplyToBot(msg){
   const c = msg.message?.extendedTextMessage?.contextInfo
@@ -801,18 +858,15 @@ function saveAdminLids(){
 }
 let groupSettings = new Map();
 function loadGroupSettings(){
-  try {
-    if (fs.existsSync(GROUP_SETTINGS_FILE))
-      groupSettings = new Map(Object.entries(JSON.parse(fs.readFileSync(GROUP_SETTINGS_FILE,'utf8'))));
-  } catch(e){}
+  try { if (fs.existsSync(GROUP_SETTINGS_FILE))
+    groupSettings = new Map(Object.entries(JSON.parse(fs.readFileSync(GROUP_SETTINGS_FILE,'utf8')))); } catch(e){}
 }
 let groupSettingsDirty=false;
 function saveGroupSettingsDebounced(){
   if (groupSettingsDirty) return;
   groupSettingsDirty = true;
   setTimeout(()=>{
-    try { fs.writeFileSync(GROUP_SETTINGS_FILE,
-      JSON.stringify(Object.fromEntries(groupSettings),null,2)); } catch(e){}
+    try { fs.writeFileSync(GROUP_SETTINGS_FILE, JSON.stringify(Object.fromEntries(groupSettings),null,2)); } catch(e){}
     groupSettingsDirty = false;
   }, 5000);
 }
@@ -824,23 +878,18 @@ function getGroupSetting(jid){
   }
   return groupSettings.get(jid);
 }
-
 let learningDirty=false;
 function saveLearningDebounced(){
   if (learningDirty) return;
   learningDirty = true;
   setTimeout(()=>{
-    try { fs.writeFileSync(LEARNING_DATA_FILE,
-      JSON.stringify(Object.fromEntries(learningData),null,2)); } catch(e){}
+    try { fs.writeFileSync(LEARNING_DATA_FILE, JSON.stringify(Object.fromEntries(learningData),null,2)); } catch(e){}
     learningDirty = false;
   }, 10000);
 }
 function loadLearningData(){
-  try {
-    if (fs.existsSync(LEARNING_DATA_FILE))
-      learningData.clear(),
-      Object.entries(JSON.parse(fs.readFileSync(LEARNING_DATA_FILE,'utf8'))).forEach(([k,v])=>learningData.set(k,v));
-  } catch(e){}
+  try { if (fs.existsSync(LEARNING_DATA_FILE))
+    Object.entries(JSON.parse(fs.readFileSync(LEARNING_DATA_FILE,'utf8'))).forEach(([k,v])=>learningData.set(k,v)); } catch(e){}
 }
 function recordGroupMessage(jid, text){
   if (!text) return;
@@ -860,7 +909,6 @@ function analyzeGroup(jid){
   const top = Object.entries(d.wordCounts).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([w])=>w);
   return { topWords: top };
 }
-
 function saveQueue(){ try { fs.writeFileSync(JOIN_QUEUE_FILE, JSON.stringify(joinQueue,null,2)); } catch(e){} }
 function saveGroups(){
   try {
@@ -873,8 +921,7 @@ function savePending(){
   try { fs.writeFileSync(PENDING_FILE, JSON.stringify([...pendingRequests.values()],null,2)); } catch(e){}
 }
 function loadState(){
-  try { if (fs.existsSync(JOIN_QUEUE_FILE)) joinQueue = JSON.parse(fs.readFileSync(JOIN_QUEUE_FILE,'utf8')) || []; }
-  catch(e){ joinQueue = []; }
+  try { if (fs.existsSync(JOIN_QUEUE_FILE)) joinQueue = JSON.parse(fs.readFileSync(JOIN_QUEUE_FILE,'utf8')) || []; } catch(e){ joinQueue=[]; }
   try {
     if (fs.existsSync(JOINED_GROUPS_FILE)){
       const a = JSON.parse(fs.readFileSync(JOINED_GROUPS_FILE,'utf8')) || [];
@@ -896,7 +943,8 @@ function loadState(){
     for (const l of a) adminLids.add(l);
   } } catch(e){}
   try { if (fs.existsSync(MAIN_GROUP_FILE)){
-    mainGroupJid = fs.readFileSync(MAIN_GROUP_FILE,'utf8').trim() || null;
+    const saved = fs.readFileSync(MAIN_GROUP_FILE,'utf8').trim();
+    if (saved) mainGroupJid = saved;
   } } catch(e){}
   pushLog('info','state',`queue=${joinQueue.length} groups=${joinedGroups.size} pending=${pendingRequests.size} adminLids=${adminLids.size} main=${mainGroupJid||'—'}`);
 }
@@ -907,7 +955,7 @@ function setMainGroup(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  WELCOME / GOODBYE (main group only, AI-generated)
+ *  WELCOME / GOODBYE (main group only)
  * ══════════════════════════════════════════════════════════════ */
 async function generateWelcome(userName){
   const ai = await askAI(
@@ -946,21 +994,34 @@ async function handleParticipants(update){
   }
 }
 
-/* Anti-link */
+/* ══════════════════════════════════════════════════════════════
+ *  ANTI-LINK
+ * ══════════════════════════════════════════════════════════════ */
 async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
   const s = getGroupSetting(jid);
   if (!s.antilink || isAdmin) return false;
   const matches = text.match(/(https?:\/\/[^\s]+)/gi);
   if (!matches || !matches.length) return false;
   try { await sock.sendMessage(jid, { delete: msg.key }); } catch(e){}
-  pushLog('info','antilink',`Deleted from ${senderJid}`);
-  try {
-    await sendBuffer(jid, { text: `⚠️ Links not allowed, @${senderJid.split('@')[0]}`, mentions:[senderJid] }, 0, 'fast');
-  } catch(e){}
+  pushLog('info','antilink',`Deleted link from ${senderJid.split('@')[0]}`);
+  const key = `${jid}:${senderJid}`;
+  const now = Date.now();
+  const last = antilinkWarnCooldown.get(key) || 0;
+  if (now - last > 5 * 60 * 1000){
+    antilinkWarnCooldown.set(key, now);
+    try {
+      await sendBuffer(jid, {
+        text: `⚠️ Links not allowed here, @${senderJid.split('@')[0]}`,
+        mentions: [senderJid]
+      }, 3, 'slow');
+    } catch(e){}
+  }
   return true;
 }
 
-/* Invite-link auto-join */
+/* ══════════════════════════════════════════════════════════════
+ *  JOIN QUEUE (midnight only)
+ * ══════════════════════════════════════════════════════════════ */
 function extractInviteCodes(text){
   if (!text) return [];
   const s=new Set();
@@ -969,34 +1030,53 @@ function extractInviteCodes(text){
   return [...s];
 }
 function queueJoin(code, addedBy='unknown', source='dm'){
-  if (!code || joinQueue.some(q=>q.code===code)) return false;
-  joinQueue.push({ code, addedAt:Date.now(), addedBy, source });
-  saveQueue(); pushLog('info','join',`Queued ${code}`); return true;
-}
-async function processJoinQueue(){
-  if (joinInProgress || !sock || connectionStatus!=='connected' || !joinQueue.length) return;
-  if (Date.now()-lastJoinAt < JOIN_INTERVAL_MS) return;
-  joinInProgress = true;
-  const item = joinQueue.shift(); saveQueue(); resetDailyStats();
-  try {
-    pushLog('info','join',`Joining ${item.code}...`);
-    const res = await sock.groupAcceptInvite(item.code);
-    lastJoinAt = Date.now();
-    if (res){
-      joinedGroups.set(res, { name:null, joinedAt:Date.now(), discovered:false });
-      lastGreetingAt.set(res, Date.now()); saveGroups();
-      dailyStats.joined++;
-      pushLog('success','join',`✅ Joined ${res}`);
-    }
-  } catch(e){
-    dailyStats.failed++;
-    pushLog('error','join',`Failed: ${e.message}`);
-  } finally {
-    joinInProgress = false;
-    setTimeout(processJoinQueue, JOIN_INTERVAL_MS);
+  if (!code) return false;
+  if (joinQueue.some(q => q.code === code)) return false;
+  const last = recentJoinAttempts.get(code);
+  if (last && Date.now() - last < 15 * 60 * 1000){
+    pushLog('info','join',`Skipping ${code} — attempted recently`);
+    return false;
   }
+  joinQueue.push({ code, addedAt:Date.now(), addedBy, source });
+  saveQueue();
+  pushLog('info','join',`Queued ${code}`);
+  return true;
 }
+function scheduleMidnightJoin(){
+  setInterval(async ()=>{
+    if (localHour() !== JOIN_HOUR) return;
+    if (joinInProgress || !sock || connectionStatus!=='connected' || !joinQueue.length) return;
+    if (Date.now() - lastJoinAt < JOIN_INTERVAL_MS) return;
 
+    joinInProgress = true;
+    const item = joinQueue.shift();
+    saveQueue();
+    resetDailyStats();
+    lastJoinAt = Date.now();
+    recentJoinAttempts.set(item.code, Date.now());
+
+    try {
+      pushLog('info','join',`Joining ${item.code}...`);
+      const res = await sock.groupAcceptInvite(item.code);
+      if (res){
+        joinedGroups.set(res, { name:null, joinedAt:Date.now(), discovered:false });
+        lastGreetingAt.set(res, Date.now());
+        saveGroups();
+        dailyStats.joined++;
+        pushLog('success','join',`✅ Joined ${res}`);
+      }
+    } catch(e){
+      dailyStats.failed++;
+      pushLog('error','join',`Failed: ${e.message}`);
+    } finally {
+      joinInProgress = false;
+      const now = Date.now();
+      for (const [k, t] of recentJoinAttempts){
+        if (now - t > 30 * 60 * 1000) recentJoinAttempts.delete(k);
+      }
+    }
+  }, 60000);
+}
 function discoverGroup(jid){
   if (!jid || !jid.endsWith('@g.us')) return false;
   if (joinedGroups.has(jid)) return false;
@@ -1007,7 +1087,7 @@ function discoverGroup(jid){
   return true;
 }
 
-/* Pending requests */
+/* Pending */
 function createPendingRequest(userJid, userName, userPhone, history, intent){
   const id = Math.random().toString(36).slice(2,8);
   pendingRequests.set(id, { id, userJid, userName, userPhone,
@@ -1047,9 +1127,7 @@ async function resolvePending(id, action, payload, adminChatJid){
   } catch(e){ adminReply(adminChatJid, `❌ ${e.message}`); return { ok:false, error:e.message }; }
 }
 
-/* ══════════════════════════════════════════════════════════════
- *  DOWNLOAD FLOW — search → numbered list → pick / mass
- * ══════════════════════════════════════════════════════════════ */
+/* Download flow */
 async function startDownloadSearch(chatJid, query, msg, priority=1, lane='slow'){
   const results = await ytSearch(query, 6);
   if (!results.length){
@@ -1091,74 +1169,48 @@ async function handleDownloadPick(chatJid, text, msg, priority=1, lane='slow'){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `🥖 *BreadBot v50 — Admin Commands*
+const COMMAND_LIST = `🥖 *BreadBot v53 — Admin Commands*
 
 *BASICS*
-!help — this list
-!ping — alive check
-!status — full status
-!test / !testall / !aitest
-!scraperstatus
-!whoami — your IDs
-!jobs — both lanes' stats
-!stats / !summary
-!logs / !errors
-!count
-!groups / !inbox / !dms
+!help · !ping · !status · !jobs
+!test · !testall · !aitest · !scraperstatus
+!whoami · !stats · !summary · !logs · !errors
+!count · !groups · !inbox
 
 *MAIN GROUP*
-!setmain — mark this group as main
-!main — show current main
-!invite — AI invite + broadcast
-!mylink — send admin group link
+!setmain · !main · !invite · !mylink
 
 *MESSAGING*
-!broadcast <msg> — all groups
-!bcgroup <msg> — alias
-!bcdm <msg> — all DMs
-!all <msg> — groups + DMs
-!send <jid> <msg> — one group
-!grouplink <link>
+!broadcast <msg> · !bcgroup <msg>
+!bcdm <msg> · !all <msg>
+!send <jid> <msg> · !grouplink <link>
 
-*GROUP MANAGEMENT*
-!antilink on|off
-!welcome on|off
-!goodbye on|off
-!setwelcome <msg>
-!setgoodbye <msg>
-!promote / !demote / !kick @user
-!tagall
-!mute / !unmute
-!lock / !unlock
+*GROUP MGMT*
+!antilink on|off · !welcome on|off · !goodbye on|off
+!setwelcome <msg> · !setgoodbye <msg>
+!promote · !demote · !kick @user
+!tagall · !mute · !unmute · !lock · !unlock
 
 *MEDIA*
-!pic <query> — search images
-!nextpic
-!bcastpic <cap> — broadcast image
-!gif <query>
-!nextgif
-!bcastgif <cap>
+!pic <q> · !nextpic · !bcastpic <cap>
+!gif <q> · !nextgif · !bcastgif <cap>
 !allimg <url> | <cap>
-!scrapersearch <q> / !scrapergif <q>
 
-*DOWNLOADS & MUSIC*
-!dl <query> — search YouTube → numbered list → pick
-!download <url> — direct video
-!music <query> — search & download mp3
-!nsfw <url> — NSFW video
-!nsfw on|off
-!nsfwroleplay on|off
-!cleanup — wipe downloads
+*DOWNLOADS*
+!dl <q> — search YouTube → numbered pick
+!download <url> — direct
+!music <q> — mp3
+!nsfwvideo <q> — NSFW (redgifs)
+!nsfw <url> — NSFW from URL
+!nsfw on|off · !nsfwroleplay on|off
+!cleanup
 
 *CONTROL*
-!pause / !resume
-!offline <mins> — bot sleeps
-!online — wake up
-!limit <n> — set flood limit
-!unlimit
-!jobs — lane stats
+!pause · !resume
+!offline <mins> · !online
+!limit <n> · !unlimit
 
-*Every file limited to 34 MB.*`;
+34 MB cap enforced on every file.`;
 
 function logRepeatedCmd(cmd, chatJid){
   const now = Date.now();
@@ -1175,56 +1227,37 @@ async function handleAdminCommand(text, chatJid, msg){
 
   switch(cmd){
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
-    case 'ping':
-      await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`);
-      break;
+    case 'ping': await reply(`🏓 Pong!\nStatus: *${connectionStatus}*\nUptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`); break;
     case 'pause': botPaused = true; await reply('⏸️ Paused.'); break;
     case 'resume': botPaused = false; await reply('▶️ Resumed.'); break;
-    case 'offline': {
-      const mins = parseInt(args[1],10) || 30;
-      botOfflineUntil = Date.now() + mins*60000;
-      await reply(`💤 Offline for ${mins} min.`);
-      break;
-    }
-    case 'online': botOfflineUntil = 0; await reply('🟢 Back online.'); break;
-    case 'limit': {
-      const n = parseInt(args[1],10) || 20;
-      MESSAGE_FLOOD_THRESHOLD = n;
-      await reply(`📊 Flood limit = ${n}/s.`);
-      break;
-    }
-    case 'unlimit': {
-      MESSAGE_FLOOD_THRESHOLD = 9999;
-      await reply('📊 Flood limit removed.');
-      break;
-    }
+    case 'offline': { const m = parseInt(args[1],10) || 30; botOfflineUntil = Date.now()+m*60000; await reply(`💤 Offline ${m}min.`); break; }
+    case 'online': botOfflineUntil = 0; await reply('🟢 Online.'); break;
+    case 'limit': { const n = parseInt(args[1],10)||20; MESSAGE_FLOOD_THRESHOLD = n; await reply(`📊 Limit ${n}/s.`); break; }
+    case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('📊 No limit.'); break;
     case 'jobs': {
       const s = jobs.stats();
-      await reply(`⚙️ *Fast lane*\nqueued: *${s.fast.queued}/${s.fast.max}*\ndone: *${s.fast.done}* · fail: *${s.fast.failed}*\n\n⚙️ *Slow lane*\nqueued: *${s.slow.queued}/${s.slow.max}*\ndone: *${s.slow.done}* · fail: *${s.slow.failed}*`);
+      await reply(`⚙️ *Fast* ${s.fast.queued}/${s.fast.max} · done ${s.fast.done}\n⚙️ *Slow* ${s.slow.queued}/${s.slow.max} · done ${s.slow.done}`);
       break;
     }
     case 'status': case 'diag': {
-      const s = jobs.stats(); const f = focus.stats();
-      resetDailyStats(); const st = dailyStats;
+      const s = jobs.stats(); const f = focus.stats(); resetDailyStats(); const st = dailyStats;
       await reply([
-        `📊 *Status*`, `Connection: *${connectionStatus}*`, `Bot: *${botNumber||'—'}*`,
+        `📊 *Status*`,`Connection: *${connectionStatus}*`,`Bot: *${botNumber||'—'}*`,
         `Uptime: *${Math.floor((Date.now()-botStartTime)/1000)}s*`,
-        `Time: *${describeWindow()}*`, `NSFW: *${describeNsfw()}*`, `DM AI: *${describeDm()}*`,
-        `Paused: *${botPaused}*`, `Offline: *${botOfflineUntil>Date.now()?'yes':'no'}*`,
-        ``, `👥 Groups: *${joinedGroups.size}* · 💬 DMs: *${activeDMs.size}*`,
-        `⭐ Main: *${mainGroupJid||'not set'}*`, `📋 Queue: *${joinQueue.length}*`,
+        `Time: *${describeWindow()}* · NSFW: *${describeNsfw()}* · DM: *${describeDm()}*`,
+        `Paused: *${botPaused}* · Offline: *${botOfflineUntil>Date.now()?'yes':'no'}*`,
+        ``,`👥 Groups: *${joinedGroups.size}* · 💬 DMs: *${activeDMs.size}*`,
+        `⭐ Main: *${mainGroupJid||'not set'}*`,`📋 Queue: *${joinQueue.length}*`,
         `⚙️ Fast: *${s.fast.queued}* · Slow: *${s.slow.queued}*`,
         `🎯 Focus: *${f.currentState}*`,
-        ``, `📈 *Today*`, `DM: *${st.dmsReplied}*`, `Media: *${st.picsSent+st.videosSent}*`,
-        `NSFW: *${st.nsfwSent}*`, `Downloads: *${st.downloads}*`,
-        `Broadcasts: *${st.broadcastsSent}*`, `Dropped: *${st.messagesDropped}*`
+        ``,`📈 *Today*`,`DM: *${st.dmsReplied}* · Media: *${st.picsSent+st.videosSent}*`,
+        `NSFW: *${st.nsfwSent}* · Downloads: *${st.downloads}*`,
+        `Broadcasts: *${st.broadcastsSent}* · Dropped: *${st.messagesDropped}*`,
+        ``,`👑 Admin LIDs: *${[...adminLids].join(', ')||'none'}*`
       ].join('\n'));
       break;
     }
-    case 'count': {
-      await reply(`Groups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nJoin queue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nMain: *${mainGroupJid||'not set'}*`);
-      break;
-    }
+    case 'count': await reply(`Groups: *${joinedGroups.size}*\nDMs: *${activeDMs.size}*\nQueue: *${joinQueue.length}*\nPending: *${pendingRequests.size}*\nMain: *${mainGroupJid||'not set'}*`); break;
     case 'groups': {
       if (!joinedGroups.size){ await reply('No groups.'); return; }
       const list = [...joinedGroups.entries()].map(([j],i)=>`${i+1}. ${j===mainGroupJid?'⭐ ':''}${j}`).join('\n');
@@ -1239,25 +1272,22 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'setmain': {
       if (!chatJid.endsWith('@g.us')){ await reply('Run this in the group.'); return; }
-      setMainGroup(chatJid);
-      await reply('✅ Main group set. Welcomes only here.');
+      setMainGroup(chatJid); await reply('✅ Main group set.');
       break;
     }
     case 'main': await reply(`⭐ Main: *${mainGroupJid||'not set'}*`); break;
-    case 'mylink':
-      await adminReply(chatJid, `🔗 Join my group:\n${ADMIN_GROUP_LINK}`);
-      break;
+    case 'mylink': await adminReply(chatJid, `🔗 Join my group:\n${ADMIN_GROUP_LINK}`); break;
     case 'send': {
       const t = args[1]; const body = args.slice(2).join(' ').trim();
-      if (!t || !body){ await reply('❌ Usage: `!send <jid> <msg>`'); return; }
+      if (!t || !body){ await reply('❌ `!send <jid> <msg>`'); return; }
       if (!joinedGroups.has(t)){ await reply(`❌ Not in ${t}`); return; }
       await sendBuffer(t, { text: body }, 0, 'fast');
-      await reply(`✅ Sent to ${t}`);
+      await reply(`✅ Sent.`);
       break;
     }
     case 'broadcast': case 'bcgroup': {
       const m = args.slice(1).join(' ');
-      if (!m){ await reply(`❌ Usage: \`!${cmd} <msg>\``); return; }
+      if (!m){ await reply(`❌ \`!${cmd} <msg>\``); return; }
       await reply(`⏳ Broadcasting to ${joinedGroups.size} groups...`);
       let sent=0;
       for (const jid of joinedGroups.keys()){
@@ -1269,77 +1299,64 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'all': case 'bcdm': {
       const m = args.slice(1).join(' ');
-      if (!m){ await reply(`❌ Usage: \`!${cmd} <msg>\``); return; }
+      if (!m){ await reply(`❌ \`!${cmd} <msg>\``); return; }
       const mode = cmd === 'all' ? 'all' : 'dms';
-      const targets = mode === 'all'
-        ? [...joinedGroups.keys(), ...activeDMs]
-        : [...activeDMs];
-      if (!targets.length){ await reply('📭 No targets.'); return; }
-      await reply(`⏳ Queued to ${targets.length}...`);
-      for (const jid of targets){
-        try { await sendBuffer(jid, { text:m }, 3, 'slow'); } catch(e){}
-      }
+      const targets = mode === 'all' ? [...joinedGroups.keys(), ...activeDMs] : [...activeDMs];
+      if (!targets.length){ await reply('📭 None.'); return; }
+      for (const jid of targets){ try { await sendBuffer(jid, { text:m }, 3, 'slow'); } catch(e){} }
       resetDailyStats(); dailyStats.broadcastsSent += targets.length;
       await reply(`✅ Done.`);
       break;
     }
     case 'pic': case 'search': {
       const q = args.slice(1).join(' ');
-      if (!q){ await reply('❌ Usage: `!pic <query>`'); return; }
+      if (!q){ await reply('❌ `!pic <query>`'); return; }
       const r = await scraperSearch(q, false);
       if (!r.ok || !r.images.length){ await reply('❌ No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      await sendImageSafe(chatJid, r.images[0], `Preview 1/${r.images.length}\n!nextpic · !bcastpic <caption>`, 0, 'fast');
+      await sendImageSafe(chatJid, r.images[0], `Preview 1/${r.images.length}`, 0, 'fast');
       break;
     }
     case 'nextpic': {
       if (!previewCache.imageUrls.length){ await reply('No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex+1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
-      await sendImageSafe(chatJid, previewCache.currentUrl,
-        `Preview ${previewCache.imageIndex+1}/${previewCache.imageUrls.length}`, 0, 'fast');
+      await sendImageSafe(chatJid, previewCache.currentUrl, `Preview ${previewCache.imageIndex+1}/${previewCache.imageUrls.length}`, 0, 'fast');
       break;
     }
     case 'gif': {
       const q = args.slice(1).join(' ');
-      if (!q){ await reply('❌ Usage: `!gif <query>`'); return; }
+      if (!q){ await reply('❌ `!gif <query>`'); return; }
       const r = await scraperGif(q, false);
       if (!r.ok || !r.gifs.length){ await reply('❌ No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      await sendGifSafe(chatJid, r.gifs[0],
-        `GIF 1/${r.gifs.length}\n!nextgif · !bcastgif <caption>`, 0, 'fast');
+      await sendGifSafe(chatJid, r.gifs[0], `GIF 1/${r.gifs.length}`, 0, 'fast');
       break;
     }
     case 'nextgif': {
       if (!previewCache.gifUrls.length){ await reply('No preview.'); return; }
       previewCache.gifIndex = (previewCache.gifIndex+1) % previewCache.gifUrls.length;
       previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
-      await sendGifSafe(chatJid, previewCache.currentUrl,
-        `GIF ${previewCache.gifIndex+1}/${previewCache.gifUrls.length}`, 0, 'fast');
+      await sendGifSafe(chatJid, previewCache.currentUrl, `GIF ${previewCache.gifIndex+1}/${previewCache.gifUrls.length}`, 0, 'fast');
       break;
     }
     case 'bcastpic': case 'bcastpicdm': case 'bcastpicgroup': {
-      if (!previewCache.currentUrl || previewCache.currentType !== 'image'){
-        await reply('No image preview.'); return;
-      }
+      if (!previewCache.currentUrl || previewCache.currentType !== 'image'){ await reply('No preview.'); return; }
       const cap = args.slice(1).join(' ') || '';
       const mode = cmd === 'bcastpic' ? 'all' : cmd === 'bcastpicdm' ? 'dms' : 'groups';
-      const targets = mode === 'all'
-        ? [...joinedGroups.keys(), ...activeDMs]
+      const targets = mode === 'all' ? [...joinedGroups.keys(), ...activeDMs]
         : mode === 'groups' ? [...joinedGroups.keys()] : [...activeDMs];
       if (!targets.length){ await reply(`No ${mode}.`); return; }
-      await reply(`⏳ Queued to ${targets.length}...`);
       for (const jid of targets){ await sendImageSafe(jid, previewCache.currentUrl, cap, 3, 'slow'); }
       await reply('✅ Done.');
       break;
     }
     case 'bcastgif': {
-      if (!previewCache.currentUrl || previewCache.currentType !== 'gif'){ await reply('No GIF preview.'); return; }
+      if (!previewCache.currentUrl || previewCache.currentType !== 'gif'){ await reply('No preview.'); return; }
       const cap = args.slice(1).join(' ') || '';
       const targets = [...joinedGroups.keys(), ...activeDMs];
-      if (!targets.length){ await reply('No targets.'); return; }
       for (const jid of targets){ await sendGifSafe(jid, previewCache.currentUrl, cap, 3, 'slow'); }
       await reply('✅ Done.');
       break;
@@ -1347,7 +1364,7 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'allimg': {
       const parts = args.slice(1).join(' ').split('|').map(s=>s.trim());
       const url = parts[0]; const cap = parts[1] || '';
-      if (!url){ await reply('❌ Usage: `!allimg <url> | <cap>`'); return; }
+      if (!url){ await reply('❌ `!allimg <url> | <cap>`'); return; }
       const targets = [...joinedGroups.keys(), ...activeDMs];
       for (const jid of targets){ await sendImageSafe(jid, url, cap, 3, 'slow'); }
       await reply('✅ Done.');
@@ -1356,7 +1373,7 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'ad': {
       const parts = args.slice(1).join(' ').split('|').map(p=>p.trim());
       const [title, body, cta, link, style] = parts;
-      if (!title || !body){ await reply('❌ Usage: `!ad <title>|<body>|[cta]|[link]|[style]`'); return; }
+      if (!title || !body){ await reply('❌ `!ad <title>|<body>|[cta]|[link]|[style]`'); return; }
       const ad = AdBuilder.build({ title, body, cta, link, footer:'Reply STOP to opt out', style: style||'fancy' });
       await reply(`📢 *Preview:*\n\n${ad}`);
       replyCache.set('LAST_AD', ad);
@@ -1364,17 +1381,17 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'bcad': {
       const ad = replyCache.get('LAST_AD');
-      if (!ad){ await reply('No ad built.'); return; }
+      if (!ad){ await reply('No ad.'); return; }
       const targets = [...joinedGroups.keys(), ...activeDMs];
       for (const jid of targets){ await sendBuffer(jid, { text:ad }, 3, 'slow'); }
       await reply('✅ Done.');
       break;
     }
-    case 'antilink': { const on = args[1]==='on'; getGroupSetting(chatJid).antilink = on; saveGroupSettingsDebounced(); await reply(`✅ Anti-link ${on?'ON':'OFF'}`); break; }
-    case 'welcome':  { const on = args[1]==='on'; getGroupSetting(chatJid).welcome  = on; saveGroupSettingsDebounced(); await reply(`✅ Welcome ${on?'ON':'OFF'}`); break; }
-    case 'goodbye':  { const on = args[1]==='on'; getGroupSetting(chatJid).goodbye  = on; saveGroupSettingsDebounced(); await reply(`✅ Goodbye ${on?'ON':'OFF'}`); break; }
-    case 'setwelcome': { const t = args.slice(1).join(' '); if (!t){ await reply('❌ Provide text.'); return; } getGroupSetting(chatJid).welcomeMsg = t; saveGroupSettingsDebounced(); await reply('✅ Set.'); break; }
-    case 'setgoodbye': { const t = args.slice(1).join(' '); if (!t){ await reply('❌ Provide text.'); return; } getGroupSetting(chatJid).goodbyeMsg = t; saveGroupSettingsDebounced(); await reply('✅ Set.'); break; }
+    case 'antilink': { getGroupSetting(chatJid).antilink = args[1]==='on'; saveGroupSettingsDebounced(); await reply(`✅ ${args[1]==='on'?'ON':'OFF'}`); break; }
+    case 'welcome':  { getGroupSetting(chatJid).welcome  = args[1]==='on'; saveGroupSettingsDebounced(); await reply(`✅ ${args[1]==='on'?'ON':'OFF'}`); break; }
+    case 'goodbye':  { getGroupSetting(chatJid).goodbye  = args[1]==='on'; saveGroupSettingsDebounced(); await reply(`✅ ${args[1]==='on'?'ON':'OFF'}`); break; }
+    case 'setwelcome': { const t = args.slice(1).join(' '); if (!t){ await reply('❌ Provide text.'); return; } getGroupSetting(chatJid).welcomeMsg = t; saveGroupSettingsDebounced(); await reply('✅'); break; }
+    case 'setgoodbye': { const t = args.slice(1).join(' '); if (!t){ await reply('❌ Provide text.'); return; } getGroupSetting(chatJid).goodbyeMsg = t; saveGroupSettingsDebounced(); await reply('✅'); break; }
     case 'promote': case 'demote': case 'kick': {
       const t = msg.message?.extendedTextMessage?.contextInfo?.participant
               || (args[1] ? args[1].replace(/\D/g,'')+'@s.whatsapp.net' : null);
@@ -1399,17 +1416,17 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'unlock': { try { await sock.groupSettingUpdate(chatJid,'unlocked'); await reply('🔓'); } catch(e){ await reply(`❌ ${e.message}`); } break; }
     case 'dl': {
       const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('❌ Usage: `!dl <song or video>`'); return; }
+      if (!q){ await reply('❌ `!dl <song or video>`'); return; }
       await startDownloadSearch(chatJid, q, msg, 0, 'fast');
       break;
     }
     case 'download': {
       const url = args[1];
-      if (!url){ await reply('❌ Usage: `!download <youtube-url>`'); return; }
+      if (!url){ await reply('❌ `!download <url>`'); return; }
       await reply('⏳ Resolving...');
       try {
         const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
-        if (!vid){ await reply('❌ Cannot parse video ID.'); return; }
+        if (!vid){ await reply('❌ Bad URL.'); return; }
         const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '360p');
         await sendMediaFile(chatJid, filePath, `(${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, 0, 'fast');
         resetDailyStats(); dailyStats.downloads++;
@@ -1419,11 +1436,11 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'music': {
       const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('❌ Usage: `!music <song>`'); return; }
+      if (!q){ await reply('❌ `!music <song>`'); return; }
       await reply(`🎵 Searching "${q}"...`);
       try {
         const results = await ytSearch(q + ' audio', 3);
-        if (!results.length){ await reply('❌ No results.'); return; }
+        if (!results.length){ await reply('❌ None.'); return; }
         const top = results[0];
         await reply(`🎧 *${top.title}* — downloading...`);
         const { filePath, sizeBytes } = await y2mateDownloadMusic(top.id, 'mp3');
@@ -1433,11 +1450,19 @@ async function handleAdminCommand(text, chatJid, msg){
       } catch(e){ await reply(`❌ ${e.message}`); }
       break;
     }
+    case 'nsfwvideo': {
+      const q = args.slice(1).join(' ').trim();
+      if (!q){ await reply('❌ `!nsfwvideo <query>`'); return; }
+      await reply(`🔞 Searching "${q}"...`);
+      const ok = await nsfwVideoSearchAndSend(chatJid, q, 0, 'fast');
+      if (ok) await reply('✅ Sent.');
+      break;
+    }
     case 'nsfw': {
-      if (args[1] === 'on'){ await reply('🔞 NSFW on.'); break; }
-      if (args[1] === 'off'){ await reply('🔞 NSFW off.'); break; }
+      if (args[1] === 'on'){ await reply('🔞 on.'); break; }
+      if (args[1] === 'off'){ await reply('🔞 off.'); break; }
       const url = args[1];
-      if (!url){ await reply('❌ Usage: `!nsfw <youtube-url>`'); return; }
+      if (!url){ await reply('❌ `!nsfw <url>` or `!nsfwvideo <query>`'); return; }
       try {
         const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
         if (!vid){ await reply('❌ Bad URL.'); return; }
@@ -1451,14 +1476,14 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'nsfwroleplay': {
       if (args[1] === 'on'){ nsfwRoleplayEnabled = true; await reply('🔞 Roleplay ON.'); break; }
       if (args[1] === 'off'){ nsfwRoleplayEnabled = false; await reply('🔞 Roleplay OFF.'); break; }
-      await reply('❌ Usage: `!nsfwroleplay on|off`');
+      await reply('❌ `!nsfwroleplay on|off`');
       break;
     }
     case 'cleanup': {
       try {
         const files = fs.readdirSync(DOWNLOAD_DIR);
         for (const f of files){ try{ fs.unlinkSync(path.join(DOWNLOAD_DIR,f)); }catch(e){} }
-        await reply(`🧹 Cleared ${files.length} files.`);
+        await reply(`🧹 Cleared ${files.length}.`);
       } catch(e){ await reply(`❌ ${e.message}`); }
       break;
     }
@@ -1480,7 +1505,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'teach': {
       const id = args[1]; const rest = args.slice(2).join(' ').trim();
-      if (!id || !rest){ await reply('❌ Usage: `!teach <id> <q|say|skip>`'); return; }
+      if (!id || !rest){ await reply('❌ `!teach <id> <q|say|skip>`'); return; }
       if (rest === 'skip') await resolvePending(id, 'skip', null, chatJid);
       else if (rest.startsWith('say ')) await resolvePending(id, 'say', rest.slice(4).trim(), chatJid);
       else await resolvePending(id, 'search', rest, chatJid);
@@ -1488,7 +1513,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'scrapersearch': case 'scrapergif': {
       const q = args.slice(1).join(' ');
-      if (!q){ await reply('❌ Give a query.'); return; }
+      if (!q){ await reply('❌ Give query.'); return; }
       const r = cmd === 'scrapersearch' ? await scraperSearch(q) : await scraperGif(q);
       if (!r.ok){ await reply(`❌ ${r.error}`); return; }
       const items = r.images || r.gifs || [];
@@ -1497,7 +1522,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'scraperstatus': {
       const st = await scraperStatus();
-      await reply(st.ok ? `✅ Scraper up (${st.data?.status||'ok'})` : `❌ ${st.error}`);
+      await reply(st.ok ? `✅ Up (${st.data?.status||'ok'})` : `❌ ${st.error}`);
       break;
     }
     case 'aitest': {
@@ -1511,35 +1536,33 @@ async function handleAdminCommand(text, chatJid, msg){
       break;
     }
     case 'testall': {
-      await reply('🧪 Running tests...');
+      await reply('🧪 Running...');
       const tests = [];
-      const s1 = await scraperSearch('test'); tests.push(`Scraper search: ${s1.ok?`✅ ${s1.images.length}`:'❌ '+s1.error}`);
-      const s2 = await scraperGif('funny'); tests.push(`Scraper gif: ${s2.ok?`✅ ${s2.gifs.length}`:'❌ '+s2.error}`);
+      const s1 = await scraperSearch('test'); tests.push(`Search: ${s1.ok?`✅ ${s1.images.length}`:'❌'}`);
+      const s2 = await scraperGif('funny'); tests.push(`GIF: ${s2.ok?`✅ ${s2.gifs.length}`:'❌'}`);
       const rw = await testAIRaw(); tests.push(`AI: ${rw.ok?`✅ ${rw.ms}ms`:`❌ ${rw.error}`}`);
-      const st = await scraperStatus(); tests.push(`Scraper: ${st.ok?'✅':'❌'}`);
       tests.push(`WA: ${connectionStatus==='connected'?'✅':'❌'}`);
       tests.push(`Main: ${mainGroupJid?'✅':'❌'}`);
-      tests.push(`Groups: ${joinedGroups.size} · DMs: ${activeDMs.size}`);
+      tests.push(`NSFW DL: ${RedgifsDownloader?'✅':'❌'}`);
       await reply(['🧪 *Tests*','',...tests].join('\n'));
       break;
     }
     case 'stats': case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply(`📊 *Today*\nJoined: *${s.joined}*\nDM: *${s.dmsReplied}*\nMedia: *${s.picsSent+s.videosSent}*\nNSFW: *${s.nsfwSent}*\nDownloads: *${s.downloads}*\nBroadcasts: *${s.broadcastsSent}*\nGreetings: *${s.greetingsSent}*`);
+      await reply(`📊 *Today*\nJoined: *${s.joined}*\nDM: *${s.dmsReplied}*\nMedia: *${s.picsSent+s.videosSent}*\nNSFW: *${s.nsfwSent}*\nDownloads: *${s.downloads}*\nBroadcasts: *${s.broadcastsSent}*`);
       break;
     }
     case 'whoami': {
       const c = extractAllPhoneCandidates(msg, chatJid);
       const l = extractLid(msg, chatJid);
       const a = isAdminSender(msg, chatJid);
-      await reply(`JID: *${msg.key.participant||msg.key.remoteJid}*\nLID: *${l||'—'}*\nCandidates: *${c.join(', ')||'none'}*\nIs admin: *${a?'YES':'NO'}*`);
+      await reply(`JID: *${msg.key.participant||msg.key.remoteJid}*\nLID: *${l||'—'}*\nCandidates: *${c.join(', ')||'none'}*\nIs admin: *${a?'YES':'NO'}*\n\nKnown LIDs: *${[...adminLids].join(', ')||'none'}*`);
       break;
     }
     default: await reply(`❓ Unknown: *!${cmd}*\n\nSend *!help*.`);
   }
 }
 
-/* Ad builder */
 class AdBuilder {
   static build({ title, body, cta, link, footer, style='fancy' }){
     if (style === 'bold') return [`*${title}*`, '', body, cta?`\n*${cta}*`:'', link?`\n${link}`:'', footer?`\n_${footer}_`:''].filter(Boolean).join('\n');
@@ -1551,12 +1574,11 @@ class AdBuilder {
   }
 }
 
-/* Preview cache (used by !pic / !gif) */
 let previewCache = { imageUrls:[], imageIndex:0, gifUrls:[], gifIndex:0, currentType:null, currentUrl:null };
 const replyCache = new NodeCache({ stdTTL:600 });
 
 /* ══════════════════════════════════════════════════════════════
- *  FLOOD CONTROL
+ *  FLOOD
  * ══════════════════════════════════════════════════════════════ */
 let msgCountInWindow=0, windowStart=Date.now(), floodIgnoreUntil=0;
 function checkFlood(){
@@ -1588,7 +1610,6 @@ function getTimeOfDay(){
   return 'night';
 }
 function pickGreeting(p){ const pool = GREETING_PHRASES[p] || GREETING_PHRASES.midday; return pool[Math.floor(Math.random()*pool.length)]; }
-
 function scheduleGreetings(){
   setInterval(async ()=>{
     if (!sock || connectionStatus!=='connected' || !joinedGroups.size || botPaused || Date.now() < botOfflineUntil) return;
@@ -1614,20 +1635,19 @@ function scheduleDailyReport(){
     if (now.getHours() !== DAILY_REPORT_HOUR || lastDailyReportDate === today) return;
     lastDailyReportDate = today; resetDailyStats(); const s = dailyStats;
     try {
-      await sock.sendMessage(ADMIN_JID, { text: `📊 Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}\nBroadcasts: ${s.broadcastsSent}` });
+      await sock.sendMessage(ADMIN_JID, { text: `📊 Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}` });
     } catch(e){}
   }, 60000);
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  DM PROCESSING
+ *  DM PROCESSING  — conversation memory + anti-repeat
  * ══════════════════════════════════════════════════════════════ */
 async function processDM(item){
   const { msg, text, chatJid, senderJid, pushName, phone, intent, lang } = item;
   const langName = LANG_NAMES[lang] || 'English';
   if (containsForbidden(text)) return;
 
-  // Music
   if (intent && intent.type === 'music'){
     try {
       const results = await ytSearch(intent.query + ' audio', 3);
@@ -1643,7 +1663,6 @@ async function processDM(item){
     return;
   }
 
-  // NSFW
   if (detectNsfw(text) && nsfwRoleplayEnabled){
     if (isNsfwWindow() || isAdminSender(msg, senderJid)){
       const rp = await nsfwRoleplay(pushName, text);
@@ -1655,14 +1674,12 @@ async function processDM(item){
     }
   }
 
-  // Group link
   if (detectGroupLinkRequest(text)){
     await sendBuffer(chatJid, { text:`🔗 Join our group:\n${ADMIN_GROUP_LINK}` }, 2, 'slow');
     resetDailyStats(); dailyStats.dmsReplied++;
     return;
   }
 
-  // Media intent
   if (intent && intent.type !== 'music'){
     if (!isVague(intent.query)){
       if (intent.type === 'video' || intent.type === 'gif'){
@@ -1688,14 +1705,43 @@ async function processDM(item){
     return;
   }
 
-  // Free chat
-  const sys = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ${langName}. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you're an AI. Be casual.`;
-  const aiReply = await askAI(text, sys);
+  // Free chat with memory (last 5 turns)
+  const hist = userHistories.get(senderJid) || [];
+  const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
+  const transcript = recentTurns.map(h =>
+    `${h.role === 'bot' ? 'Abby' : 'Them'}: ${h.text}`
+  ).join('\n');
+  const fullPrompt = transcript
+    ? `Conversation so far:\n${transcript}\n\nThem: ${text}\n\nReply as Abby. This is a NEW reply — do NOT repeat anything you said before. Vary your wording completely.`
+    : text;
+
+  const sys = `You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ${langName}. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you're an AI. Be casual, playful, and VARIED — never give the same reply twice. If the conversation continues, refer back to what you said earlier.`;
+
+  let aiReply = await askAI(fullPrompt, sys);
   if (!aiReply) return;
+
+  const lastBot = hist.filter(h => h.role === 'bot').slice(-1)[0];
+  if (lastBot && lastBot.text.toLowerCase().trim() === aiReply.toLowerCase().trim()){
+    pushLog('warn','ai','Duplicate blocked — regenerating');
+    const retry = await askAI(
+      `You already said: "${lastBot.text}". Say something COMPLETELY DIFFERENT.`,
+      sys
+    );
+    if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()){
+      aiReply = retry;
+    } else {
+      return;
+    }
+  }
+
+  hist.push({ role:'user', text, ts:Date.now() });
+  hist.push({ role:'bot',  text:aiReply, ts:Date.now() });
+  while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
+  userHistories.set(senderJid, hist);
+
   await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow');
   resetDailyStats(); dailyStats.dmsReplied++; dailyStats.focusRuns++;
 }
-
 async function processDMQueue(){
   if (dmQueueProcessing) return;
   if (focus.busy){ setTimeout(processDMQueue, 2000); return; }
@@ -1712,7 +1758,6 @@ async function processDMQueue(){
     if (dmQueue.length) setTimeout(processDMQueue, 100);
   }
 }
-
 function enqueueDM(item){
   if (dmQueue.length >= DM_QUEUE_MAX){
     resetDailyStats(); dailyStats.messagesDropped++;
@@ -1769,13 +1814,14 @@ async function handleMessage(msg){
   if (isGroup){ discoverGroup(chatJid); recordGroupMessage(chatJid, text); }
   else activeDMs.add(chatJid);
 
-  pushLiveMessage({ id:msgId, ts:new Date().toISOString(), chatJid, chatType,
-    senderJid, senderName:pushName, phone:phone||'—', lid:lid||'—',
-    text:text.slice(0,200)||`[${mediaType}]`, mediaType });
-
   const isAdmin = isAdminSender(msg, senderJid);
 
-  /* 1. Admin commands — fast lane, always work */
+  pushLiveMessage({
+    id:msgId, ts:new Date().toISOString(), chatJid, chatType,
+    senderJid, senderName:pushName, phone:phone||'—', lid:lid||'—',
+    text:text.slice(0,200)||`[${mediaType}]`, mediaType, isAdmin
+  });
+
   if (isAdmin && text.startsWith('!')){
     pushLog('info','admin',`Cmd: ${text.split(' ')[0]}`);
     await handleAdminCommand(text, chatJid, msg);
@@ -1785,7 +1831,6 @@ async function handleMessage(msg){
   if (botPaused && !isAdmin) return;
   if (Date.now() < botOfflineUntil && !isAdmin) return;
 
-  /* 2. Admin image broadcast via reply */
   if (!isGroup && isAdmin && mediaType === 'image' && text.startsWith('!')){
     const args = text.slice(1).trim().split(/\s+/);
     const cmd  = args[0].toLowerCase();
@@ -1794,55 +1839,47 @@ async function handleMessage(msg){
       try {
         const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger:pino({level:'silent'}) });
         if (!buffer){ adminReply(chatJid, '❌ Failed.'); return; }
-        if (buffer.length > MEDIA_MAX_BYTES){
-          adminReply(chatJid, `❌ ${(buffer.length/1024/1024).toFixed(1)}MB > 34MB`); return;
-        }
+        if (buffer.length > MEDIA_MAX_BYTES){ adminReply(chatJid, `❌ ${(buffer.length/1024/1024).toFixed(1)}MB > 34MB`); return; }
         const mode = cmd==='bcdm'?'dms':cmd==='bcgroup'?'groups':'all';
-        const targets = mode === 'all'
-          ? [...joinedGroups.keys(), ...activeDMs]
+        const targets = mode === 'all' ? [...joinedGroups.keys(), ...activeDMs]
           : mode === 'groups' ? [...joinedGroups.keys()] : [...activeDMs];
         if (!targets.length){ adminReply(chatJid, `No ${mode}.`); return; }
         adminReply(chatJid, `📸 Queued to ${targets.length}.`);
-        for (const jid of targets){
-          await sendBuffer(jid, { image: buffer, caption }, 3, 'slow');
-        }
+        for (const jid of targets) await sendBuffer(jid, { image: buffer, caption }, 3, 'slow');
         adminReply(chatJid, '✅ Done.');
       } catch(e){ adminReply(chatJid, `❌ ${e.message}`); }
       return;
     }
   }
 
-  /* 3. User history for DMs */
   if (!isGroup && !isAdmin && text){
     if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
     const h = userHistories.get(senderJid);
-    h.push({ text, ts:Date.now() });
-    if (h.length > USER_HISTORY_SIZE*2) h.shift();
+    const last = h[h.length-1];
+    if (!last || last.text !== text || last.role !== 'user'){
+      h.push({ role:'user', text, ts:Date.now() });
+    }
+    if (h.length > USER_HISTORY_SIZE * 2) h.shift();
   }
 
-  /* 4. Invite links */
   const codes = extractInviteCodes(text);
   if (codes.length){
     let added = 0;
     for (const c of codes) if (queueJoin(c, phone||pushName, chatType)) added++;
     if (added && !isGroup) await sendBuffer(chatJid, { text:`✅ Queued ${added}. Total ${joinQueue.length}` }, 3, 'slow');
-    processJoinQueue();
   }
 
-  /* 5. Download pick */
   if (text && downloadPicks.has(chatJid)){
     const ok = await handleDownloadPick(chatJid, text, msg, isAdmin?0:2, isAdmin?'fast':'slow');
     if (ok) return;
   }
 
-  /* 6. Download search intent */
   const dl = text ? detectDownloadIntent(text) : null;
   if (dl && dl.query){
     await startDownloadSearch(chatJid, dl.query, msg, isAdmin?0:2, isAdmin?'fast':'slow');
     return;
   }
 
-  /* 7. Group messages */
   if (isGroup){
     await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
     const isMain = chatJid === mainGroupJid;
@@ -1903,7 +1940,6 @@ async function handleMessage(msg){
       return;
     }
 
-    /* Other groups */
     if (directed && text){
       const analysis = analyzeGroup(chatJid);
       const lang = detectLanguage(text);
@@ -1924,7 +1960,6 @@ async function handleMessage(msg){
     return;
   }
 
-  /* 8. Non-admin DM */
   if (isAdmin) return;
   if (!isDmAiWindow()) return;
   enqueueDM({ msg, text, chatJid, senderJid, pushName, phone,
@@ -1932,7 +1967,7 @@ async function handleMessage(msg){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  CONNECT BOT
+ *  CONNECT BOT — announces admin identity to Live Messages
  * ══════════════════════════════════════════════════════════════ */
 async function connectBot(){
   if (isConnecting) return;
@@ -1959,10 +1994,20 @@ async function connectBot(){
         sock = wrapSocket(baseSocket, {
           groupOpGuard:{ limits:{ add:{ max:3, windowMs:600000 } } },
           legitimacySignals:{ typoProbability:0.02 },
-          jidCanonicalizer:{ enabled:true, canonical:'pn' }
+          jidCanonicalizer:{ enabled:true, canonical:'pn' },
+          circuitBreaker:{
+            enabled:true,
+            failureThreshold:10,
+            successThreshold:2,
+            timeout:30000,
+            halfOpenMaxCalls:2
+          }
         });
         pushLog('success','antiban','Wrapped');
-      } catch(e){ pushLog('warn','antiban',e.message); sock = baseSocket; }
+      } catch(e){
+        pushLog('warn','antiban',`wrapSocket failed: ${e.message} — using raw socket`);
+        sock = baseSocket;
+      }
     } else { sock = baseSocket; pushLog('warn','antiban','Not available'); }
 
     if (SessionHealthMonitor){
@@ -1993,20 +2038,81 @@ async function connectBot(){
         consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0;
         pushLog('success','bot',`Connected as ${botNumber}`);
         pushLog('info','time',`${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`);
+
+        // Entropy service with typeof guards
         if (createHumanEntropyService){
           try {
             entropyService = createHumanEntropyService(sock, botJid,
               { enabled:true, minIntervalMs:7200000, maxIntervalMs:21600000 });
-            entropyService.start();
-            pushLog('success','entropy','Started');
-          } catch(e){ pushLog('warn','entropy',e.message); }
+            if (entropyService && typeof entropyService.start === 'function'){
+              try { entropyService.start(); pushLog('success','entropy','Started'); }
+              catch(e){ pushLog('warn','entropy',`start() failed: ${e.message} — disabled`); entropyService = null; }
+            } else {
+              pushLog('warn','entropy','No start() method — disabled');
+              entropyService = null;
+            }
+          } catch(e){
+            pushLog('warn','entropy',`init failed: ${e.message} — disabled`);
+            entropyService = null;
+          }
         }
+
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
+
+        // ══════════════════════════════════════════════════════
+        //  ADMIN ANNOUNCEMENT TO LIVE MESSAGES
+        //  Fires immediately on connect — before any admin message
+        //  Shows phone + saved LIDs in the panel
+        // ══════════════════════════════════════════════════════
+        const lidList = [...adminLids];
+        pushLiveMessage({
+          id: 'boot-' + Date.now(),
+          ts: new Date().toISOString(),
+          chatJid: ADMIN_JID,
+          chatType: 'system',
+          senderJid: botJid,
+          senderName: 'BOT ONLINE',
+          phone: ADMIN_PHONE,
+          lid: lidList.join(', ') || 'none',
+          text: `✅ Bot ONLINE as ${botNumber}\n👑 Admin: ${ADMIN_PHONE}\n🆔 LIDs: ${lidList.join(', ') || 'none'}\n🌐 ${describeWindow()} · NSFW: ${describeNsfw()} · DM: ${describeDm()}`,
+          mediaType: 'system',
+          isAdmin: true
+        });
+        pushLog('success','admin',`Live-log: ONLINE announcement — admin ${ADMIN_PHONE}`);
+
+        // DM the admin the credentials
         try {
-          await sock.sendMessage(ADMIN_JID, { text:
-            `✅ *BreadBot ONLINE*\n📱 ${botNumber}\n⭐ Main: ${mainGroupJid||'_not set_'}\n👥 Groups: ${joinedGroups.size}\n💬 DMs: ${activeDMs.size}\n🕐 ${describeWindow()}\nNSFW: ${describeNsfw()}\nDM AI: ${describeDm()}\n\nSend *!help*.`
+          const sent = await sock.sendMessage(ADMIN_JID, { text:
+            `✅ *BreadBot ONLINE*\n` +
+            `📱 Bot: ${botNumber}\n` +
+            `👑 Admin phone: ${ADMIN_PHONE}\n` +
+            `🆔 Admin LIDs: ${lidList.join(', ') || 'none'}\n` +
+            `📁 Saved LIDs file: admin_lids.json\n\n` +
+            `⭐ Main: ${mainGroupJid||'not set'}\n` +
+            `👥 Groups: ${joinedGroups.size}\n` +
+            `💬 DMs: ${activeDMs.size}\n` +
+            `🕐 ${describeWindow()}\n` +
+            `NSFW: ${describeNsfw()}\n` +
+            `DM AI: ${describeDm()}\n\n` +
+            `Send *!help* for commands.`
           });
-        } catch(e){}
+          if (sent?.key?.id) markBotSent(sent.key.id);
+        } catch(e){ pushLog('warn','admin',`DM notify failed: ${e.message}`); }
+
+        // Second Live entry showing the notification was sent
+        pushLiveMessage({
+          id: 'notify-' + Date.now(),
+          ts: new Date().toISOString(),
+          chatJid: ADMIN_JID,
+          chatType: 'system',
+          senderJid: botJid,
+          senderName: botNumber + ' (BOT)',
+          phone: ADMIN_PHONE,
+          lid: lidList.join(', ') || 'none',
+          text: `📨 Sent ONLINE notification + credentials to admin`,
+          mediaType: 'system',
+          isAdmin: true
+        });
       }
       if (connection === 'close'){
         isConnecting = false;
@@ -2015,22 +2121,26 @@ async function connectBot(){
         if (classifyDisconnect){ try { cls = classifyDisconnect(code); } catch(e){} }
         if (cls) pushLog('warn','bot',`Disconnected (${code}) — ${cls.message} [${cls.category}]`);
         else pushLog('warn','bot',`Disconnected (${code})`);
-        if (entropyService){ try { entropyService.stop(); } catch(e){} entropyService = null; }
+
+        if (entropyService && typeof entropyService.stop === 'function'){
+          try { entropyService.stop(); } catch(e){}
+        }
+        entropyService = null;
+
         if (manualDisconnect){ connectionStatus = 'disconnected'; return; }
         if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
         if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired'); return; }
         if (code === 428 || code === 440){ connectionStatus = 'disconnected'; pushLog('error','bot',`Conflict ${code}`); return; }
 
         if (code === DisconnectReason.restartRequired || code === 515){
-          if (restart515InFlight){ pushLog('warn','bot','515 handler already in flight — skip'); return; }
+          if (restart515InFlight){ pushLog('warn','bot','515 in flight — skip'); return; }
           restart515InFlight = true;
           const now = Date.now();
           if (now < spamCooldownUntil){
             const remain = spamCooldownUntil - now;
-            pushLog('warn','antispam',`cooldown — wait ${Math.ceil(remain/1000)}s`);
+            pushLog('warn','antispam',`cooldown ${Math.ceil(remain/1000)}s`);
             await new Promise(r=>setTimeout(r, remain));
           }
-          // record 515 for spam detection
           const t = Date.now();
           recent515Timestamps.push(t);
           recent515Timestamps = recent515Timestamps.filter(ts => t - ts < SPAM_WINDOW_MS);
@@ -2041,7 +2151,7 @@ async function connectBot(){
           }
           consecutive515 += 1;
           const delay = Math.min(RESTART_515_BASE_DELAY_MS * Math.pow(2, consecutive515-1), RESTART_515_MAX_DELAY_MS);
-          pushLog('warn','bot',`515 retry in ${delay/1000}s (attempt ${consecutive515})`);
+          pushLog('warn','bot',`515 retry ${delay/1000}s (attempt ${consecutive515})`);
           await new Promise(r=>setTimeout(r, delay));
           const since = Date.now() - lastReconnectAt;
           if (since < MIN_RECONNECT_INTERVAL_MS){
@@ -2075,7 +2185,7 @@ async function connectBot(){
     sock.ev.on('messages.upsert', async ({ messages })=>{
       for (const msg of messages || []){
         try {
-          if (entropyService && msg.key?.remoteJid && !msg.key.fromMe){
+          if (entropyService && typeof entropyService.addRecentContact === 'function' && msg.key?.remoteJid && !msg.key.fromMe){
             try { entropyService.addRecentContact(msg.key.remoteJid, msg.key); } catch(e){}
           }
           await handleMessage(msg);
@@ -2091,7 +2201,10 @@ async function connectBot(){
 
 async function disconnectBot(){
   manualDisconnect = true;
-  if (entropyService){ try { entropyService.stop(); } catch(e){} entropyService = null; }
+  if (entropyService && typeof entropyService.stop === 'function'){
+    try { entropyService.stop(); } catch(e){}
+  }
+  entropyService = null;
   if (sock){ try { sock.end(undefined); } catch(e){} sock = null;
     connectionStatus = 'disconnected'; qrDataUri = null; isConnecting = false; botNumber = null;
     pushLog('warn','bot','Disconnected'); }
@@ -2120,12 +2233,14 @@ app.get('/health',(req,res)=>res.json({
   mainGroup: mainGroupJid,
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
   dmQueue: dmQueue.length, dmQueueMax: DM_QUEUE_MAX,
+  adminLids: [...adminLids],
   consecutive515, spamCooldownUntil: spamCooldownUntil ? new Date(spamCooldownUntil).toISOString() : null
 }));
 app.get('/api/status',(req,res)=>res.json({
   status: connectionStatus, botNumber,
   groups: joinedGroups.size, dms: activeDMs.size,
-  queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid
+  queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
+  adminLids: [...adminLids]
 }));
 app.get('/admin/qr',async (req,res)=>{
   if (!qrDataUri) return res.status(404).json({ error:'No QR' });
@@ -2187,31 +2302,33 @@ app.get('/admin/stats',(req,res)=>{
     offlineUntil: botOfflineUntil > Date.now() ? new Date(botOfflineUntil).toISOString() : null,
     mainGroup: mainGroupJid,
     antibanActive: !!wrapSocket, entropyRunning: !!entropyService,
-    floodLimit: MESSAGE_FLOOD_THRESHOLD
+    floodLimit: MESSAGE_FLOOD_THRESHOLD,
+    nsfwDownloader: !!RedgifsDownloader,
+    rewindConfigured: !!process.env.REWIND_KEY
   });
 });
 
-/* ─── HTML panel ─── */
-const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v50</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:280px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}</style></head><body>
-<h1>🥖 BreadBot v50</h1><div class="sub">Admin: <b id="ap">—</b> · Window: <b id="w">—</b> · NSFW: <b id="ns">—</b> · DM: <b id="dm">—</b></div>
+/* ─── HTML panel with ADMIN badge ─── */
+const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v53</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}.card h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14px;border-radius:6px;cursor:pointer;margin:3px;font-family:inherit}button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}.val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}#qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}.full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700;letter-spacing:1px}.sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}.msg-admin{background:#2d1517;border-left:3px solid #da3633 !important}.msg-sys{background:#1a1d3a;border-left:3px solid #6e40c9 !important}</style></head><body>
+<h1>🥖 BreadBot v53</h1><div class="sub">Admin: <b id="ap">—</b> · LIDs: <b id="al">—</b> · Window: <b id="w">—</b> · NSFW: <b id="ns">—</b> · DM: <b id="dm">—</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2><div><span class="dot" id="dot"></span><span id="st">—</span></div>
 <div class="row"><span>Bot</span><span class="val" id="bn">—</span></div>
 <div class="row"><span>Uptime</span><span class="val" id="up">—</span></div>
 <div class="row"><span>Paused</span><span class="val" id="pz">—</span></div>
 <div class="row"><span>Offline</span><span class="val" id="off">—</span></div>
-<div class="row"><span>515 streak</span><span class="val" id="c5">—</span></div>
+<div class="row"><span>515</span><span class="val" id="c5">—</span></div>
 <img id="qrImg" src="" style="display:none">
 <div style="margin-top:10px"><button class="primary" onclick="a('connect')">Start</button>
 <button onclick="a('refresh-qr')">Refresh QR</button>
 <button class="danger" onclick="a('disconnect')">Disconnect</button>
 <button onclick="a('pause')">Pause</button><button onclick="a('resume')">Resume</button>
-<button onclick="a('offline')">Offline 30m</button><button onclick="a('online')">Online</button></div></div>
+<button onclick="a('offline')">Off 30m</button><button onclick="a('online')">Online</button></div></div>
 <div class="card"><h2>Lanes</h2>
-<div class="row"><span>Fast queued</span><span class="val" id="fq">—</span></div>
+<div class="row"><span>Fast queue</span><span class="val" id="fq">—</span></div>
 <div class="row"><span>Fast done</span><span class="val" id="fd">—</span></div>
-<div class="row"><span>Slow queued</span><span class="val" id="sq">—</span></div>
+<div class="row"><span>Slow queue</span><span class="val" id="sq">—</span></div>
 <div class="row"><span>Slow done</span><span class="val" id="sd">—</span></div>
 <div class="row"><span>Failed</span><span class="val" id="fl">—</span></div>
 <div class="row"><span>Dropped</span><span class="val" id="dr">—</span></div></div>
@@ -2223,14 +2340,14 @@ const PANEL_HTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 <div class="row"><span>DM queue</span><span class="val" id="dmq">—</span></div>
 <div class="row"><span>Main</span><span class="val" id="mg">—</span></div></div>
 <div class="card"><h2>Today</h2>
-<div class="row"><span>DM replies</span><span class="val" id="dms">—</span></div>
+<div class="row"><span>DM</span><span class="val" id="dms">—</span></div>
 <div class="row"><span>Media</span><span class="val" id="md">—</span></div>
 <div class="row"><span>NSFW</span><span class="val" id="nsf">—</span></div>
 <div class="row"><span>Downloads</span><span class="val" id="dls">—</span></div>
 <div class="row"><span>Broadcasts</span><span class="val" id="bc">—</span></div>
 <div class="row"><span>Dropped</span><span class="val" id="drp">—</span></div></div>
-<div class="card full"><h2>Live</h2><div id="msgs"></div></div>
-<div class="card full"><h2>Logs</h2><div id="logs"></div></div>
+<div class="card full"><h2>📨 Live Messages</h2><div id="msgs"></div></div>
+<div class="card full"><h2>📜 Logs</h2><div id="logs"></div></div>
 </div>
 <script>
 const $=id=>document.getElementById(id);
@@ -2240,6 +2357,7 @@ function setS(s){$('dot').className='dot s-'+s;$('st').textContent=s;}
 async function refresh(){
   try{const d=await api('stats');setS(d.status);
   $('ap').textContent=d.adminPhone||'—';
+  $('al').textContent=(d.adminLids||[]).join(', ')||'none';
   $('w').textContent=(d.window&&d.window.time)||'—';
   $('ns').textContent=(d.window&&d.window.nsfw)||'—';
   $('dm').textContent=(d.window&&d.window.dmAI)||'—';
@@ -2269,7 +2387,13 @@ async function refresh(){
 }
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
 function logs(){const es=new EventSource('/admin/logs');es.onmessage=e=>{try{const en=JSON.parse(e.data);const div=document.createElement('div');const t=new Date(en.ts).toLocaleTimeString();div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);const b=$('logs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};es.onerror=()=>{es.close();setTimeout(logs,5000);};}
-function msgs(){const es=new EventSource('/admin/messages-stream');es.onmessage=e=>{try{const m=JSON.parse(e.data);const div=document.createElement('div');div.style.padding='4px 8px';div.style.margin='3px 0';div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':'#3fb950');div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' · <span style="color:#58a6ff">'+esc(m.senderName)+'</span></div><div>'+esc(m.text)+'</div>';const b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>200)b.removeChild(b.firstChild);}catch(e){}};es.onerror=()=>{es.close();setTimeout(msgs,5000);};}
+function msgs(){const es=new EventSource('/admin/messages-stream');es.onmessage=e=>{try{const m=JSON.parse(e.data);const div=document.createElement('div');
+  div.className='msg-row'+(m.isAdmin?' msg-admin':'')+(m.mediaType==='system'?' msg-sys':'');
+  div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4px';div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
+  const badge = m.mediaType==='system' ? '<span class="sys-badge">SYSTEM</span>' : (m.isAdmin ? '<span class="admin-badge">ADMIN</span>' : '');
+  div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' · <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' · 📱 '+esc(m.phone)+' · 🆔 '+esc(m.lid)+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
+  const b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);
+  }catch(e){}};es.onerror=()=>{es.close();setTimeout(msgs,5000);};}
 refresh();logs();msgs();setInterval(refresh,5000);
 </script></body></html>`;
 app.get('/',(req,res)=>res.send(PANEL_HTML));
@@ -2284,11 +2408,16 @@ setInterval(async ()=>{
   }
 }, 240000);
 setInterval(()=>{ axios.get(`http://localhost:${PORT}/health`).catch(()=>{}); }, 240000);
-setInterval(processJoinQueue, 30000);
 setInterval(()=>{
   const now = Date.now();
   for (const [k,v] of downloadPicks){ if (now - v.ts > DOWNLOAD_PICK_TTL) downloadPicks.delete(k); }
 }, 60000);
+setInterval(()=>{
+  const now = Date.now();
+  for (const [k, t] of antilinkWarnCooldown){
+    if (now - t > 10 * 60 * 1000) antilinkWarnCooldown.delete(k);
+  }
+}, 120000);
 
 /* ══════════════════════════════════════════════════════════════
  *  BOOT
@@ -2304,26 +2433,29 @@ app.listen(PORT, ()=>{
   console.log(`⭐ Main group: ${mainGroupJid||'not set'}`);
   console.log(`🕐 ${describeWindow()} · DM AI: ${describeDm()} · NSFW: ${describeNsfw()}`);
   console.log(`⚙️ Lanes — fast max ${FAST_LANE_MAX}, slow max ${SLOW_LANE_MAX}`);
-  console.log(`📦 Media max: 34 MB (enforced on images, GIFs, videos, audio)`);
+  console.log(`📦 Media max: 34 MB (all files)`);
   console.log(`🔎 Scraper: ${SCRAPER_URL}`);
-  console.log(`🔞 NSFW roleplay: ${nsfwRoleplayEnabled ? 'ON' : 'OFF'}`);
+  console.log(`🔞 NSFW DL: ${RedgifsDownloader ? 'enabled' : 'not installed (npm i redgifs-downloader)'}`);
+  console.log(`🤖 AI key: ${AI_KEY ? 'configured (' + (process.env.REWIND_KEY ? 'REWIND_KEY' : 'fallback') + ')' : 'MISSING — set REWIND_KEY'}`);
   pushLog('info','system',`Boot port ${PORT}`);
-  pushLog('info','system',`Admin: ${ADMIN_PHONE}`);
+  pushLog('info','system',`Admin: ${ADMIN_PHONE} — LIDs: ${[...adminLids].join(', ')||'none'}`);
   pushLog('info','system',`Main group: ${mainGroupJid||'not set'}`);
   pushLog('info','system',`Lanes fast=${FAST_LANE_MAX} slow=${SLOW_LANE_MAX}`);
-  pushLog('info','system',`Media cap 34MB enforced on all files`);
+  pushLog('info','system',`Media cap 34MB on all files`);
+  pushLog('info','system',`AI: ${AI_KEY ? 'REWIND_KEY loaded' : 'NO KEY — check env'}`);
   scheduleGreetings();
   scheduleDailyReport();
+  scheduleMidnightJoin();
   connectBot().catch(err=>{ pushLog('error','system',`Boot: ${err.message}`); });
 });
 
 process.on('SIGINT', async ()=>{
-  pushLog('warn','system','SIGINT — shutting down');
+  pushLog('warn','system','SIGINT');
   try { if (sock) sock.end(undefined); } catch(e){}
   process.exit(0);
 });
 process.on('SIGTERM', async ()=>{
-  pushLog('warn','system','SIGTERM — shutting down');
+  pushLog('warn','system','SIGTERM');
   try { if (sock) sock.end(undefined); } catch(e){}
   process.exit(0);
 });

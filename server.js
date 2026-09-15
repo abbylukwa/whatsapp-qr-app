@@ -1,16 +1,17 @@
 'use strict';
 
 /* ============================================================
- *  BreadBot v64 — Full fix release
- *  - Fixed: markBotSent is not defined
- *  - Fixed: Bot LID extraction (lazy learn)
- *  - Fixed: getSelfLid() defined
- *  - Fixed: isBotSender refreshes LID
- *  - Fixed: extractInviteCodes undefined crash
- *  - Fixed: protocol frames flooding Live Messages
- *  - Fixed: fromMe echoes appearing as "You" messages
- *  - LID-aware admin detection (id, phoneNumber, lid)
- *  - Main group starts NULL (admin must !setmain)
+ *  BreadBot v65 — Scrapper-delegated media + active DM AI
+ *  - Auto-sets main group from ADMIN_GROUP_LINK on connect
+ *  - DM AI: pool + random 3-4 replies per cycle (no flood)
+ *  - Auto-join from ANY group's invite links
+ *  - 428/440 conflict → auth wipe + reconnect
+ *  - Song/YT downloads removed → routed via intelligent scrapper
+ *  - Missing helpers added: humanize, informalize, containsForbidden,
+ *    detectLanguage, LANG_NAMES
+ *  - FIX: resetDailyStats no longer wipes counters on every call
+ *  - FIX: daily report fires once per day
+ *  - FIX: DM history no longer double-pushed
  * ============================================================ */
 
 const express = require('express');
@@ -62,14 +63,11 @@ const PENDING_FILE       = path.join(__dirname,'pending_requests.json');
 const LEARNING_DATA_FILE = path.join(__dirname,'learning_data.json');
 const GROUP_SETTINGS_FILE= path.join(__dirname,'group_settings.json');
 const POLICY_FILE        = path.join(__dirname,'policy_state.json');
-const DOWNLOAD_DIR       = path.join(__dirname,'downloads');
-if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR,{recursive:true});
 
 const GREETING_MIN_HOURS = 4, GREETING_MAX_HOURS = 8;
 const DAILY_REPORT_HOUR  = parseInt(process.env.DAILY_REPORT_HOUR || '22', 10);
 const USER_HISTORY_SIZE  = 5;
 const PENDING_EXPIRY_MS  = 3600000;
-const DM_QUEUE_MAX       = 1000;
 const FOCUS_LOCK_TIMEOUT_MS = 30000;
 const TZ_OFFSET_HOURS    = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);
 const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;
@@ -79,15 +77,20 @@ let FLOOD_IGNORE_MS         = 5000;
 
 const NSFW_START = 21, NSFW_END = 8;
 const DM_AI_START_HOUR = 21, DM_AI_END_HOUR = 8;
-const AMBIENT_CHANCE = 0.02;
 
 const SCRAPER_URL       = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
 const SCRAPER_SFW_SITE  = process.env.SCRAPER_SFW_SITE  || 'darknaija';
 const SCRAPER_NSFW_SITE = process.env.SCRAPER_NSFW_SITE || 'nsfw';
+const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
 
 const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
-const DOWNLOAD_PICK_TTL  = 10 * 60 * 1000;
-const DOWNLOAD_MAX_PICKS = 8;
+
+/* ─── DM AI batch settings ─────────────────────────────────── */
+const DM_BATCH_MIN     = 3;
+const DM_BATCH_MAX     = 4;
+const DM_CYCLE_MS      = 75_000;
+const DM_REPLY_GAP_MS  = 6_000;
+const DM_POOL_TTL_MS   = 6 * 60 * 60 * 1000;
 
 const ADMIN_ACTIVE_MS = 45000;
 let adminActiveUntil = 0;
@@ -97,6 +100,196 @@ function touchAdminActive(){ adminActiveUntil = Date.now() + ADMIN_ACTIVE_MS; }
 let botPaused = false;
 let botOfflineUntil = 0;
 let nsfwRoleplayEnabled = true;
+
+/* ══════════════════════════════════════════════════════════════
+ *  MISSING HELPERS
+ * ══════════════════════════════════════════════════════════════ */
+const FORBIDDEN_PATTERNS = [
+  /\bas an ai\b/i, /\bi am an ai\b/i, /\bi'm an ai\b/i,
+  /\bi am a language model\b/i, /\bas a language model\b/i,
+  /\bopenai\b/i, /\bchatgpt\b/i, /\bgpt-?\d/i,
+  /\bi cannot help with that\b/i, /\bi can'?t help with that\b/i
+];
+function containsForbidden(text){
+  if (!text) return false;
+  const s = String(text);
+  for (const re of FORBIDDEN_PATTERNS){ if (re.test(s)) return true; }
+  return false;
+}
+function humanize(text){
+  if (!text) return text;
+  return String(text)
+    .replace(/\r/g,'')
+    .replace(/\s+([,.!?])/g,'$1')
+    .replace(/[ \t]+/g,' ')
+    .trim();
+}
+function informalize(text){
+  if (!text) return text;
+  let s = String(text).trim();
+  s = s.replace(/^["'`]+|["'`]+$/g,'');
+  s = s.replace(/\s+/g,' ');
+  return s;
+}
+const LANG_NAMES = { en:'English', sn:'Shona', nd:'Ndebele', mixed:'Shona-English mix' };
+function detectLanguage(text){
+  if (!text) return 'en';
+  const low = text.toLowerCase();
+  const shonaWords   = ['uri','ndi','kuti','wani','zvaka','hazvi','munhu','kana','asi','nekuti','ndaka','waka','zvino','here','izvi','iyi','iyo'];
+  const ndebeleWords = ['ngiy','ngaku','kanti','yebo','njani','kuhle','ngoba','kodwa','loku','leyo'];
+  let s = 0, n = 0;
+  for (const w of shonaWords){ if (new RegExp('\\b'+w,'i').test(low)) s++; }
+  for (const w of ndebeleWords){ if (new RegExp('\\b'+w,'i').test(low)) n++; }
+  if (s > 0 && s >= n) return 'sn';
+  if (n > 0) return 'nd';
+  if (s > 0) return 'mixed';
+  return 'en';
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  LOGGER
+ * ══════════════════════════════════════════════════════════════ */
+const LOG_BUFFER_MAX = 500, logBuffer=[], logClients=new Set();
+const LIVE_MSG_MAX   = 300, liveMessages=[], msgClients=new Set();
+
+function pushLog(level, source, message, meta={}){
+  const entry = { id:Date.now()+Math.random(), ts:new Date().toISOString(),
+    level, source, message, meta:Object.keys(meta).length?meta:undefined };
+  logBuffer.push(entry); if (logBuffer.length>LOG_BUFFER_MAX) logBuffer.shift();
+  const payload = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const res of logClients) { try{res.write(payload);}catch(e){logClients.delete(res);} }
+  console.log(`${new Date().toTimeString().slice(0,8)}[${level.toUpperCase()}] ${source}: ${message}`);
+}
+function pushLiveMessage(entry){
+  liveMessages.push(entry); if (liveMessages.length>LIVE_MSG_MAX) liveMessages.shift();
+  const payload = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const res of msgClients) { try{res.write(payload);}catch(e){msgClients.delete(res);} }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  STATE
+ * ══════════════════════════════════════════════════════════════ */
+let sock=null, qrDataUri=null;
+let connectionStatus='disconnected', botStartTime=Date.now(), botNumber=null, botJid=null;
+let botLid=null;
+let isConnecting=false, manualDisconnect=false;
+let reconnectAttempts=0; const MAX_RECONNECT=10;
+
+let restart515InFlight=false, lastReconnectAt=0;
+let consecutive515=0, recent515Timestamps=[], spamCooldownUntil=0;
+const RESTART_515_BASE_DELAY_MS=1500, RESTART_515_MAX_DELAY_MS=30000;
+const MIN_RECONNECT_INTERVAL_MS=10000, SPAM_WINDOW_MS=60000;
+const SPAM_THRESHOLD=3, SPAM_COOLDOWN_MS=60000;
+
+let mainGroupJid = null;
+
+const botSentIds = new Set();
+const processedMessages = new Set();
+const activeChats = new Set();
+const activeDMs = new Set();
+const userHistories = new Map();
+const pendingRequests = new Map();
+const joinedGroups = new Map();
+const lastGreetingAt = new Map();
+const learningData = new Map();
+const adminLids = new Set(HARDCODED_ADMIN_LIDS);
+const recentAdminCmds = new Map();
+const recentJoinAttempts = new Map();
+const antilinkWarnCooldown = new Map();
+const groupAdminCache = new Map();
+const recentGroupLids = new Map();
+const recentGroupPhones = new Map();
+
+/* ─── DM pool for batch AI replies ─────────────────────────── */
+const dmPool = new Map();
+
+let joinQueue=[], joinInProgress=false, lastJoinAt=0;
+
+/* ─── Daily stats — FIX: reset at most once per day ────────── */
+let dailyStats = null;
+let lastReportSentDate = null;
+
+function resetDailyStats(){
+  const today = new Date().toISOString().slice(0,10);
+  if (!dailyStats || dailyStats.date !== today){
+    dailyStats = {
+      date: today,
+      joined:0, failed:0, dmsReplied:0, broadcastsSent:0, greetingsSent:0,
+      scraperSearches:0, scraperGifs:0, scraperDownloads:0, scraperMusic:0, scraperVideos:0,
+      picsSent:0, videosSent:0, nsfwSent:0, aiErrors:0,
+      pendingCreated:0, pendingResolved:0, discovered:0, imageBroadcasts:0, badMacs:0,
+      focusRuns:0, downloads:0, nsfwDownloads:0, adminBroadcasts:0, groupLinksShared:0,
+      messagesDropped:0, errors:0, invitesSent:0, policyBlocks:0, deletesDone:0,
+      readsSent:0, typingsSent:0
+    };
+  }
+}
+resetDailyStats();
+
+/* ══════════════════════════════════════════════════════════════
+ *  BOT SELF / LID HELPERS
+ * ══════════════════════════════════════════════════════════════ */
+function markBotSent(id){
+  if (!id) return;
+  botSentIds.add(id);
+  if (botSentIds.size > 5000){
+    const a = [...botSentIds];
+    botSentIds.clear();
+    for (const i of a.slice(-2500)) botSentIds.add(i);
+  }
+}
+function getSelfLid(){
+  try {
+    const candidates = [
+      sock?.user?.lid,
+      sock?.authState?.creds?.me?.lid,
+      sock?.creds?.me?.lid,
+      sock?.user?.id?.includes('@lid') ? sock.user.id : null
+    ];
+    for (const c of candidates){
+      if (typeof c === 'string' && c.includes('@lid')){
+        return c.split('@')[0].split(':')[0];
+      }
+    }
+  } catch(e){}
+  return null;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  DISCONNECT HELPERS
+ * ══════════════════════════════════════════════════════════════ */
+function getDisconnectStatusCode(lastDisconnect) {
+  if (!lastDisconnect) return undefined;
+  return (
+    lastDisconnect.error?.output?.statusCode ??
+    lastDisconnect.error?.output?.payload?.statusCode ??
+    lastDisconnect.error?.data?.statusCode ??
+    lastDisconnect.error?.statusCode ??
+    lastDisconnect.statusCode
+  );
+}
+function describeDisconnect(lastDisconnect){
+  const code = getDisconnectStatusCode(lastDisconnect);
+  const msg = lastDisconnect?.error?.message
+    || lastDisconnect?.error?.output?.payload?.message
+    || lastDisconnect?.error?.output?.payload?.error
+    || 'no reason';
+  return { code, msg };
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  TIME GATE
+ * ══════════════════════════════════════════════════════════════ */
+function localHour() { return (new Date().getUTCHours() + TZ_OFFSET_HOURS) % 24; }
+function isNsfwWindow() { const h=localHour(); return h>=NSFW_START || h<NSFW_END; }
+function isDmAiWindow() {
+  const h = localHour();
+  if (DM_AI_START_HOUR <= DM_AI_END_HOUR) return h >= DM_AI_START_HOUR && h < DM_AI_END_HOUR;
+  return h >= DM_AI_START_HOUR || h < DM_AI_END_HOUR;
+}
+function describeWindow() { return `${String(localHour()).padStart(2,'0')}:xx`; }
+function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLOCKED (08:00-21:00)'; }
+function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
  *  AI — REWIND ONLY
@@ -382,146 +575,6 @@ function contentBlocked(text){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  DISCONNECT HELPERS
- * ══════════════════════════════════════════════════════════════ */
-function getDisconnectStatusCode(lastDisconnect) {
-  if (!lastDisconnect) return undefined;
-  return (
-    lastDisconnect.error?.output?.statusCode ??
-    lastDisconnect.error?.output?.payload?.statusCode ??
-    lastDisconnect.error?.data?.statusCode ??
-    lastDisconnect.error?.statusCode ??
-    lastDisconnect.statusCode
-  );
-}
-function describeDisconnect(lastDisconnect){
-  const code = getDisconnectStatusCode(lastDisconnect);
-  const msg = lastDisconnect?.error?.message
-    || lastDisconnect?.error?.output?.payload?.message
-    || lastDisconnect?.error?.output?.payload?.error
-    || 'no reason';
-  return { code, msg };
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  LOGGER
- * ══════════════════════════════════════════════════════════════ */
-const LOG_BUFFER_MAX = 500, logBuffer=[], logClients=new Set();
-const LIVE_MSG_MAX   = 300, liveMessages=[], msgClients=new Set();
-
-function pushLog(level, source, message, meta={}){
-  const entry = { id:Date.now()+Math.random(), ts:new Date().toISOString(),
-    level, source, message, meta:Object.keys(meta).length?meta:undefined };
-  logBuffer.push(entry); if (logBuffer.length>LOG_BUFFER_MAX) logBuffer.shift();
-  const payload = `data: ${JSON.stringify(entry)}\n\n`;
-  for (const res of logClients) { try{res.write(payload);}catch(e){logClients.delete(res);} }
-  console.log(`${new Date().toTimeString().slice(0,8)}[${level.toUpperCase()}] ${source}: ${message}`);
-}
-function pushLiveMessage(entry){
-  liveMessages.push(entry); if (liveMessages.length>LIVE_MSG_MAX) liveMessages.shift();
-  const payload = `data: ${JSON.stringify(entry)}\n\n`;
-  for (const res of msgClients) { try{res.write(payload);}catch(e){msgClients.delete(res);} }
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  TIME GATE
- * ══════════════════════════════════════════════════════════════ */
-function localHour() { return (new Date().getUTCHours() + TZ_OFFSET_HOURS) % 24; }
-function isNsfwWindow() { const h=localHour(); return h>=NSFW_START || h<NSFW_END; }
-function isDmAiWindow() {
-  const h = localHour();
-  if (DM_AI_START_HOUR <= DM_AI_END_HOUR) return h >= DM_AI_START_HOUR && h < DM_AI_END_HOUR;
-  return h >= DM_AI_START_HOUR || h < DM_AI_END_HOUR;
-}
-function describeWindow() { return `${String(localHour()).padStart(2,'0')}:xx`; }
-function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLOCKED (08:00-21:00)'; }
-function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
-
-/* ══════════════════════════════════════════════════════════════
- *  STATE
- * ══════════════════════════════════════════════════════════════ */
-let sock=null, qrDataUri=null;
-let connectionStatus='disconnected', botStartTime=Date.now(), botNumber=null, botJid=null;
-let botLid=null;
-let isConnecting=false, manualDisconnect=false;
-let reconnectAttempts=0; const MAX_RECONNECT=10;
-
-let restart515InFlight=false, lastReconnectAt=0;
-let consecutive515=0, recent515Timestamps=[], spamCooldownUntil=0;
-const RESTART_515_BASE_DELAY_MS=1500, RESTART_515_MAX_DELAY_MS=30000;
-const MIN_RECONNECT_INTERVAL_MS=10000, SPAM_WINDOW_MS=60000;
-const SPAM_THRESHOLD=3, SPAM_COOLDOWN_MS=60000;
-
-let mainGroupJid = null;
-
-const botSentIds = new Set();
-const processedMessages = new Set();
-const activeChats = new Set();
-const activeDMs = new Set();
-const userHistories = new Map();
-const pendingRequests = new Map();
-const joinedGroups = new Map();
-const lastGreetingAt = new Map();
-const learningData = new Map();
-const adminLids = new Set(HARDCODED_ADMIN_LIDS);
-const recentAdminCmds = new Map();
-const downloadPicks = new Map();
-const recentJoinAttempts = new Map();
-const antilinkWarnCooldown = new Map();
-const groupAdminCache = new Map();
-const recentGroupLids = new Map();
-const recentGroupPhones = new Map();
-
-let joinQueue=[], joinInProgress=false, lastJoinAt=0;
-let dmQueue=[], dmQueueProcessing=false;
-
-let dailyStats=null, lastDailyReportDate=null;
-function resetDailyStats(){
-  const today = new Date().toISOString().slice(0,10);
-  if (lastDailyReportDate !== today){
-    dailyStats = { date:today, joined:0, failed:0, dmsReplied:0, broadcastsSent:0, greetingsSent:0,
-      scraperSearches:0, scraperGifs:0, picsSent:0, videosSent:0, nsfwSent:0, aiErrors:0,
-      pendingCreated:0, pendingResolved:0, discovered:0, imageBroadcasts:0, badMacs:0,
-      focusRuns:0, downloads:0, nsfwDownloads:0, adminBroadcasts:0, groupLinksShared:0,
-      messagesDropped:0, errors:0, invitesSent:0, policyBlocks:0, deletesDone:0, readsSent:0, typingsSent:0 };
-  }
-}
-resetDailyStats();
-
-/* ══════════════════════════════════════════════════════════════
- *  FIX: markBotSent — was missing in v63
- * ══════════════════════════════════════════════════════════════ */
-function markBotSent(id){
-  if (!id) return;
-  botSentIds.add(id);
-  if (botSentIds.size > 5000){
-    const a = [...botSentIds];
-    botSentIds.clear();
-    for (const i of a.slice(-2500)) botSentIds.add(i);
-  }
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  FIX: getSelfLid — was called but never defined in v63
- * ══════════════════════════════════════════════════════════════ */
-function getSelfLid(){
-  try {
-    const candidates = [
-      sock?.user?.lid,
-      sock?.authState?.creds?.me?.lid,
-      sock?.creds?.me?.lid,
-      sock?.user?.id?.includes('@lid') ? sock.user.id : null
-    ];
-    for (const c of candidates){
-      if (typeof c === 'string' && c.includes('@lid')){
-        return c.split('@')[0].split(':')[0];
-      }
-    }
-  } catch(e){}
-  return null;
-}
-
-/* ══════════════════════════════════════════════════════════════
  *  DUAL QUEUE
  * ══════════════════════════════════════════════════════════════ */
 class DualQueue {
@@ -626,18 +679,13 @@ class FocusPipeline {
 const focus = new FocusPipeline();
 
 /* ══════════════════════════════════════════════════════════════
- *  HELPERS — LID/PN aware
+ *  LID/PN HELPERS
  * ══════════════════════════════════════════════════════════════ */
 function extractAllPhoneCandidates(msg, senderJid){
   const s = new Set();
   const c = [
-    msg.key?.participantPn,
-    msg.key?.senderPn,
-    msg.key?.remoteJidAlt,
-    msg.key?.participantAlt,
-    senderJid,
-    msg.key?.remoteJid,
-    msg.key?.participant
+    msg.key?.participantPn, msg.key?.senderPn, msg.key?.remoteJidAlt,
+    msg.key?.participantAlt, senderJid, msg.key?.remoteJid, msg.key?.participant
   ].filter(Boolean);
   for (const x of c){
     if (typeof x === 'string'){
@@ -647,7 +695,6 @@ function extractAllPhoneCandidates(msg, senderJid){
   }
   return [...s];
 }
-
 function extractLidFromMsg(msg, senderJid){
   const c = [senderJid, msg.key?.remoteJid, msg.key?.participant].filter(Boolean);
   for (const x of c){
@@ -655,7 +702,6 @@ function extractLidFromMsg(msg, senderJid){
   }
   return null;
 }
-
 function extractPnFromMsg(msg, senderJid){
   if (msg.key?.participantAlt && msg.key.participantAlt.includes('@s.whatsapp.net')){
     return msg.key.participantAlt.split('@')[0];
@@ -673,7 +719,7 @@ function extractPnFromMsg(msg, senderJid){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  ADMIN DETECTION — LID-aware
+ *  ADMIN DETECTION
  * ══════════════════════════════════════════════════════════════ */
 function announceAdminToLive(reason, extraLid){
   const lidList = [...adminLids];
@@ -688,16 +734,13 @@ function announceAdminToLive(reason, extraLid){
   });
   pushLog('success','admin',`Live-log: ${reason} - LIDs [${lidList.join(', ')||'none'}]`);
 }
-
 function isAdminSender(msg, senderJid){
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   const lid = extractLidFromMsg(msg, senderJid);
   const pn = extractPnFromMsg(msg, senderJid);
-
   if (candidates.includes(ADMIN_PHONE)){
     if (lid && !adminLids.has(lid)){
-      adminLids.add(lid);
-      saveAdminLids();
+      adminLids.add(lid); saveAdminLids();
       pushLog('success','admin',`Saved new admin LID: ${lid}`);
       announceAdminToLive('identified (first time)', lid);
     }
@@ -714,7 +757,6 @@ function isAdminSender(msg, senderJid){
   for (const c of candidates) if (adminLids.has(c)) return true;
   return false;
 }
-
 function extractPhone(msg, senderJid){
   const c = extractAllPhoneCandidates(msg, senderJid);
   return c[0] || null;
@@ -722,7 +764,7 @@ function extractPhone(msg, senderJid){
 function extractLid(msg, senderJid){ return extractLidFromMsg(msg, senderJid); }
 
 /* ══════════════════════════════════════════════════════════════
- *  BOT SELF-DETECTION — LID-aware + lazy refresh
+ *  BOT SELF-DETECTION
  * ══════════════════════════════════════════════════════════════ */
 function isBotSender(msg, senderJid){
   if (!botLid){
@@ -732,7 +774,6 @@ function isBotSender(msg, senderJid){
   const candidates = extractAllPhoneCandidates(msg, senderJid);
   const lid = extractLidFromMsg(msg, senderJid);
   const pn = extractPnFromMsg(msg, senderJid);
-
   if (botNumber && candidates.includes(botNumber)) return true;
   if (botLid && lid === botLid) return true;
   if (botLid && candidates.includes(botLid)) return true;
@@ -744,7 +785,6 @@ function isBotSender(msg, senderJid){
   }
   return false;
 }
-
 async function botIsAdminIn(jid){
   const c = groupAdminCache.get(jid);
   if (c && Date.now() - c.ts < 60000) return c.botIsAdmin;
@@ -765,24 +805,19 @@ async function botIsAdminIn(jid){
     return false;
   }
 }
-
 async function getGroupAdmins(jid){
   try {
     const meta = await sock.groupMetadata(jid);
     const admins = meta.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin');
     return admins.map(p => ({
-      id: p.id,
-      phoneNumber: p.phoneNumber || null,
-      lid: p.lid || null,
-      role: p.admin
+      id: p.id, phoneNumber: p.phoneNumber || null,
+      lid: p.lid || null, role: p.admin
     }));
-  } catch(e){
-    return [];
-  }
+  } catch(e){ return []; }
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  READ + TYPING
+ *  READ
  * ══════════════════════════════════════════════════════════════ */
 async function markRead(msg){
   if (!ENABLE_READ_RECEIPTS || !sock || !msg?.key) return;
@@ -816,7 +851,7 @@ async function resolveInviteToJid(link){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  34 MB ENFORCEMENT
+ *  MEDIA DOWNLOAD + SEND
  * ══════════════════════════════════════════════════════════════ */
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
   const resp = await axios.get(url, {
@@ -854,8 +889,27 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskTy
   }
 }
 
+async function sendMediaUrl(jid, mediaUrl, opts = {}){
+  const {
+    kind = 'auto', caption = '', mimetype,
+    priority = 2, lane = 'slow', taskType = 'group', typing = false
+  } = opts;
+
+  const isAudio = kind === 'audio' || (mimetype && mimetype.startsWith('audio/'));
+  const isVideo = kind === 'video' || (mimetype && mimetype.startsWith('video/'));
+  const isImage = kind === 'image' || (mimetype && mimetype.startsWith('image/'));
+
+  let content;
+  if (isAudio)      content = { audio:  { url: mediaUrl }, mimetype: mimetype || 'audio/mpeg', caption };
+  else if (isVideo) content = { video:  { url: mediaUrl }, mimetype: mimetype || 'video/mp4',  caption };
+  else if (isImage) content = { image:  { url: mediaUrl }, mimetype: mimetype || 'image/jpeg', caption };
+  else              content = { document:{ url: mediaUrl }, mimetype: mimetype || 'application/octet-stream', caption, fileName: 'media' };
+
+  return sendBuffer(jid, content, priority, lane, taskType, typing);
+}
+
 /* ══════════════════════════════════════════════════════════════
- *  SEND — per-JID lock + admin preemption
+ *  SEND BUFFER
  * ══════════════════════════════════════════════════════════════ */
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false){
   if (priority >= 2){
@@ -873,7 +927,6 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
       return Promise.reject(new Error('Content blocked'));
     }
   }
-
   const actualLane = lane === 'auto' ? (priority === 0 ? 'fast' : 'slow') : lane;
   if (priority >= 2) recordOutbound(jid);
   const showTyping_ = typing && priority >= 2 && ENABLE_TYPING;
@@ -885,7 +938,6 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
         if (!sock){ reject(new Error('Bot disconnected')); return; }
         if (botPaused && priority > 0){ reject(new Error('Bot paused')); return; }
         if (Date.now() < botOfflineUntil && priority > 0){ reject(new Error('Bot offline')); return; }
-
         return withJidLock(jid, async ()=>{
           if (showTyping_){
             try { await sock.sendPresenceUpdate('composing', jid); } catch(e){}
@@ -914,8 +966,16 @@ function adminReply(jid, text){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SCRAPER
+ *  SCRAPPER CLIENT
  * ══════════════════════════════════════════════════════════════ */
+async function scrapperFetch(pathname, body, timeoutMs = 30000){
+  const url = `${SCRAPER_URL}${pathname}`;
+  const headers = { 'Content-Type':'application/json' };
+  if (SCRAPER_TOKEN) headers['Authorization'] = `Bearer ${SCRAPER_TOKEN}`;
+  const r = await axios.post(url, body || {}, { headers, timeout: timeoutMs });
+  return r.data;
+}
+
 async function scraperSearch(query, nsfw=false){
   const site = nsfw ? SCRAPER_NSFW_SITE : SCRAPER_SFW_SITE;
   resetDailyStats(); dailyStats.scraperSearches++;
@@ -944,156 +1004,42 @@ async function scraperStatus(){
   catch(e){ return { ok:false, error:e.message }; }
 }
 
-/* ══════════════════════════════════════════════════════════════
- *  YOUTUBE + Y2MATE
- * ══════════════════════════════════════════════════════════════ */
-const YT_HEADERS = {
-  'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-};
-const Y2MATE_HOSTS = ['www.y2mate.com','y2mate.com','y2mate.nu','y2mate.guru'];
-let workingY2MateHost = null;
-async function findWorkingY2MateHost(){
-  for (const host of Y2MATE_HOSTS){
-    try {
-      const r = await axios.get(`https://${host}/`, { timeout: 5000, validateStatus: s => s < 500 });
-      if (r.status < 500){ workingY2MateHost = host; return host; }
-    } catch(e){}
-  }
-  return null;
-}
-function y2host(){ return workingY2MateHost || Y2MATE_HOSTS[0]; }
-function y2Headers(){
-  return {
-    'User-Agent': YT_HEADERS['User-Agent'],
-    'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8',
-    'X-Requested-With':'XMLHttpRequest',
-    'Origin': `https://${y2host()}`,
-    'Referer': `https://${y2host()}/`
-  };
-}
-
-async function ytSearch(query, max=6){
+async function scraperDownloadMedia(url, kind='auto'){
+  resetDailyStats(); dailyStats.scraperDownloads++;
   try {
-    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D`;
-    const r = await axios.get(url, { headers:YT_HEADERS, timeout:20000 });
-    const html = r.data || '';
-    const results = [];
-    const re = /"videoRenderer":\{"videoId":"([^"]+)".*?"title":\{"runs":\[\{"text":"([^"]+)"/g;
-    let m;
-    while ((m = re.exec(html)) !== null && results.length < max){
-      const vid = m[1];
-      const title = m[2].replace(/\\u([\da-f]{4})/gi,(_,c)=>String.fromCharCode(parseInt(c,16)));
-      if (!results.find(x=>x.id===vid)) results.push({ id:vid, title });
-    }
-    if (results.length === 0){
-      const re2 = /"videoId":"([^"]+)","thumbnail".*?"title":\{"runs":\[\{"text":"([^"]+)"/g;
-      let m2;
-      while ((m2 = re2.exec(html)) !== null && results.length < max){
-        const vid = m2[1];
-        const title = m2[2].replace(/\\u([\da-f]{4})/gi,(_,c)=>String.fromCharCode(parseInt(c,16)));
-        if (!results.find(x=>x.id===vid)) results.push({ id:vid, title });
-      }
-    }
-    return results;
+    const r = await scrapperFetch('/download', { url, kind }, 90000);
+    if (!r || !r.mediaUrl) throw new Error('scrapper: no mediaUrl');
+    if (r.sizeBytes && r.sizeBytes > MEDIA_MAX_BYTES)
+      throw new Error('Media too big (' + (r.sizeBytes/1024/1024).toFixed(1) + 'MB)');
+    return { ok:true, mediaUrl:r.mediaUrl, title:r.title||'',
+             mimetype:r.mimetype||'', kind:r.kind||kind, sizeBytes:r.sizeBytes||0 };
   } catch(e){
-    pushLog('error','yt',`search: ${e.message}`);
-    return [];
+    pushLog('error','scraper',`download "${url}": ${e.message}`);
+    return { ok:false, error:e.message };
   }
 }
-async function y2mateResolve(videoId, prefer='360p'){
-  const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const analyze = await axios.post(
-    `https://${y2host()}/mates/en948/analyze/ajax`,
-    new URLSearchParams({ url: ytUrl, q_auto:'0', ajax:'1' }).toString(),
-    { headers: y2Headers(), timeout:30000 }
-  );
-  const html = analyze.data?.result || '';
-  const vId = (html.match(/v_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
-  const id  = (html.match(/_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
-  if (!vId || !id) throw new Error('y2mate: video not found');
-  const qualities = ['360p','480p','720p'];
-  const start = Math.max(0, qualities.indexOf(prefer));
-  let lastErr=null;
-  for (const q of qualities.slice(start)){
-    try {
-      const conv = await axios.post(
-        `https://${y2host()}/mates/convert`,
-        new URLSearchParams({ type:'video', _id:id, v_id:vId, ajax:'1', token:'', ftype:'mp4', fquality:q }).toString(),
-        { headers: y2Headers(), timeout:30000 }
-      );
-      const ch = conv.data?.result || '';
-      const dl = (ch.match(/href="(https?:\/\/[^"]+\.mp4[^"]*)"/)||[])[1]
-              || (ch.match(/href="(https?:\/\/[^"]+)"/)||[])[1];
-      if (dl) return { url: dl, quality: q };
-    } catch(e){ lastErr = e; }
-  }
-  throw new Error(`y2mate: no download (${lastErr?.message||'unknown'})`);
-}
-async function y2mateDownload(videoId, prefer='360p'){
-  const { url, quality } = await y2mateResolve(videoId, prefer);
-  const id = Date.now()+'_'+Math.random().toString(36).slice(2,8);
-  const fp = path.join(DOWNLOAD_DIR, `${id}.mp4`);
-  const resp = await axios.get(url, {
-    responseType: 'stream', timeout: 180000, maxContentLength: MEDIA_MAX_BYTES,
-    headers: { 'User-Agent': YT_HEADERS['User-Agent'], 'Referer': `https://${y2host()}/` }
-  });
-  const w = fs.createWriteStream(fp);
-  resp.data.pipe(w);
-  await new Promise((res,rej)=>{ w.on('finish',res); w.on('error',rej); resp.data.on('error',rej); });
-  const st = fs.statSync(fp);
-  if (st.size > MEDIA_MAX_BYTES){ try{ fs.unlinkSync(fp); }catch(e){} throw new Error('Video too big'); }
-  return { filePath:fp, quality, sizeBytes:st.size };
-}
-async function y2mateDownloadMusic(videoId, format='mp3'){
-  const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const analyze = await axios.post(
-    `https://${y2host()}/mates/en948/analyze/ajax`,
-    new URLSearchParams({ url: ytUrl, q_auto:'0', ajax:'1' }).toString(),
-    { headers: y2Headers(), timeout:30000 }
-  );
-  const html = analyze.data?.result || '';
-  const vId = (html.match(/v_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
-  const id  = (html.match(/_id["']?\s*[:=]\s*["']([^"']+)/)||[])[1];
-  if (!vId || !id) throw new Error('y2mate: audio not found');
-  const ftype = format === 'mp3' ? 'mp3' : 'mp4';
-  const conv = await axios.post(
-    `https://${y2host()}/mates/convert`,
-    new URLSearchParams({ type:'audio', _id:id, v_id:vId, ajax:'1', token:'', ftype, fquality:'128' }).toString(),
-    { headers: y2Headers(), timeout:30000 }
-  );
-  const ch = conv.data?.result || '';
-  const dl = (ch.match(/href="(https?:\/\/[^"]+\.(mp3|mp4|m4a)[^"]*)"/)||[])[1]
-          || (ch.match(/href="(https?:\/\/[^"]+)"/)||[])[1];
-  if (!dl) throw new Error('y2mate: no music link');
-  const fileId = Date.now()+'_'+Math.random().toString(36).slice(2,8);
-  const ext = format === 'mp3' ? '.mp3' : '.mp4';
-  const fp = path.join(DOWNLOAD_DIR, `${fileId}${ext}`);
-  const resp = await axios.get(dl, {
-    responseType: 'stream', timeout: 180000, maxContentLength: MEDIA_MAX_BYTES,
-    headers: { 'User-Agent': YT_HEADERS['User-Agent'], 'Referer': `https://${y2host()}/` }
-  });
-  const w = fs.createWriteStream(fp);
-  resp.data.pipe(w);
-  await new Promise((res,rej)=>{ w.on('finish',res); w.on('error',rej); resp.data.on('error',rej); });
-  const st = fs.statSync(fp);
-  if (st.size > MEDIA_MAX_BYTES){ try{ fs.unlinkSync(fp); }catch(e){} throw new Error('File too big'); }
-  return { filePath:fp, format, sizeBytes:st.size };
-}
-async function sendMediaFile(jid, filePath, caption='', priority=2, lane='slow', taskType='group', typing=false){
+async function scraperMusic(query){
+  resetDailyStats(); dailyStats.scraperMusic++;
   try {
-    const buf = fs.readFileSync(filePath);
-    if (buf.length > MEDIA_MAX_BYTES){ try{ fs.unlinkSync(filePath); }catch(e){} throw new Error('File too big'); }
-    const ext = path.extname(filePath).toLowerCase();
-    const isAudio = ext === '.mp3' || ext === '.m4a';
-    const content = isAudio
-      ? { audio: buf, mimetype: 'audio/mpeg', caption }
-      : { video: buf, mimetype: 'video/mp4', caption };
-    await sendBuffer(jid, content, priority, lane, taskType, typing);
-    try{ fs.unlinkSync(filePath); }catch(e){}
-    return true;
+    const r = await scrapperFetch('/music', { query }, 90000);
+    if (!r || !r.mediaUrl) throw new Error('scrapper: no musicUrl');
+    return { ok:true, mediaUrl:r.mediaUrl, title:r.title||query,
+             mimetype:r.mimetype||'audio/mpeg', sizeBytes:r.sizeBytes||0 };
   } catch(e){
-    try{ fs.unlinkSync(filePath); }catch(_){}
-    throw e;
+    pushLog('error','scraper',`music "${query}": ${e.message}`);
+    return { ok:false, error:e.message };
+  }
+}
+async function scraperVideo(query){
+  resetDailyStats(); dailyStats.scraperVideos++;
+  try {
+    const r = await scrapperFetch('/video', { query }, 90000);
+    if (!r || !r.mediaUrl) throw new Error('scrapper: no videoUrl');
+    return { ok:true, mediaUrl:r.mediaUrl, title:r.title||query,
+             mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0 };
+  } catch(e){
+    pushLog('error','scraper',`video "${query}": ${e.message}`);
+    return { ok:false, error:e.message };
   }
 }
 
@@ -1116,7 +1062,7 @@ async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow', t
         const resp = await axios.get(link.url || link, {
           responseType: 'arraybuffer', timeout: 90000,
           maxContentLength: MEDIA_MAX_BYTES + 1, maxBodyLength: MEDIA_MAX_BYTES + 1,
-          headers: { 'User-Agent': YT_HEADERS['User-Agent'] }
+          headers: { 'User-Agent': 'Mozilla/5.0' }
         });
         const buf = Buffer.from(resp.data);
         if (buf.length > MEDIA_MAX_BYTES) continue;
@@ -1167,17 +1113,6 @@ function detectMediaIntent(text){
     q = q.replace(/\b(of|ya|ye|za|for|about|ndiye|wa)\b/gi,'');
     q = q.replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
     return { type:'image', query: q || 'naija' };
-  }
-  return null;
-}
-function detectDownloadIntent(text){
-  if (!text) return null;
-  const low = text.toLowerCase();
-  if (/\b(download|dl|save|grab|fetch)\b/.test(low) && /\b(youtube|video|vid|song|music)\b/.test(low)){
-    const q = low.replace(/^(please\s+|pls\s+|hey\s+|hi\s+)?(can\s+you\s+)?(download|dl|save|grab|fetch)\s+(me\s+)?(a\s+|the\s+)?/i,'')
-      .replace(/\b(youtube|video|vid|song|music)\b/gi,'').replace(/\b(of|from|for|by)\b/gi,'')
-      .replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
-    return { query: q };
   }
   return null;
 }
@@ -1324,6 +1259,38 @@ function clearMainGroup(){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  AUTO-SET MAIN GROUP
+ * ══════════════════════════════════════════════════════════════ */
+async function autoSetMainGroup(){
+  if (mainGroupJid){
+    pushLog('info','main',`Main group already set: ${mainGroupJid}`);
+    return;
+  }
+  if (!ADMIN_GROUP_LINK){
+    pushLog('warn','main','ADMIN_GROUP_LINK not configured');
+    return;
+  }
+  try {
+    const { code, jid, subject, size } = await resolveInviteToJid(ADMIN_GROUP_LINK);
+    if (!joinedGroups.has(jid)){
+      try {
+        const joined = await sock.groupAcceptInvite(code);
+        if (joined){
+          joinedGroups.set(joined, { name: subject, joinedAt: Date.now(), discovered: false });
+          lastGreetingAt.set(joined, Date.now());
+          saveGroups();
+          pushLog('success','main',`Auto-joined main group ${joined}`);
+        }
+      } catch(e){ pushLog('warn','main',`Auto-join failed: ${e.message}`); }
+    }
+    setMainGroup(jid);
+    pushLog('success','main',`Main group auto-set: ${subject} (${jid}, ${size} members)`);
+  } catch(e){
+    pushLog('error','main',`Auto-set failed: ${e.message}`);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  MAIN GROUP PROBE
  * ══════════════════════════════════════════════════════════════ */
 async function probeMainGroup(){
@@ -1343,8 +1310,6 @@ async function probeMainGroup(){
           if (p.lid) recentGroupLids.set(p.lid, Date.now());
         }
         pushLog('success','main',`Cached ${recentGroupLids.size} LIDs, ${recentGroupPhones.size} phones`);
-        const admins = meta.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin');
-        pushLog('info','main',`Group has ${admins.length} admin(s)`);
       } catch(e){ pushLog('warn','main','metadata: '+e.message); }
     }, 15000);
   } catch(e){
@@ -1491,11 +1456,13 @@ function scheduleDailyReport(){
   setInterval(async function(){
     if (!sock || connectionStatus!=='connected') return;
     const now = new Date(); const today = now.toISOString().slice(0,10);
-    if (now.getHours() !== DAILY_REPORT_HOUR || lastDailyReportDate === today) return;
-    lastDailyReportDate = today; resetDailyStats(); const s = dailyStats;
+    if (now.getHours() !== DAILY_REPORT_HOUR || lastReportSentDate === today) return;
+    lastReportSentDate = today;
+    resetDailyStats();
+    const s = dailyStats;
     try {
       await sock.sendMessage(ADMIN_JID, { text:
-        `Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nDownloads: ${s.downloads}\nBroadcasts: ${s.broadcastsSent}\nDeletes: ${s.deletesDone}\nReads: ${s.readsSent}\nTypings: ${s.typingsSent}\nPolicy blocks: ${s.policyBlocks}\nReply rate: ${(replyRate()*100).toFixed(0)}%\nMain group: ${mainGroupJid||'NOT SET'}` });
+        `Daily ${today}\nGroups: ${joinedGroups.size}\nDMs: ${activeDMs.size}\nDM pool: ${dmPool.size}\nDM replies: ${s.dmsReplied}\nMedia: ${s.picsSent+s.videosSent}\nBroadcasts: ${s.broadcastsSent}\nDeletes: ${s.deletesDone}\nReads: ${s.readsSent}\nTypings: ${s.typingsSent}\nPolicy blocks: ${s.policyBlocks}\nReply rate: ${(replyRate()*100).toFixed(0)}%\nMain group: ${mainGroupJid||'NOT SET'}` });
     } catch(e){}
   }, 60000);
   pushLog('info','system','scheduleDailyReport started');
@@ -1550,7 +1517,189 @@ function scheduleHumanPresence(){
   pushLog('info','system','scheduleHumanPresence started');
 }
 
-/* Pending */
+/* ══════════════════════════════════════════════════════════════
+ *  DM AI — POOL + RANDOM BATCH
+ * ══════════════════════════════════════════════════════════════ */
+function shuffleArr(a){
+  a = a.slice();
+  for (let i = a.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+function sleepMs(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+/* FIX: pool accumulates messages per JID so the AI has context. */
+function poolDm(jid, msg, text, pushName, phone){
+  const existing = dmPool.get(jid);
+  if (existing && !existing.replied){
+    existing.messages = existing.messages || [];
+    existing.messages.push({ msg, text, ts: Date.now() });
+    if (existing.messages.length > 10) existing.messages.shift();
+    existing.lastMsg = msg;
+    existing.text = text;
+    existing.pushName = pushName;
+    existing.phone = phone || existing.phone || null;
+    existing.ts = Date.now();
+    return;
+  }
+  dmPool.set(jid, {
+    messages: [{ msg, text, ts: Date.now() }],
+    lastMsg: msg, text, pushName,
+    phone: phone || null,
+    ts: Date.now(), replied: false
+  });
+}
+function pruneDmPool(){
+  const now = Date.now();
+  for (const [jid, e] of dmPool){
+    if (now - e.ts > DM_POOL_TTL_MS) dmPool.delete(jid);
+  }
+}
+
+let dmCycleRunning = false;
+function startDmAiCycle(){
+  if (dmCycleRunning) return;
+  dmCycleRunning = true;
+  setInterval(runDmAiBatch, DM_CYCLE_MS).unref?.();
+  setInterval(pruneDmPool, 10 * 60 * 1000).unref?.();
+  pushLog('info','ai',`DM AI cycle: ${DM_BATCH_MIN}-${DM_BATCH_MAX} random DMs per ${DM_CYCLE_MS/1000}s`);
+}
+
+async function runDmAiBatch(){
+  if (!sock || connectionStatus !== 'connected') return;
+  if (botPaused || Date.now() < botOfflineUntil) return;
+  if (focus.busy) return;
+  if (isAdminActive()) return;
+
+  const candidates = [...dmPool.entries()].filter(([jid, e]) => e && e.text && e.lastMsg && !e.replied);
+  if (!candidates.length) return;
+
+  const n = Math.min(
+    candidates.length,
+    DM_BATCH_MIN + Math.floor(Math.random() * (DM_BATCH_MAX - DM_BATCH_MIN + 1))
+  );
+  const picked = shuffleArr(candidates).slice(0, n);
+  pushLog('info','ai',`DM batch: replying to ${picked.length}/${candidates.length}`);
+
+  for (const [jid, entry] of picked){
+    if (focus.busy) break;
+    try {
+      const item = {
+        msg: entry.lastMsg,
+        text: entry.text,
+        chatJid: jid,
+        senderJid: jid,
+        pushName: entry.pushName || 'Unknown',
+        phone: entry.phone || null,
+        intent: detectMediaIntent(entry.text),
+        lang: detectLanguage(entry.text)
+      };
+      await focus.run(jid, () => processDM(item));
+      entry.replied = true;
+      resetDailyStats(); dailyStats.focusRuns++;
+    } catch(e){
+      pushLog('error','ai',`batch ${jid}: ${e.message}`);
+      entry.replied = true;
+    }
+    await sleepMs(DM_REPLY_GAP_MS);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  DM PROCESSING
+ * ══════════════════════════════════════════════════════════════ */
+async function processDM(item){
+  const { msg, text, chatJid, senderJid, pushName, phone, intent, lang } = item;
+  const langName = LANG_NAMES[lang] || 'English';
+  if (containsForbidden(text)) return;
+
+  if (intent && intent.type === 'music'){
+    try {
+      const r = await scraperMusic(intent.query);
+      if (!r.ok){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow', 'dmreply', true); return; }
+      await sendBuffer(chatJid, { text:'Found '+r.title+'. Sending...' }, 2, 'slow', 'dmreply', true);
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind:'audio', mimetype:r.mimetype, caption:r.title,
+        priority:2, lane:'slow', taskType:'dmreply', typing:true
+      });
+    } catch(e){ await sendBuffer(chatJid, { text:'Err: '+e.message }, 2, 'slow', 'dmreply', true); }
+    return;
+  }
+
+  if (detectNsfw(text) && nsfwRoleplayEnabled){
+    if (isNsfwWindow() || isAdminSender(msg, senderJid)){
+      const rp = await nsfwRoleplay(pushName, text);
+      if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow', 'dmreply', true); resetDailyStats(); dailyStats.dmsReplied++; }
+      return;
+    } else {
+      await sendBuffer(chatJid, { text: 'Not right now, try after 9pm' }, 2, 'slow', 'dmreply', true);
+      return;
+    }
+  }
+
+  if (detectGroupLinkRequest(text)){
+    await sendBuffer(chatJid, { text:'Join our group:\n'+ADMIN_GROUP_LINK }, 2, 'slow', 'dmreply', true);
+    resetDailyStats(); dailyStats.dmsReplied++;
+    return;
+  }
+
+  if (intent && intent.type !== 'music'){
+    if (!isVague(intent.query)){
+      if (intent.type === 'video' || intent.type === 'gif'){
+        const r = await scraperGif(intent.query, false);
+        if (r.ok && r.gifs.length){
+          await sendGifSafe(chatJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
+          resetDailyStats();
+          if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
+          return;
+        }
+      } else {
+        const r = await scraperSearch(intent.query, false);
+        if (r.ok && r.images.length){
+          await sendImageSafe(chatJid, r.images[0], '', 2, 'slow', 'dmreply', true);
+          resetDailyStats(); dailyStats.picsSent++;
+          return;
+        }
+      }
+    }
+    const history = userHistories.get(senderJid) || [];
+    createPendingRequest(senderJid, pushName, phone, history, intent);
+    await sendBuffer(chatJid, { text: 'checking...' }, 2, 'slow', 'dmreply', true);
+    return;
+  }
+
+  const hist = userHistories.get(senderJid) || [];
+  const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
+  const transcript = recentTurns.map(h => (h.role === 'bot' ? 'Abby' : 'Them') + ': ' + h.text).join('\n');
+  const fullPrompt = transcript
+    ? 'Conversation so far:\n' + transcript + '\n\nThem: ' + text + '\n\nReply as Abby. This is a NEW reply.'
+    : text;
+
+  const sys = 'You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ' + langName + '. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you are an AI. Be casual, playful.';
+  let aiReply = await askAI(fullPrompt, sys);
+  if (!aiReply) return;
+
+  const lastBot = hist.filter(h => h.role === 'bot').slice(-1)[0];
+  if (lastBot && lastBot.text.toLowerCase().trim() === aiReply.toLowerCase().trim()){
+    const retry = await askAI('You already said: "'+lastBot.text+'". Say something COMPLETELY DIFFERENT.', sys);
+    if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()) aiReply = retry;
+    else return;
+  }
+
+  hist.push({ role:'user', text, ts:Date.now() });
+  hist.push({ role:'bot',  text:aiReply, ts:Date.now() });
+  while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
+  userHistories.set(senderJid, hist);
+
+  await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow', 'dmreply', true);
+  resetDailyStats(); dailyStats.dmsReplied++;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  PENDING REQUESTS
+ * ══════════════════════════════════════════════════════════════ */
 function createPendingRequest(userJid, userName, userPhone, history, intent){
   const id = Math.random().toString(36).slice(2,8);
   pendingRequests.set(id, { id, userJid, userName, userPhone,
@@ -1579,6 +1728,10 @@ async function resolvePending(id, action, payload, adminChatJid){
       const r = await scraperGif(query);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendGifSafe(p.userJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
+    } else if (p.intent.type === 'music'){
+      const r = await scraperMusic(query);
+      if (!r.ok){ adminReply(adminChatJid, 'Music failed.'); return { ok:false }; }
+      await sendMediaUrl(p.userJid, r.mediaUrl, { kind:'audio', mimetype:r.mimetype, caption:r.title, priority:2, lane:'slow', taskType:'dmreply', typing:true });
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
@@ -1588,42 +1741,6 @@ async function resolvePending(id, action, payload, adminChatJid){
     adminReply(adminChatJid, `Sent to ${p.userName}.`);
     return { ok:true };
   } catch(e){ adminReply(adminChatJid, `Err: ${e.message}`); return { ok:false, error:e.message }; }
-}
-
-/* Download flow */
-async function startDownloadSearch(chatJid, query, priority=1, lane='slow'){
-  const results = await ytSearch(query, 6);
-  if (!results.length){
-    await sendBuffer(chatJid, { text: `Could not find "${query}"` }, priority, lane, 'admin', false);
-    return;
-  }
-  downloadPicks.set(chatJid, { query, results, ts:Date.now() });
-  const list = results.map((r,i)=>`${i+1}. ${r.title}`).join('\n');
-  await sendBuffer(chatJid, { text: `Found ${results.length} for *${query}*:\n\n${list}\n\nReply with a number (1-${results.length}) or "1,2,3" for multiple.` }, priority, lane, 'admin', false);
-}
-async function handleDownloadPick(chatJid, text, priority=1, lane='slow'){
-  const entry = downloadPicks.get(chatJid);
-  if (!entry) return false;
-  if (Date.now() - entry.ts > DOWNLOAD_PICK_TTL){ downloadPicks.delete(chatJid); return false; }
-  const nums = (text.match(/\d+/g)||[]).map(n=>parseInt(n,10)).filter(n=>n>=1 && n<=entry.results.length);
-  if (!nums.length) return false;
-  const picks = [...new Set(nums)].slice(0, DOWNLOAD_MAX_PICKS);
-  downloadPicks.delete(chatJid);
-  await sendBuffer(chatJid, { text: `Downloading ${picks.length} video(s)...` }, priority, lane, 'admin', false);
-  for (const n of picks){
-    const r = entry.results[n-1];
-    if (!r) continue;
-    try {
-      await sendBuffer(chatJid, { text: `Playing ${r.title}` }, priority, lane, 'admin', false);
-      const { filePath, quality, sizeBytes } = await y2mateDownload(r.id, '360p');
-      await sendMediaFile(chatJid, filePath, `${r.title}\n(${quality}, ${(sizeBytes/1024/1024).toFixed(1)}MB)`, priority, lane, 'admin', false);
-      resetDailyStats(); dailyStats.downloads++;
-    } catch(e){
-      await sendBuffer(chatJid, { text: `${r.title}: ${e.message}` }, priority, lane, 'admin', false);
-      pushLog('error','download',e.message);
-    }
-  }
-  return true;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1643,7 +1760,7 @@ const replyCache = new NodeCache({ stdTTL:600 });
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v64 — Admin
+const COMMAND_LIST = `BreadBot v65 — Admin
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -1669,21 +1786,20 @@ GROUP MANAGEMENT (main group only)
 !promote / !demote / !kick @user
 !tagall / !mute / !unmute / !lock / !unlock
 
-MEDIA
+MEDIA (via intelligent scrapper)
 !pic <q> / !nextpic / !bcastpic <cap>
 !gif <q> / !nextgif / !bcastgif <cap>
 !allimg <url> | <cap>
 
-DOWNLOADS
+DOWNLOADS (via intelligent scrapper)
 !dl <q> / !download <url> / !music <q>
-!nsfwvideo <q> / !nsfw <url> / !nsfwroleplay on|off / !cleanup
+!nsfwvideo <q> / !nsfw <url> / !nsfwroleplay on|off
 
 CONTROL
 !pause / !resume / !offline <mins> / !online
 !limit <n> / !unlimit
 
-AI: Rewind only. Typing: ON. Reads: ON. Blocklist: OFF.
-Main group: ${mainGroupJid || 'NOT SET — use !setmain'}`;
+AI: Rewind only. Typing: ON. Reads: ON. Blocklist: OFF.`;
 
 function logRepeatedCmd(cmd, chatJid){
   const now = Date.now();
@@ -1775,7 +1891,7 @@ async function handleAdminCommand(text, chatJid, msg){
 
     case 'jobs': {
       const s = jobs.stats();
-      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}\nAdmin active: ${isAdminActive() ? 'YES' : 'no'}`);
+      await reply(`Fast ${s.fast.queued}/${s.fast.max} done ${s.fast.done}\nSlow ${s.slow.queued}/${s.slow.max} done ${s.slow.done}\nAdmin active: ${isAdminActive() ? 'YES' : 'no'}\nDM pool: ${dmPool.size}`);
       break;
     }
     case 'flow': {
@@ -1795,6 +1911,7 @@ async function handleAdminCommand(text, chatJid, msg){
         `Main group: ${mainGroupJid||'NOT SET'}`,
         `Admin active: ${isAdminActive() ? 'YES' : 'no'}`,
         `Bot LID: ${botLid||'unknown'}`,
+        `DM pool: ${dmPool.size} · cycle every ${DM_CYCLE_MS/1000}s`,
         `Typing: ${ENABLE_TYPING?'ON':'OFF'} · Reads: ${ENABLE_READ_RECEIPTS?'ON':'OFF'}`
       ].join('\n'));
       break;
@@ -1814,20 +1931,21 @@ async function handleAdminCommand(text, chatJid, msg){
         'Uptime: '+Math.floor((Date.now()-botStartTime)/1000)+'s',
         'Time: '+describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm(),
         'Paused: '+botPaused+' Offline: '+(botOfflineUntil>Date.now()?'yes':'no'),
-        '','Groups: '+joinedGroups.size+' DMs: '+activeDMs.size,
+        '','Groups: '+joinedGroups.size+' DMs: '+activeDMs.size+' Pool: '+dmPool.size,
         'Main: '+(mainGroupJid||'NOT SET'),'Queue: '+joinQueue.length+'/'+JOIN_QUEUE_MAX,
         'Fast: '+s.fast.queued+' Slow: '+s.slow.queued,
         'Focus: '+f.currentState,
         'AI: '+(activeProvider||'NONE'),
         'Admin active: '+(isAdminActive()?'YES':'no'),
         '','Today','DM: '+st.dmsReplied+' Media: '+(st.picsSent+st.videosSent),
+        'Scraper: '+(st.scraperSearches+st.scraperGifs+st.scraperDownloads+st.scraperMusic+st.scraperVideos),
         'Reads: '+st.readsSent+' Typings: '+st.typingsSent,
         'Broadcasts: '+st.broadcastsSent+' Deletes: '+st.deletesDone,
         '','Admin LIDs: '+([...adminLids].join(', ')||'none')
       ].join('\n'));
       break;
     }
-    case 'count': await reply('Groups: '+joinedGroups.size+'\nDMs: '+activeDMs.size+'\nQueue: '+joinQueue.length+'\nPending: '+pendingRequests.size+'\nMain: '+(mainGroupJid||'NOT SET')+'\nAI: '+(activeProvider||'NONE')); break;
+    case 'count': await reply('Groups: '+joinedGroups.size+'\nDMs: '+activeDMs.size+'\nPool: '+dmPool.size+'\nQueue: '+joinQueue.length+'\nPending: '+pendingRequests.size+'\nMain: '+(mainGroupJid||'NOT SET')+'\nAI: '+(activeProvider||'NONE')); break;
     case 'groups': {
       if (!joinedGroups.size){ await reply('No groups.'); return; }
       const list = [...joinedGroups.entries()].map(function(kv,i){return (i+1)+'. '+(kv[0]===mainGroupJid?'⭐ ':'')+kv[0];}).join('\n');
@@ -1835,9 +1953,11 @@ async function handleAdminCommand(text, chatJid, msg){
       break;
     }
     case 'inbox': case 'dms': {
-      if (!activeDMs.size){ await reply('No DMs.'); return; }
-      const list = [...activeDMs].map(function(j,i){return (i+1)+'. '+j.split('@')[0];}).join('\n');
-      await reply('DMs ('+activeDMs.size+')\n'+list);
+      if (!dmPool.size && !activeDMs.size){ await reply('No DMs.'); return; }
+      const entries = [...dmPool.entries()].slice(0, 30).map(([jid, e], i) =>
+        `${i+1}. ${jid.split('@')[0]} — ${e.replied ? '✓ replied' : '⏳ pending'}`
+      );
+      await reply('DM pool ('+dmPool.size+')\n'+entries.join('\n'));
       break;
     }
     case 'mylink': await adminReply(chatJid, 'Join my group:\n'+ADMIN_GROUP_LINK); break;
@@ -1995,40 +2115,46 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'unmute': { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'not_announcement'); await reply('Unmuted.'); } catch(e){ await reply('Err: '+e.message); } break; }
     case 'lock':   { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'locked'); await reply('Locked.'); } catch(e){ await reply('Err: '+e.message); } break; }
     case 'unlock': { if (chatJid !== mainGroupJid){ await reply('Only in main group.'); break; } if (!await botIsAdminIn(chatJid)){ await reply('Not admin here.'); break; } try { await sock.groupSettingUpdate(chatJid,'unlocked'); await reply('Unlocked.'); } catch(e){ await reply('Err: '+e.message); } break; }
+
     case 'dl': {
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('Usage: !dl <song or video>'); return; }
-      await startDownloadSearch(chatJid, q, 0, 'fast');
+      await reply('Searching "'+q+'" via scrapper...');
+      let r = await scraperMusic(q);
+      if (!r.ok) r = await scraperVideo(q);
+      if (!r.ok){ await reply('Err: '+r.error); return; }
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind: r.mimetype?.startsWith('audio/') ? 'audio' : 'video',
+        mimetype: r.mimetype, caption: r.title,
+        priority: 0, lane: 'fast', taskType: 'admin', typing: false
+      });
+      await reply('Sent.');
       break;
     }
     case 'download': {
       const url = args[1];
       if (!url){ await reply('Usage: !download <url>'); return; }
-      await reply('Resolving...');
-      try {
-        const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
-        if (!vid){ await reply('Bad URL.'); return; }
-        const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '360p');
-        await sendMediaFile(chatJid, filePath, '('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin', false);
-        resetDailyStats(); dailyStats.downloads++;
-        await reply('Sent.');
-      } catch(e){ await reply('Err: '+e.message); }
+      await reply('Resolving via scrapper...');
+      const r = await scraperDownloadMedia(url, 'auto');
+      if (!r.ok){ await reply('Err: '+r.error); return; }
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind: r.kind, mimetype: r.mimetype, caption: r.title,
+        priority: 0, lane: 'fast', taskType: 'admin', typing: false
+      });
+      await reply('Sent.');
       break;
     }
     case 'music': {
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('Usage: !music <song>'); return; }
-      await reply('Searching "'+q+'"...');
-      try {
-        const results = await ytSearch(q + ' audio', 3);
-        if (!results.length){ await reply('None.'); return; }
-        const top = results[0];
-        await reply(top.title+' - downloading...');
-        const { filePath, sizeBytes } = await y2mateDownloadMusic(top.id, 'mp3');
-        await sendMediaFile(chatJid, filePath, top.title+'\n('+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin', false);
-        resetDailyStats(); dailyStats.downloads++;
-        await reply('Sent.');
-      } catch(e){ await reply('Err: '+e.message); }
+      await reply('Searching "'+q+'" via scrapper...');
+      const r = await scraperMusic(q);
+      if (!r.ok){ await reply('Err: '+r.error); return; }
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind: 'audio', mimetype: r.mimetype, caption: r.title,
+        priority: 0, lane: 'fast', taskType: 'admin', typing: false
+      });
+      await reply('Sent.');
       break;
     }
     case 'nsfwvideo': {
@@ -2044,14 +2170,14 @@ async function handleAdminCommand(text, chatJid, msg){
       if (args[1] === 'off'){ await reply('off.'); break; }
       const url = args[1];
       if (!url){ await reply('Usage: !nsfw <url> or !nsfwvideo <query>'); return; }
-      try {
-        const vid = (url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)||[])[1];
-        if (!vid){ await reply('Bad URL.'); return; }
-        const { filePath, quality, sizeBytes } = await y2mateDownload(vid, '720p');
-        await sendMediaFile(chatJid, filePath, 'NSFW ('+quality+', '+(sizeBytes/1024/1024).toFixed(1)+'MB)', 0, 'fast', 'admin', false);
-        resetDailyStats(); dailyStats.nsfwDownloads++;
-        await reply('Sent.');
-      } catch(e){ await reply('Err: '+e.message); }
+      const r = await scraperDownloadMedia(url, 'video');
+      if (!r.ok){ await reply('Err: '+r.error); return; }
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind: 'video', mimetype: r.mimetype || 'video/mp4', caption: 'NSFW',
+        priority: 0, lane: 'fast', taskType: 'admin', typing: false
+      });
+      resetDailyStats(); dailyStats.nsfwDownloads++;
+      await reply('Sent.');
       break;
     }
     case 'nsfwroleplay': {
@@ -2060,14 +2186,7 @@ async function handleAdminCommand(text, chatJid, msg){
       await reply('Usage: !nsfwroleplay on|off');
       break;
     }
-    case 'cleanup': {
-      try {
-        const files = fs.readdirSync(DOWNLOAD_DIR);
-        for (const f of files){ try{ fs.unlinkSync(path.join(DOWNLOAD_DIR,f)); }catch(e){} }
-        await reply('Cleared '+files.length+'.');
-      } catch(e){ await reply('Err: '+e.message); }
-      break;
-    }
+
     case 'logs': {
       const recent = logBuffer.slice(-30).map(e=>'['+e.level+'] '+e.source+': '+e.message).join('\n');
       await reply('Logs (30)\n\n'+recent.slice(0,3500));
@@ -2108,7 +2227,7 @@ async function handleAdminCommand(text, chatJid, msg){
     }
     case 'test': {
       const s = jobs.stats();
-      await reply('Bot: '+botNumber+'\nBot LID: '+(botLid||'-')+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nMain: '+(mainGroupJid||'NOT SET')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued);
+      await reply('Bot: '+botNumber+'\nBot LID: '+(botLid||'-')+'\nStatus: '+connectionStatus+'\nAI: '+(activeProvider||'NONE')+'\nMain: '+(mainGroupJid||'NOT SET')+'\nFast: '+s.fast.queued+'\nSlow: '+s.slow.queued+'\nDM pool: '+dmPool.size);
       break;
     }
     case 'testall': {
@@ -2123,13 +2242,13 @@ async function handleAdminCommand(text, chatJid, msg){
       tests.push('Bot LID: '+(botLid||'unknown'));
       tests.push('NSFW DL: '+(RedgifsDownloader?'OK':'FAIL'));
       tests.push('Reply rate: '+(replyRate()*100).toFixed(0)+'%');
-      tests.push('Groups: '+joinedGroups.size+' DMs: '+activeDMs.size);
+      tests.push('Groups: '+joinedGroups.size+' DMs: '+activeDMs.size+' Pool: '+dmPool.size);
       await reply('Tests\n\n'+tests.join('\n'));
       break;
     }
     case 'stats': case 'summary': {
       resetDailyStats(); const s = dailyStats;
-      await reply('Today\nJoined: '+s.joined+'\nDM: '+s.dmsReplied+'\nMedia: '+(s.picsSent+s.videosSent)+'\nNSFW: '+s.nsfwSent+'\nDownloads: '+s.downloads+'\nBroadcasts: '+s.broadcastsSent+'\nDeletes: '+s.deletesDone+'\nReads: '+s.readsSent+'\nTypings: '+s.typingsSent+'\nAI: '+(activeProvider||'NONE'));
+      await reply('Today\nJoined: '+s.joined+'\nDM: '+s.dmsReplied+'\nMedia: '+(s.picsSent+s.videosSent)+'\nNSFW: '+s.nsfwSent+'\nScraper calls: '+(s.scraperSearches+s.scraperGifs+s.scraperDownloads+s.scraperMusic+s.scraperVideos)+'\nBroadcasts: '+s.broadcastsSent+'\nDeletes: '+s.deletesDone+'\nReads: '+s.readsSent+'\nTypings: '+s.typingsSent+'\nAI: '+(activeProvider||'NONE'));
       break;
     }
     case 'whoami': {
@@ -2161,125 +2280,11 @@ function checkFlood(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  DM PROCESSING
- * ══════════════════════════════════════════════════════════════ */
-async function processDM(item){
-  const { msg, text, chatJid, senderJid, pushName, phone, intent, lang } = item;
-  const langName = LANG_NAMES[lang] || 'English';
-  if (containsForbidden(text)) return;
-
-  if (intent && intent.type === 'music'){
-    try {
-      const results = await ytSearch(intent.query + ' audio', 3);
-      if (!results.length){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow', 'dmreply', true); return; }
-      const top = results[0];
-      await sendBuffer(chatJid, { text:'Found '+top.title+'. Downloading...' }, 2, 'slow', 'dmreply', true);
-      const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
-      await sendMediaFile(chatJid, filePath, top.title, 2, 'slow', 'dmreply', true);
-      resetDailyStats(); dailyStats.downloads++;
-    } catch(e){ await sendBuffer(chatJid, { text:'Err: '+e.message }, 2, 'slow', 'dmreply', true); }
-    return;
-  }
-
-  if (detectNsfw(text) && nsfwRoleplayEnabled){
-    if (isNsfwWindow() || isAdminSender(msg, senderJid)){
-      const rp = await nsfwRoleplay(pushName, text);
-      if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow', 'dmreply', true); resetDailyStats(); dailyStats.dmsReplied++; }
-      return;
-    } else {
-      await sendBuffer(chatJid, { text: 'Not right now, try after 9pm' }, 2, 'slow', 'dmreply', true);
-      return;
-    }
-  }
-
-  if (detectGroupLinkRequest(text)){
-    await sendBuffer(chatJid, { text:'Join our group:\n'+ADMIN_GROUP_LINK }, 2, 'slow', 'dmreply', true);
-    resetDailyStats(); dailyStats.dmsReplied++;
-    return;
-  }
-
-  if (intent && intent.type !== 'music'){
-    if (!isVague(intent.query)){
-      if (intent.type === 'video' || intent.type === 'gif'){
-        const r = await scraperGif(intent.query, false);
-        if (r.ok && r.gifs.length){
-          await sendGifSafe(chatJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
-          resetDailyStats();
-          if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
-          return;
-        }
-      } else {
-        const r = await scraperSearch(intent.query, false);
-        if (r.ok && r.images.length){
-          await sendImageSafe(chatJid, r.images[0], '', 2, 'slow', 'dmreply', true);
-          resetDailyStats(); dailyStats.picsSent++;
-          return;
-        }
-      }
-    }
-    const history = userHistories.get(senderJid) || [];
-    const id = createPendingRequest(senderJid, pushName, phone, history, intent);
-    await sendBuffer(chatJid, { text: 'checking...' }, 2, 'slow', 'dmreply', true);
-    return;
-  }
-
-  const hist = userHistories.get(senderJid) || [];
-  const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
-  const transcript = recentTurns.map(h => (h.role === 'bot' ? 'Abby' : 'Them') + ': ' + h.text).join('\n');
-  const fullPrompt = transcript
-    ? 'Conversation so far:\n' + transcript + '\n\nThem: ' + text + '\n\nReply as Abby. This is a NEW reply.'
-    : text;
-
-  const sys = 'You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ' + langName + '. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you are an AI. Be casual, playful.';
-  let aiReply = await askAI(fullPrompt, sys);
-  if (!aiReply) return;
-
-  const lastBot = hist.filter(h => h.role === 'bot').slice(-1)[0];
-  if (lastBot && lastBot.text.toLowerCase().trim() === aiReply.toLowerCase().trim()){
-    const retry = await askAI('You already said: "'+lastBot.text+'". Say something COMPLETELY DIFFERENT.', sys);
-    if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()) aiReply = retry;
-    else return;
-  }
-
-  hist.push({ role:'user', text, ts:Date.now() });
-  hist.push({ role:'bot',  text:aiReply, ts:Date.now() });
-  while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
-  userHistories.set(senderJid, hist);
-
-  await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow', 'dmreply', true);
-  resetDailyStats(); dailyStats.dmsReplied++; dailyStats.focusRuns++;
-}
-async function processDMQueue(){
-  if (dmQueueProcessing) return;
-  if (focus.busy){ setTimeout(processDMQueue, 2000); return; }
-  const item = dmQueue.shift();
-  if (!item) return;
-  dmQueueProcessing = true;
-  try { await focus.run(item.chatJid, async ()=>{ await processDM(item); }); }
-  catch(e){
-    pushLog('error','dmqueue',e.message);
-    if (e.message === 'Focus lock timeout') dmQueue.unshift(item);
-  } finally {
-    dmQueueProcessing = false;
-    if (dmQueue.length) setTimeout(processDMQueue, 100);
-  }
-}
-function enqueueDM(item){
-  if (dmQueue.length >= DM_QUEUE_MAX){
-    resetDailyStats(); dailyStats.messagesDropped++;
-    pushLog('warn','queue','DM queue full ('+DM_QUEUE_MAX+')');
-    return false;
-  }
-  dmQueue.push(item); processDMQueue(); return true;
-}
-
-/* ══════════════════════════════════════════════════════════════
  *  MAIN MESSAGE HANDLER
  * ══════════════════════════════════════════════════════════════ */
 async function handleMessage(msg){
   if (!sock) return;
 
-  /* ═══ Refresh bot LID if still unknown ═══ */
   if (!botLid){
     const fresh = getSelfLid();
     if (fresh){
@@ -2304,7 +2309,6 @@ async function handleMessage(msg){
   }
   if (botSentIds.has(msgId)) return;
 
-  /* ═══ FILTER 1: Protocol frames ═══ */
   const rawMsg = msg.message;
   if (!rawMsg) return;
   if (rawMsg.protocolMessage) return;
@@ -2333,7 +2337,6 @@ async function handleMessage(msg){
                 || m?.contactMessage || m?.locationMessage);
   if (!hasText) return;
 
-  /* ═══ FILTER 2: fromMe echoes ═══ */
   if (msg.key.fromMe) return;
 
   const text = m?.conversation || m?.extendedTextMessage?.text
@@ -2385,9 +2388,20 @@ async function handleMessage(msg){
     return;
   }
 
+  /* ═══ AUTO-JOIN — extract invite codes from ANY message ═══ */
+  if (text){
+    const codes = extractInviteCodes(text);
+    if (codes.length){
+      let added = 0;
+      for (const c of codes){ if (queueJoin(c, phone||pushName, chatType)) added++; }
+      if (added && !isGroup){
+        try { await sendBuffer(chatJid, { text:`Queued ${added}. Total ${joinQueue.length}/${JOIN_QUEUE_MAX}` }, 3, 'slow', 'admin', false); } catch(e){}
+      }
+    }
+  }
+
   /* ═══ NO MAIN GROUP → IGNORE ALL GROUPS ═══ */
   if (isGroup && !mainGroupJid) return;
-
   /* ═══ NOT MAIN GROUP → IGNORE ═══ */
   if (isGroup && chatJid !== mainGroupJid) return;
 
@@ -2417,29 +2431,10 @@ async function handleMessage(msg){
     }
   }
 
+  /* ═══ DM path — pool for the batch AI cycle (FIX: no history push) ═══ */
   if (!isGroup && !isAdmin && text){
-    if (!userHistories.has(senderJid)) userHistories.set(senderJid, []);
-    const h = userHistories.get(senderJid);
-    const last = h[h.length-1];
-    if (!last || last.text !== text || last.role !== 'user') h.push({ role:'user', text, ts:Date.now() });
-    if (h.length > USER_HISTORY_SIZE * 2) h.shift();
-  }
-
-  const codes = extractInviteCodes(text);
-  if (codes.length){
-    let added = 0;
-    for (const c of codes){ if (queueJoin(c, phone||pushName, chatType)) added++; }
-    if (added && !isGroup) await sendBuffer(chatJid, { text:`Queued ${added}. Total ${joinQueue.length}/${JOIN_QUEUE_MAX}` }, 3, 'slow', 'admin', false);
-  }
-
-  if (text && downloadPicks.has(chatJid)){
-    const ok = await handleDownloadPick(chatJid, text, isAdmin?0:2, isAdmin?'fast':'slow');
-    if (ok) return;
-  }
-
-  const dl = text ? detectDownloadIntent(text) : null;
-  if (dl && dl.query){
-    await startDownloadSearch(chatJid, dl.query, isAdmin?0:2, isAdmin?'fast':'slow');
+    poolDm(senderJid, msg, text, pushName, phone);
+    pushLog('info','dm',`Pooled DM from ${pushName} (pool=${dmPool.size})`);
     return;
   }
 
@@ -2455,13 +2450,13 @@ async function handleMessage(msg){
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
           try {
-            const results = await ytSearch(gIntent.query + ' audio', 3);
-            if (results.length){
-              const top = results[0];
-              await sendBuffer(chatJid, { text:top.title+' - downloading...' }, 3, 'slow', 'group', true);
-              const { filePath } = await y2mateDownloadMusic(top.id, 'mp3');
-              await sendMediaFile(chatJid, filePath, top.title, 3, 'slow', 'group', true);
-              resetDailyStats(); dailyStats.downloads++;
+            const r = await scraperMusic(gIntent.query);
+            if (r.ok){
+              await sendBuffer(chatJid, { text:r.title+' - sending...' }, 3, 'slow', 'group', true);
+              await sendMediaUrl(chatJid, r.mediaUrl, {
+                kind:'audio', mimetype:r.mimetype, caption:r.title,
+                priority:3, lane:'slow', taskType:'group', typing:true
+              });
               return;
             }
           } catch(e){ pushLog('error','music',e.message); }
@@ -2494,11 +2489,6 @@ async function handleMessage(msg){
     }
     return;
   }
-
-  if (isAdmin) return;
-  if (!isDmAiWindow()) return;
-  enqueueDM({ msg, text, chatJid, senderJid, pushName, phone,
-    intent: detectMediaIntent(text), lang: detectLanguage(text) });
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2561,15 +2551,18 @@ async function connectBot(){
         if (botLid) pushLog('info','bot','Bot LID: '+botLid);
         else pushLog('info','bot','Bot LID: unknown — will learn on first message');
         pushLog('info','time',describeWindow()+' NSFW: '+describeNsfw()+' DM: '+describeDm());
-        pushLog('info','main',`Main group: ${mainGroupJid || 'NOT SET — use !setmain'}`);
 
         try { await sock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
         try { await sock.updateLastSeenPrivacy('none'); } catch(e){}
         pushLog('info','privacy','hidden');
-
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
 
-        if (mainGroupJid) setTimeout(() => { probeMainGroup().catch(()=>{}); }, 8000);
+        autoSetMainGroup()
+          .then(() => {
+            pushLog('info','main',`Main group now: ${mainGroupJid || 'NOT SET'}`);
+            if (mainGroupJid) setTimeout(() => { probeMainGroup().catch(()=>{}); }, 8000);
+          })
+          .catch(e => pushLog('error','main','auto-set: '+e.message));
 
         detectAIBackend().catch(e => pushLog('error','ai','detect: '+e.message));
 
@@ -2586,16 +2579,16 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v64 ONLINE\n' +
+            'BreadBot v65 ONLINE\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
-            'Main group: ' + (mainGroupJid || 'NOT SET — send !setmain <link>') + '\n' +
+            'Main group: ' + (mainGroupJid || 'auto-resolving from ADMIN_GROUP_LINK...') + '\n' +
             'Groups: ' + joinedGroups.size + '\n' +
             'Account age: ' + getAccountAgeDays() + 'd\n' +
             'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n\n' +
             'Admin commands accepted in DM and main group only.\n' +
-            'Other groups are ignored.'
+            'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin','DM: '+e.message); }
@@ -2609,7 +2602,25 @@ async function connectBot(){
         if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
         if (code === 403){ connectionStatus = 'disconnected'; pushLog('error','bot','403 Forbidden — likely banned'); return; }
         if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired'); return; }
-        if (code === 428 || code === 440){ connectionStatus = 'disconnected'; pushLog('error','bot','Conflict '+code); return; }
+
+        if (code === 428 || code === 440){
+          connectionStatus = 'reconnecting';
+          reconnectAttempts++;
+          if (reconnectAttempts > 3){
+            pushLog('error','bot',`Conflict ${code} — wiping auth_info for fresh session`);
+            try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){}
+            reconnectAttempts = 0;
+          } else {
+            pushLog('warn','bot',`Conflict ${code} — reconnect ${reconnectAttempts}/3`);
+          }
+          try { sock.ev.removeAllListeners('connection.update'); } catch(e){}
+          try { sock.ev.removeAllListeners('creds.update'); } catch(e){}
+          try { sock.end(undefined); } catch(e){}
+          sock = null;
+          const delay = Math.min(3000 * reconnectAttempts, 15000);
+          setTimeout(() => connectBot(), delay);
+          return;
+        }
 
         if (code === DisconnectReason.restartRequired || code === 515){
           if (restart515InFlight){ pushLog('warn','bot','515 in flight — skip'); return; }
@@ -2688,7 +2699,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v64</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v65</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -2708,7 +2719,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v64</h1>
+<h1>BreadBot v65</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — bot ignores all group messages. Send <b>!setmain &lt;link&gt;</b> from DM.</div>
 <div class="sub">Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b></div>
 <div class="grid">
@@ -2749,6 +2760,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="card"><h2>Scope</h2>
 <div class="row"><span>Groups</span><span class="val" id="g">-</span></div>
 <div class="row"><span>DMs</span><span class="val" id="d">-</span></div>
+<div class="row"><span>DM pool</span><span class="val" id="dmp">-</span></div>
 <div class="row"><span>Join queue</span><span class="val" id="jq">-</span></div>
 <div class="row"><span>Pending</span><span class="val" id="pd">-</span></div>
 </div>
@@ -2794,6 +2806,7 @@ var L=d.lanes||{fast:{},slow:{}};
 $('fq').textContent=L.fast.queued||0;$('fd').textContent=L.fast.done||0;
 $('sq').textContent=L.slow.queued||0;$('sd').textContent=L.slow.done||0;
 $('g').textContent=d.joinedGroups||0;$('d').textContent=d.dmCount||0;
+$('dmp').textContent=d.dmPoolSize||0;
 $('jq').textContent=d.queueSize||0;$('pd').textContent=d.pendingCount||0;
 var t=d.dailyStats||{};$('dms').textContent=t.dmsReplied||0;
 $('reads').textContent=t.readsSent||0;$('typs').textContent=t.typingsSent||0;
@@ -2832,6 +2845,7 @@ app.get('/health', function(req,res){ res.json({
   mainGroup: mainGroupJid,
   botNumber, botLid,
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
+  dmPool: dmPool.size,
   ai: { active: activeProvider, providers: providerReport },
   consecutive515
 }); });
@@ -2893,6 +2907,7 @@ app.get('/admin/flow', function(req,res){
     deletes: { min: deleteHist.min.length, hour: deleteHist.hour.length, day: deleteHist.day.length },
     fibIdx: { ...fibIdx },
     mainGroupLids: recentGroupLids.size,
+    dmPoolSize: dmPool.size,
     botLid
   });
 });
@@ -2904,11 +2919,11 @@ app.get('/admin/stats', function(req,res){
     uptime: Math.floor((Date.now()-botStartTime)/1000),
     dmCount: activeDMs.size, groupCount: joinedGroups.size,
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
+    dmPoolSize: dmPool.size,
     dailyStats, adminPhone: ADMIN_PHONE, adminLids: [...adminLids],
     pendingCount: pendingRequests.size,
     lanes: jobs.stats(), focus: focus.stats(),
     window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
-    dmQueueLength: dmQueue.length, dmQueueMax: DM_QUEUE_MAX,
     paused: botPaused,
     adminActive: isAdminActive(),
     mainGroup: mainGroupJid,
@@ -2933,10 +2948,6 @@ app.get('/admin/stats', function(req,res){
 setInterval(function(){ axios.get('http://localhost:'+PORT+'/health').catch(function(){}); }, 240000);
 setInterval(function(){
   const now = Date.now();
-  for (const [k,v] of downloadPicks){ if (now - v.ts > DOWNLOAD_PICK_TTL) downloadPicks.delete(k); }
-}, 60000);
-setInterval(function(){
-  const now = Date.now();
   for (const [k, t] of antilinkWarnCooldown){ if (now - t > 10 * 60 * 1000) antilinkWarnCooldown.delete(k); }
 }, 120000);
 setInterval(prunePolicyMaps, 60 * 60 * 1000);
@@ -2953,30 +2964,30 @@ loadPolicy();
 app.listen(PORT, async function(){
   console.log('Port '+PORT);
   console.log('Admin: '+ADMIN_PHONE);
-  console.log('Main group: '+(mainGroupJid||'NOT SET'));
+  console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
   console.log('AI: Rewind only');
   console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?'ON':'OFF'));
   console.log('Admin active window: '+ADMIN_ACTIVE_MS/1000+'s');
   console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
   console.log('LID-aware admin detection: ENABLED');
+  console.log('DM AI: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' random DMs every '+(DM_CYCLE_MS/1000)+'s');
+  console.log('Scrapper: '+SCRAPER_URL);
 
   pushLog('info','system','Boot port '+PORT);
   pushLog('info','system','Admin: '+ADMIN_PHONE);
-  pushLog('info','system','Main: '+(mainGroupJid||'NOT SET — use !setmain'));
+  pushLog('info','system','Main: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
   pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
   pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
   pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
+  pushLog('info','env','SCRAPER='+SCRAPER_URL);
   pushLog('info','admin','LID-aware detection enabled');
-
-  findWorkingY2MateHost().then(h => {
-    if (h) pushLog('success','yt','y2mate host: '+h);
-    else pushLog('error','yt','no y2mate host');
-  });
+  pushLog('info','ai','DM batch: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' per '+(DM_CYCLE_MS/1000)+'s');
 
   scheduleGreetings();
   scheduleDailyReport();
   scheduleGroupJoins();
   scheduleHumanPresence();
+  startDmAiCycle();
 
   connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
 });

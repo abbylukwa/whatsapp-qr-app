@@ -1,17 +1,23 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "60.0.0",
-  "description": "WhatsApp bot",
+  "version": "68.0.0",
+  "description": "BreadBot v68 — dual-account (groups + school), admin-locked school line, doc brain (PDF/DOCX), study buddy, PDF creation, tap buttons, load-tested",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.18",
     "axios": "^1.7.0",
     "baileys-antiban": "^4.10.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "mammoth": "^1.8.0",
     "node-cache": "^5.1.2",
+    "pdf-parse": "^1.1.1",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4"
   }

@@ -1,7 +1,23 @@
 'use strict';
 
+/* ── FIX: load env vars BEFORE anything reads process.env ──────────────
+ * The repo ships an `env` file (and git log shows dotenv was added then
+ * removed). dotenv is in package.json but was never required, so all
+ * ADMIN_PHONE / API keys / PORT fell back to defaults locally.
+ * Loads .env if present, else the legacy `env` file.                    */
+(function loadEnv(){
+  try {
+    const _fs   = require('fs');
+    const _path = require('path');
+    const envPath = _fs.existsSync(_path.join(__dirname,'.env'))
+      ? _path.join(__dirname,'.env')
+      : _path.join(__dirname,'env');
+    require('dotenv').config({ path: envPath });
+  } catch(e){ console.error('dotenv load failed:', e.message); }
+})();
+
 /* ============================================================
- *  BreadBot v65 — Scrapper-delegated media + active DM AI
+ *  BreadBot v66 — Scrapper-delegated media + active DM AI
  *  - Auto-sets main group from ADMIN_GROUP_LINK on connect
  *  - DM AI: pool + random 3-4 replies per cycle (no flood)
  *  - Auto-join from ANY group's invite links
@@ -12,6 +28,87 @@
  *  - FIX: resetDailyStats no longer wipes counters on every call
  *  - FIX: daily report fires once per day
  *  - FIX: DM history no longer double-pushed
+ *
+ *  v68 CHANGES (study buddy + documents + buttons + strict school DM):
+ *  - SCHOOL ACCOUNT LOCKED TO ADMIN: it replies ONLY to the admin's DM
+ *    (commands + free-text study chat). Every other message — groups,
+ *    other people's DMs — is silently ignored (logged, never answered).
+ *  - DOCUMENT BRAIN: PDFs and Word docs received in ANY chat are read
+ *    (pdf-parse for .pdf, mammoth for .docx, plain text for .txt/.csv/.md).
+ *    Text is cached per chat and becomes AI context ("summarise this").
+ *  - ASSIGNMENTS→ADMIN ONLY: when a school doc contains deadlines, the
+ *    extracted list goes straight to the ADMIN's DM — NEVER back to any
+ *    group. Groups stay silent.
+ *  - STUDY BUDDY: "what should I study" / !study <topic> gives ordered,
+ *    specific study guidance grounded in the timetable, deadlines and
+ *    recently received documents. Morning report now starts with a
+ *    "Study first" section.
+ *  - PDF CREATION: !pdf <topic> (or "make me a pdf about ...") makes a
+ *    real study-notes PDF (pdfkit) and sends it as a document.
+ *  - NEEDED-UPDATES FILTER: school groups are monitored for the words
+ *    that matter (due, deadline, test, exam, cancelled, moved, venue...).
+ *    Only those are queued and sent to the admin — nothing else.
+ *  - BUTTONS: "menu" (or tapping buttons) shows native WhatsApp
+ *    interactive menus — Main / School / Study / Groups / Ads — with
+ *    3-layer fallback (native flow → legacy buttons → plain text) so an
+ *    answer ALWAYS arrives. Button taps route into the same admin
+ *    commands on BOTH accounts.
+ *  - TWO CONNECTIONS, HANDLED SEPARATELY: per-account counters
+ *    (accounts.groups / accounts.school) in stats; the groups socket and
+ *    the school socket run different handlers, different reply rules,
+ *    different menus — sharing only the AI, panel and log digest.
+ *
+ *  v67 CHANGES (calm engagement + throughput + dual QR + ad AI):
+ *  - LOAD-TESTED: instrumented pipeline, LOADTEST=1 stub-socket mode,
+ *    POST /loadtest/inject fires N msg/s at the real handler; /loadtest/stats
+ *    reports throughput, drops, queue peaks, event-loop lag, memory.
+ *  - CALMER: greetings now MAIN GROUP ONLY, max GREETINGS_PER_DAY (2);
+ *    welcome OFF by default (rare: 7-day per-user cooldown, 3/day cap);
+ *    goodbye OFF by default (no more "removed by admin" noise).
+ *  - QUIET INBOX: outgoing text dedup — the bot never sends the same
+ *    text to the same chat twice within OUT_DEDUP_HOURS (6h default)
+ *    unless admin forces it (!force / admin fast-lane replies bypass).
+ *  - SINGLE-TASK: global typing mutex — the bot never types in two
+ *    chats at once; extra typing is skipped, sends stay serialized.
+ *  - MAIN-GROUP LOCK + confusion guard: conversational group sends are
+ *    name-checked against the registry; if the bot catches itself
+ *    engaging 2+ non-main groups it stops and alerts the admin.
+ *  - CASUAL COMMANDS: admin DM commands no longer need "!" — natural
+ *    phrasing ("status", "broadcast ...", "weather") works; "!" kept.
+ *  - LOGS→ADMIN: warn/error events batched into a digest (default 5min)
+ *    sent to the admin chat by whichever account is connected.
+ *  - DUAL QR — ONE PROCESS: two WhatsApp accounts share one bot, one
+ *    panel, one AI. Account 1 "groups" (auth_info) = group manager.
+ *    Account 2 "school" (auth_info_school) = read-only school monitor
+ *    that ONLY talks to the admin (morning report + school commands).
+ *    New routes: /admin/qr-school, /admin/connect-school, etc.
+ *  - AD AI: !ad <product> | <details> → AI writes a luring, interactive
+ *    per-product pitch; !adsend broadcasts it (cap + rotation kept).
+ *  - PERF: flood gate default 300/s (was 20), DM-contact info cached
+ *    10min (was a network call per DM), live-log sampling under load,
+ *    capped activeChats/activeDMs maps.
+ *
+ *  v66 CHANGES (integration + requested features):
+ *  - FIX: dotenv now actually loads (.env / `env` file)
+ *  - FIX: daily report used server-UTC hours → now TZ_OFFSET_HOURS-aware
+ *  - FIX: greeting repetition (bigger pools + per-group phrase memory +
+ *         skip greeting if bot already spoke to the group recently)
+ *  - FIX: main-group probe now max once per day (was EVERY reconnect)
+ *  - AI: failover chain Rewind → Venice → Gemini → OpenAI (all .env keys)
+ *  - AI: DM replies now use the FULL pooled messages + 5-turn history
+ *  - AI: histories persisted to dm_histories.json (survive restarts)
+ *  - NEW: group registry (id, name/subject, announce-only detection,
+ *         participants) refreshed from groupFetchAllParticipating
+ *  - NEW: live panel shows group name for groups + phone/LID/common
+ *         groups/contact status for DMs
+ *  - NEW: broadcasts capped at 30 recipients per run (BROADCAST_MAX),
+ *         least-recently-sent rotation, announce-only groups skipped
+ *  - NEW: BOT_MODE=manager (default, group management) |
+ *         BOT_MODE=school (admin account: read-only monitor + morning
+ *         report with Open-Meteo weather, lectures, assignments, due dates)
+ *  - NEW: bot only replies to DMs by default (REPLY_IN_GROUPS=false)
+ *  - NEW: self-monitor (memory, stuck-connect, AI failure streaks)
+ *  - Media cap unchanged: 34MB (MEDIA_MAX_BYTES)
  * ============================================================ */
 
 const express = require('express');
@@ -20,7 +117,8 @@ const path    = require('path');
 const NodeCache = require('node-cache');
 const {
   makeWASocket, DisconnectReason, useMultiFileAuthState,
-  Browsers, fetchLatestBaileysVersion, downloadMediaMessage
+  Browsers, fetchLatestBaileysVersion, downloadMediaMessage,
+  generateWAMessageFromContent
 } = require('@whiskeysockets/baileys');
 
 let RedgifsDownloader = null;
@@ -29,6 +127,16 @@ try { RedgifsDownloader = require('redgifs-downloader'); } catch(e){}
 const QRCode = require('qrcode');
 const pino   = require('pino');
 const axios  = require('axios');
+
+/* v68: document brain — optional requires so a missing package can NEVER
+ * crash the boot. Bot still boots and answers if these fail to load.
+ * NOTE: pdf-parse must load BEFORE pdfkit would — but we do not use
+ * pdfkit at all: its xref output is rejected by pdf.js 1.10 ("bad XRef
+ * entry" — proven by round-trip test), so makePdf() below hand-rolls a
+ * spec-perfect text PDF with ZERO dependencies. */
+let pdfParse = null, mammoth = null;
+try { pdfParse  = require('pdf-parse'); } catch(e){ console.error('doc-brain: pdf-parse unavailable:', e.message); }
+try { mammoth   = require('mammoth');   } catch(e){ console.error('doc-brain: mammoth unavailable:', e.message); }
 
 /* ══════════════════════════════════════════════════════════════
  *  TOGGLES
@@ -56,7 +164,9 @@ const JOIN_ACTIVE_HOUR_START = 8;
 const JOIN_ACTIVE_HOUR_END   = 22;
 const JOIN_MIN_GAP_MS        = 25 * 60 * 1000;
 const JOIN_MAX_GAP_MS        = 75 * 60 * 1000;
-const JOIN_QUEUE_MAX         = 30;
+/* FIX/FEATURE: queue size was hardcoded 30 — now env-tunable, default 60
+ * ("add more things in the queue") */
+const JOIN_QUEUE_MAX         = Math.max(10, parseInt(process.env.JOIN_QUEUE_MAX || '60', 10));
 
 const JOINED_GROUPS_FILE = path.join(__dirname,'joined_groups.json');
 const PENDING_FILE       = path.join(__dirname,'pending_requests.json');
@@ -72,7 +182,67 @@ const FOCUS_LOCK_TIMEOUT_MS = 30000;
 const TZ_OFFSET_HOURS    = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);
 const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;
 
-let MESSAGE_FLOOD_THRESHOLD = 20;
+/* ─── v66: dual-host mode + reports + broadcast cap ────────────
+ * BOT_MODE=manager (default): full group-management bot.
+ * BOT_MODE=school: admin account is a READ-ONLY monitor — no DM AI,
+ *   no auto-join, no broadcasts, no greetings. Sends a morning report
+ *   (weather + today's lectures + assignments/presentations due).
+ * REPLY_IN_GROUPS: bot conversation replies are DM-only by default.
+ * BROADCAST_MAX: hard cap of recipients per broadcast run (rotation
+ *   picks the least-recently-sent groups on later runs).
+ * MORNING_REPORT_HOUR: local hour (TZ_OFFSET_HOURS-aware) for the
+ *   weather/school morning report to ADMIN_JID.                        */
+const BOT_MODE            = (process.env.BOT_MODE || process.env.MODE || 'manager').toLowerCase() === 'school' ? 'school' : 'manager';
+const SCHOOL_MODE         = BOT_MODE === 'school';
+const MORNING_REPORT_HOUR = Math.min(23, Math.max(0, parseInt(process.env.MORNING_REPORT_HOUR || '6', 10)));
+const REPLY_IN_GROUPS     = (process.env.REPLY_IN_GROUPS || 'false') === 'true';
+const BROADCAST_BATCH_MAX = Math.max(1, parseInt(process.env.BROADCAST_MAX || '30', 10));
+const WEATHER_LOCATIONS   = [
+  { key:'harare',  label:'Harare (home)',  lat:-17.8252, lon:31.0335 },
+  { key:'bindura', label:'Bindura (BUSE)', lat:-17.3264, lon:31.3306 }
+];
+const SCHOOL_DATA_FILE    = path.join(__dirname,'school_data.json');
+const GROUP_REGISTRY_FILE = path.join(__dirname,'group_registry.json');
+const DM_HISTORIES_FILE   = path.join(__dirname,'dm_histories.json');
+
+/* ─── v67: calm-engagement + dedup + dual-QR + log digest config ── */
+const OUT_DEDUP_HOURS     = Math.max(0, parseFloat(process.env.OUT_DEDUP_HOURS || '6'));
+const OUT_DEDUP_MS        = OUT_DEDUP_HOURS * 3600000;
+const GREETINGS_PER_DAY   = Math.max(0, parseInt(process.env.GREETINGS_PER_DAY || '2', 10));
+const WELCOME_ENABLED     = (process.env.WELCOME_ENABLED || 'false') === 'true';
+const GOODBYE_ENABLED     = (process.env.GOODBYE_ENABLED || 'false') === 'true';
+const WELCOME_COOLDOWN_MS = Math.max(1, parseFloat(process.env.WELCOME_COOLDOWN_DAYS || '7')) * 86400000;
+const WELCOME_PER_DAY     = Math.max(0, parseInt(process.env.WELCOME_PER_DAY || '3', 10));
+const ADMIN_LOG_DIGEST_MIN= Math.max(1, parseInt(process.env.ADMIN_LOG_DIGEST_MIN || '5', 10));
+const LOG_TO_ADMIN        = (process.env.LOG_TO_ADMIN || 'true') === 'true';
+const CONFUSION_WINDOW_MS = 10 * 60 * 1000;
+const SCHOOL_AUTH_FOLDER  = process.env.SCHOOL_AUTH_FOLDER || 'auth_info_school';
+const LOADTEST            = process.env.LOADTEST === '1';
+const ACTIVE_SET_CAP      = 20000;
+
+/* ─── v68: study buddy + documents + buttons + strict school gate ──
+ * SCHOOL_STRICT_ADMIN: the school account answers ONLY the admin DM.
+ * DOC_*: size/text caps for reading PDFs and Word docs.
+ * STUDY_BUDDY: free-form admin chat on the school account is answered
+ *   as a study buddy (grounded in timetable + deadlines + docs).       */
+const SCHOOL_STRICT_ADMIN = (process.env.SCHOOL_STRICT_ADMIN || 'true') === 'true';
+const DOC_ENABLED         = (process.env.DOC_ENABLED || 'true') === 'true';
+const DOC_MAX_BYTES       = Math.max(1, parseInt(process.env.DOC_MAX_MB || '20', 10)) * 1024 * 1024;
+const DOC_MAX_TEXT        = Math.max(2000, parseInt(process.env.DOC_MAX_TEXT || '120000', 10));
+const DOC_KEEP_PER_CHAT   = 4;      // most recent docs kept per chat
+const DOC_TTL_MS          = 12 * 60 * 60 * 1000; // 12h document memory
+const STUDY_BUDDY_ENABLED = (process.env.STUDY_BUDDY || 'true') === 'true';
+const UPDATES_MAX         = 200;    // ring size for queued group updates
+/* words that make a group message "an update the admin needs" */
+const UPDATE_KEYWORDS = [
+  /\bdue\b/i, /\bdeadline/i, /\bsubmi/i, /\bhand[- ]?in\b/i, /\bassign/i,
+  /\btest\b/i, /\bexam/i, /\bquiz\b/i, /\bpresent/i, /\blecture/i,
+  /\bcancell/i, /\bpostpon/i, /\breschedul/i, /\bmoved (to|from)\b/i,
+  /\btimetable/i, /\bvenue\b/i, /\bmarks\b/i, /\bresults?\b/i,
+  /\bclosing\b/i, /\bregistration/i, /\bsupplementary/i, /\bcta\b/i, /\bsemester/i
+];
+
+let MESSAGE_FLOOD_THRESHOLD = Math.max(20, parseInt(process.env.FLOOD_THRESHOLD || '500', 10));
 let FLOOD_IGNORE_MS         = 5000;
 
 const NSFW_START = 21, NSFW_END = 8;
@@ -85,11 +255,18 @@ const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
 
 const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
 
-/* ─── DM AI batch settings ─────────────────────────────────── */
-const DM_BATCH_MIN     = 3;
+/* ─── DM AI batch settings ───────────────────────────────────
+ * v68.2: FOCUSED like a person with one phone — open ONE chat, reply,
+ * close it, move to the next. Max 4 chats per cycle with a human pause
+ * between them, and ONLY people who are actually interacting (multi-
+ * texting, quick replies, or clearly online right now). Quiet one-off
+ * messages WAIT instead of being processed in bulk. */
+const DM_BATCH_MIN     = 1;
 const DM_BATCH_MAX     = 4;
 const DM_CYCLE_MS      = 75_000;
-const DM_REPLY_GAP_MS  = 6_000;
+const DM_GAP_MIN_MS    = 20_000;                /* pause between chats */
+const DM_GAP_MAX_MS    = 45_000;
+const DM_FRESH_MS      = 15 * 60 * 1000;        /* single-text DMs: only while fresh */
 const DM_POOL_TTL_MS   = 6 * 60 * 60 * 1000;
 
 const ADMIN_ACTIVE_MS = 45000;
@@ -156,6 +333,12 @@ function pushLog(level, source, message, meta={}){
   const entry = { id:Date.now()+Math.random(), ts:new Date().toISOString(),
     level, source, message, meta:Object.keys(meta).length?meta:undefined };
   logBuffer.push(entry); if (logBuffer.length>LOG_BUFFER_MAX) logBuffer.shift();
+  /* v67: feed the admin WhatsApp digest (skip the digest's own logs to
+   * avoid a feedback loop; skip info-level chat noise) */
+  if (LOG_TO_ADMIN && source !== 'logdigest' && level !== 'info'){
+    adminLogBus.push({ ts: entry.ts, level, source, message: String(message).slice(0,160) });
+    if (adminLogBus.length > ADMIN_LOG_BUS_MAX) adminLogBus.shift();
+  }
   const payload = `data: ${JSON.stringify(entry)}\n\n`;
   for (const res of logClients) { try{res.write(payload);}catch(e){logClients.delete(res);} }
   console.log(`${new Date().toTimeString().slice(0,8)}[${level.toUpperCase()}] ${source}: ${message}`);
@@ -203,6 +386,51 @@ const recentGroupPhones = new Map();
 /* ─── DM pool for batch AI replies ─────────────────────────── */
 const dmPool = new Map();
 
+/* ─── v67: dual-account + dedup + engagement + log-digest state ── */
+let schoolSock = null, schoolQrDataUri = null, schoolStatus = 'disconnected';
+let schoolNumber = null, schoolLid = null, schoolIsConnecting = false, schoolManualDisconnect = false;
+let schoolReconnectAttempts = 0;
+const recentOutTexts = new Map();   // jid -> [{h, ts}] sent-text hashes (dedup)
+const engagedGroups  = new Map();   // jid -> ts of last bot conversational send
+let confusionAlertedAt = 0;         // last admin alert about group confusion
+const welcomeLastAt   = new Map();  // userJid -> ts of last welcome
+let welcomesToday = 0, welcomesDay = null;
+let greetingsToday = 0, greetingsDay = null;
+const adminLogBus  = [];            // ring of recent warn/error/success events
+const ADMIN_LOG_BUS_MAX = 400;
+let lastDigestAt = 0, digestInFlight = false;
+const dmInfoCacheTTL = 10 * 60 * 1000;
+
+/* ─── v67: loadtest instrumentation ─── */
+const lt = {
+  enabled: LOADTEST, injected: 0, handled: 0, droppedFlood: 0, droppedDup: 0,
+  droppedOther: 0, sendsQueued: 0, sendsDone: 0, sendsFailed: 0,
+  queueFastMax: 0, queueSlowMax: 0, lagMs: 0, lagMax: 0, startedAt: null,
+  lagSamples: []
+};
+if (LOADTEST){
+  setInterval(function(){
+    const t0 = process.hrtime.bigint();
+    setTimeout(function(){
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      lt.lagMs = ms; lt.lagSamples.push(ms);
+      if (ms > lt.lagMax) lt.lagMax = ms;
+      if (lt.lagSamples.length > 200) lt.lagSamples.shift();
+    }, 0);
+  }, 500);
+}
+
+/* ─── v66: group awareness + dedup + mode state ───────────── */
+const groupRegistry = new Map();      // jid -> { subject, size, announce, botAdmin, participants }
+const lastGreetingPhrase = new Map(); // jid -> last greeting phrase sent (dedup)
+const lastBotSendAt = new Map();      // jid -> ts of last bot message in that group
+const broadcastLastAt = new Map();    // jid -> ts of last broadcast received
+let lastProbeDate = null;             // main-group probe: once per day
+let morningReportSentDate = null;     // morning report: once per day
+let groupRepliesEnabled = REPLY_IN_GROUPS; // runtime toggle via !groupchat
+let lastStatusChangeAt = Date.now();  // stuck-connect detection
+const aiFailStreak = {};              // provider name -> consecutive failures
+
 let joinQueue=[], joinInProgress=false, lastJoinAt=0;
 
 /* ─── Daily stats — FIX: reset at most once per day ────────── */
@@ -220,7 +448,8 @@ function resetDailyStats(){
       pendingCreated:0, pendingResolved:0, discovered:0, imageBroadcasts:0, badMacs:0,
       focusRuns:0, downloads:0, nsfwDownloads:0, adminBroadcasts:0, groupLinksShared:0,
       messagesDropped:0, errors:0, invitesSent:0, policyBlocks:0, deletesDone:0,
-      readsSent:0, typingsSent:0
+      readsSent:0, typingsSent:0,
+      docsRead:0, pdfsMade:0, buttonsSent:0, updatesCaptured:0
     };
   }
 }
@@ -292,83 +521,107 @@ function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLO
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI — REWIND ONLY
+ *  AI — PROVIDER FAILOVER CHAIN (v66)
+ *  Order: Rewind → Venice → Gemini → OpenAI (whichever keys exist).
+ *  Boot: every provider is tested, first OK becomes active.
+ *  Runtime: on failure askAI() fails over to the next provider and
+ *  remembers the winner, so the bot gets smarter + never hard-down.
  * ══════════════════════════════════════════════════════════════ */
-const REWIND_KEY_ENV = process.env.REWIND_KEY;
-const REWIND_MODEL   = process.env.REWIND_MODEL || 'rewind-uncensored';
+const AI_PROVIDERS = [
+  { name:'rewind', key: process.env.REWIND_KEY, model: process.env.REWIND_MODEL || 'rewind-uncensored',
+    url:'https://api.rewind.ai/v1/chat/completions' },
+  { name:'venice', key: process.env.VENICE_KEY, model: process.env.VENICE_MODEL || 'venice-uncensored',
+    url:'https://api.venice.ai/api/v1/chat/completions' },
+  { name:'gemini', key: process.env.GEMINI_KEY, model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+    url:'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions' },
+  { name:'openai', key: process.env.OPENAI_KEY, model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    url:'https://api.openai.com/v1/chat/completions' }
+].filter(function(p){ return !!p.key; });
 
 let activeProvider = null;
-let activeKey = null;
 let providerReport = {};
 
-async function testRewind(){
-  const key = REWIND_KEY_ENV;
-  if (!key){ providerReport.rewind = { ok:false, error:'no key', skipped:true }; return null; }
+async function askProvider(p, system, prompt, maxTokens, temperature, timeoutMs){
+  const r = await axios.post(p.url, {
+    model: p.model,
+    messages: [
+      { role:'system', content: system },
+      { role:'user',   content: prompt }
+    ],
+    max_tokens: maxTokens || 250, temperature: (temperature === undefined ? 0.95 : temperature)
+  }, { headers: { 'Authorization': 'Bearer ' + p.key, 'Content-Type':'application/json' }, timeout: timeoutMs || 25000 });
+  return { reply: r.data?.choices?.[0]?.message?.content };
+}
+
+async function testProvider(p){
   const t0 = Date.now();
   try {
-    const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
-      model: REWIND_MODEL,
-      messages: [
-        { role:'system', content:'You are a test bot.' },
-        { role:'user', content:'Reply with exactly: OK' }
-      ],
-      max_tokens: 20, temperature: 0
-    }, { headers: { 'Authorization': `Bearer ${key}`, 'Content-Type':'application/json' }, timeout: 15000 });
-    const reply = r.data?.choices?.[0]?.message?.content;
-    const ms = Date.now() - t0;
+    const { reply } = await askProvider(p, 'You are a test bot.', 'Reply with exactly: OK', 20, 0, 15000);
     if (reply && reply.trim().length){
-      providerReport.rewind = { ok:true, ms, sample: reply.trim().slice(0,40) };
-      return { name:'rewind', key };
+      providerReport[p.name] = { ok:true, ms: Date.now()-t0, sample: reply.trim().slice(0,40) };
+      return true;
     }
-    providerReport.rewind = { ok:false, error:'empty response', ms };
-    return null;
+    providerReport[p.name] = { ok:false, ms: Date.now()-t0, error:'empty response' };
+    return false;
   } catch(e){
-    providerReport.rewind = { ok:false, ms: Date.now()-t0, status:e.response?.status,
+    providerReport[p.name] = { ok:false, ms: Date.now()-t0, status: e.response?.status,
       error: e.response?.data?.error?.message || e.message };
-    return null;
+    return false;
   }
 }
 
 async function detectAIBackend(){
-  pushLog('info','ai','Testing Rewind...');
+  pushLog('info','ai','Testing AI providers (' + AI_PROVIDERS.map(p=>p.name).join(', ') + ')...');
   providerReport = {};
-  const found = await testRewind();
-  if (found){
-    activeProvider = 'rewind';
-    activeKey = found.key;
-    pushLog('success','ai',`rewind: OK ${providerReport.rewind.ms}ms — active`);
-  } else {
-    activeProvider = null; activeKey = null;
-    pushLog('error','ai',`Rewind unavailable: ${providerReport.rewind?.error || 'unknown'}`);
+  activeProvider = null;
+  for (const p of AI_PROVIDERS){
+    const ok = await testProvider(p);
+    if (ok && !activeProvider){
+      activeProvider = p.name;
+      pushLog('success','ai', p.name + ': OK ' + providerReport[p.name].ms + 'ms — ACTIVE');
+    } else {
+      pushLog('warn','ai', p.name + ': ' + (providerReport[p.name]?.error || 'unavailable'));
+    }
   }
+  if (!activeProvider) pushLog('error','ai','No AI provider available — check keys in .env');
   return activeProvider;
 }
 
 async function askAI(prompt, system){
-  if (!activeProvider || !activeKey) return null;
-  try {
-    const r = await axios.post('https://api.rewind.ai/v1/chat/completions', {
-      model: REWIND_MODEL,
-      messages: [
-        { role:'system', content: system },
-        { role:'user', content: prompt }
-      ],
-      max_tokens: 250, temperature: 0.95
-    }, { headers: { 'Authorization': `Bearer ${activeKey}`, 'Content-Type':'application/json' }, timeout: 25000 });
-    const raw = r.data?.choices?.[0]?.message?.content;
-    if (!raw) return null;
-    const c = humanize(raw);
-    return (c && !containsForbidden(c)) ? c : null;
-  } catch(e){
-    pushLog('error','ai',`rewind: ${e.response?.status||''} ${e.message}`);
-    resetDailyStats(); dailyStats.aiErrors++;
-    return null;
+  if (LOADTEST) return 'loadtest canned reply ' + Math.floor(Math.random()*100000); // no network in perf tests
+  if (!AI_PROVIDERS.length) return null;
+  const order = [];
+  if (activeProvider) order.push(activeProvider);
+  for (const p of AI_PROVIDERS){ if (!order.includes(p.name)) order.push(p.name); }
+  for (const name of order){
+    const p = AI_PROVIDERS.find(function(x){ return x.name === name; });
+    try {
+      const { reply } = await askProvider(p, system, prompt);
+      if (!reply || !String(reply).trim()) throw new Error('empty response');
+      const c = humanize(reply);
+      if (c && !containsForbidden(c)){
+        activeProvider = name;
+        aiFailStreak[name] = 0;
+        return c;
+      }
+      throw new Error('filtered/empty');
+    } catch(e){
+      aiFailStreak[name] = (aiFailStreak[name] || 0) + 1;
+      if (order.indexOf(name) < order.length - 1){
+        pushLog('warn','ai', name + ': ' + e.message + ' — failing over to next provider');
+      } else {
+        pushLog('error','ai', name + ': ' + e.message + ' — all providers exhausted');
+      }
+      continue;
+    }
   }
+  resetDailyStats(); dailyStats.aiErrors++;
+  return null;
 }
 
 async function testAllProviders(){
-  await testRewind();
-  return { rewind: providerReport.rewind || { ok:false, error:'not tested' } };
+  for (const p of AI_PROVIDERS){ await testProvider(p); }
+  return providerReport;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -866,10 +1119,10 @@ async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'i
   const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
   return { buffer: buf, mimetype, sizeBytes: buf.length };
 }
-async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false){
+async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
-    await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing);
+    await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing, opts && opts.account ? { account: opts.account } : undefined);
     return true;
   } catch(e){
     pushLog('warn','media',`image skip: ${e.message}`);
@@ -877,10 +1130,10 @@ async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', task
     return false;
   }
 }
-async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false){
+async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
     const { buffer } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'gif');
-    await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType, typing);
+    await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType, typing, opts && opts.account ? { account: opts.account } : undefined);
     return true;
   } catch(e){
     pushLog('warn','media',`gif skip: ${e.message}`);
@@ -892,7 +1145,7 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskTy
 async function sendMediaUrl(jid, mediaUrl, opts = {}){
   const {
     kind = 'auto', caption = '', mimetype,
-    priority = 2, lane = 'slow', taskType = 'group', typing = false
+    priority = 2, lane = 'slow', taskType = 'group', typing = false, account
   } = opts;
 
   const isAudio = kind === 'audio' || (mimetype && mimetype.startsWith('audio/'));
@@ -905,13 +1158,64 @@ async function sendMediaUrl(jid, mediaUrl, opts = {}){
   else if (isImage) content = { image:  { url: mediaUrl }, mimetype: mimetype || 'image/jpeg', caption };
   else              content = { document:{ url: mediaUrl }, mimetype: mimetype || 'application/octet-stream', caption, fileName: 'media' };
 
-  return sendBuffer(jid, content, priority, lane, taskType, typing);
+  return sendBuffer(jid, content, priority, lane, taskType, typing, account ? { account } : undefined);
 }
 
 /* ══════════════════════════════════════════════════════════════
  *  SEND BUFFER
  * ══════════════════════════════════════════════════════════════ */
-function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false){
+/* ══════════════════════════════════════════════════════════════
+ *  SEND BUFFER (v67: dedup + typing mutex + dual-account + guards)
+ * ══════════════════════════════════════════════════════════════ */
+/* v67: SINGLE-TASK typing — the bot never "composes" in two chats at
+ * once. If another chat is typing, this send simply skips the typing
+ * theater (the message still goes out; typing is cosmetic). */
+let typingBusy = false;
+async function withTypingLock(fn){
+  if (typingBusy) return false;
+  typingBusy = true;
+  try { await fn(); return true; } finally { typingBusy = false; }
+}
+/* v67: QUIET INBOX — normalize + remember the last texts per chat; a
+ * repeat within OUT_DEDUP_MS is silently suppressed. Admin urgency
+ * (!force / opts.force / admin fast-lane) bypasses this. */
+function outTextSeen(jid, text){
+  if (!OUT_DEDUP_MS || !text) return false;
+  const norm = String(text).toLowerCase().replace(/\s+/g,' ').trim().slice(0, 300);
+  if (!norm) return false;
+  const now = Date.now();
+  const arr = (recentOutTexts.get(jid) || []).filter(e => now - e.ts < OUT_DEDUP_MS);
+  const seen = arr.some(e => e.h === norm);
+  arr.push({ h: norm, ts: now });
+  recentOutTexts.set(jid, arr.slice(-25));
+  return seen;
+}
+/* v67: MAIN-GROUP FOCUS — conversational group traffic records which
+ * groups the bot is engaging; if it catches itself chatting in 2+
+ * non-main groups it disables group replies and alerts the admin. */
+function noteEngagement(jid){
+  if (!jid || !jid.endsWith('@g.us')) return;
+  const now = Date.now();
+  for (const [g, t] of engagedGroups){ if (now - t > CONFUSION_WINDOW_MS) engagedGroups.delete(g); }
+  engagedGroups.set(jid, now);
+  const others = [...engagedGroups.keys()].filter(g => g !== mainGroupJid);
+  if (others.length >= 2 && now - confusionAlertedAt > 30*60*1000){
+    confusionAlertedAt = now;
+    groupRepliesEnabled = false;
+    pushLog('error','guard','CONFUSION GUARD: engaging ' + others.length + ' non-main groups — group replies disabled');
+    const names = others.slice(0,2).map(g => getGroupName(g) || g).join(' + ');
+    adminReply(ADMIN_JID, '🛑 Confusion guard: bot was engaging 2+ non-main groups (' + names + ').\nGroup replies AUTO-DISABLED to protect the main group.\nUse !groupchat on to re-enable.');
+  }
+}
+function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false, opts={}){
+  const useSchool = opts && opts.account === 'school';
+  /* v67: main-group lock for conversational group sends. Broadcasts,
+   * admin !send and media pushes to other groups stay allowed. */
+  if (taskType === 'group' && typeof jid === 'string' && jid.endsWith('@g.us')
+      && mainGroupJid && jid !== mainGroupJid && !SCHOOL_MODE){
+    pushLog('warn','guard','Blocked conversational send to non-main group ' + (getGroupName(jid) || jid));
+    return Promise.reject(new Error('Not the main group'));
+  }
   if (priority >= 2){
     const gate = policyCanSend(jid);
     if (!gate.ok){
@@ -926,33 +1230,54 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
       resetDailyStats(); dailyStats.policyBlocks++;
       return Promise.reject(new Error('Content blocked'));
     }
+    /* v67: dedup — never send the same text twice to the same chat
+     * unless the admin marked it urgent (opts.force / !force). */
+    if (!(opts && opts.force) && !(content && content.mentions && content.mentions.length) && outTextSeen(jid, txt)){
+      pushLog('info','dedup','Suppressed repeat text to ' + jid);
+      return Promise.resolve({ dedup:true, suppressed:true });
+    }
   }
   const actualLane = lane === 'auto' ? (priority === 0 ? 'fast' : 'slow') : lane;
   if (priority >= 2) recordOutbound(jid);
   const showTyping_ = typing && priority >= 2 && ENABLE_TYPING;
+  if (LOADTEST) lt.sendsQueued++;
 
   return new Promise((resolve, reject)=>{
     const job = {
       name:`send:${jid}`, priority, taskType,
       fn: async ()=>{
-        if (!sock){ reject(new Error('Bot disconnected')); return; }
-        if (botPaused && priority > 0){ reject(new Error('Bot paused')); return; }
-        if (Date.now() < botOfflineUntil && priority > 0){ reject(new Error('Bot offline')); return; }
+        const S = useSchool ? schoolSock : sock;
+        if (!S){ if (LOADTEST) lt.sendsFailed++; reject(new Error(useSchool ? 'School account disconnected' : 'Bot disconnected')); return; }
+        if (botPaused && priority > 0){ if (LOADTEST) lt.sendsFailed++; reject(new Error('Bot paused')); return; }
+        if (Date.now() < botOfflineUntil && priority > 0){ if (LOADTEST) lt.sendsFailed++; reject(new Error('Bot offline')); return; }
         return withJidLock(jid, async ()=>{
           if (showTyping_){
-            try { await sock.sendPresenceUpdate('composing', jid); } catch(e){}
-            const ms = 1500 + Math.random() * 4500;
-            await new Promise(r => setTimeout(r, ms));
-            try { await sock.sendPresenceUpdate('paused', jid); } catch(e){}
-            await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
-            resetDailyStats(); dailyStats.typingsSent++;
+            await withTypingLock(async ()=>{
+              try { await S.sendPresenceUpdate('composing', jid); } catch(e){}
+              const ms = 1500 + Math.random() * 4500;
+              await new Promise(r => setTimeout(r, ms));
+              try { await S.sendPresenceUpdate('paused', jid); } catch(e){}
+              await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+              resetDailyStats(); dailyStats.typingsSent++;
+            });
+            /* if withTypingLock returned false the typing was skipped —
+             * exactly the "never type in 2 groups at once" rule */
           }
           try {
-            const sent = await sock.sendMessage(jid, content);
+            const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
             if (priority >= 2) policyRecordSend(jid);
+            /* v66: remember when the bot last spoke in a group — greetings
+             * scheduler uses this so it never greets a group it is already
+             * actively chatting in ("no repeated greeting messages"). */
+            if (typeof jid === 'string' && jid.endsWith('@g.us')){
+              lastBotSendAt.set(jid, Date.now());
+              if (taskType === 'group' || taskType === 'dmreply') noteEngagement(jid);
+            }
+            if (LOADTEST) lt.sendsDone++;
+            try { accountStats[useSchool ? 'school' : 'groups'].out++; } catch(e){}
             resolve(sent);
-          } catch(e){ reject(e); }
+          } catch(e){ if (LOADTEST) lt.sendsFailed++; reject(e); }
         });
       }
     };
@@ -963,6 +1288,440 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
 function adminReply(jid, text){
   return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
     .catch(e => pushLog('warn','adminreply',e.message));
+}
+/* v67: replies that must go out through the SCHOOL account */
+function schoolReply(jid, text){
+  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false, { account:'school' })
+    .catch(e => pushLog('warn','schoolreply',e.message));
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v68 ENGINE — per-account state, documents, buttons, study buddy
+ * ══════════════════════════════════════════════════════════════ */
+/* TWO CONNECTIONS, HANDLED DIFFERENTLY: every inbound message on the
+ * groups socket bumps accounts.groups.in; every school-socket message
+ * bumps accounts.school.in; every successful send bumps the matching
+ * out. Surfaced in /admin/stats and !status. */
+const accountStats = {
+  groups: { in: 0, out: 0 },
+  school: { in: 0, out: 0 }
+};
+
+/* Document memory: chatJid -> [{ name, ts, chars, text }] */
+const docTextCache = new Map();
+/* Needed group updates waiting to be flushed to the admin */
+const schoolUpdatesBus = [];
+
+function pruneDocs(){
+  const now = Date.now();
+  for (const [jid, arr] of docTextCache){
+    const keep = arr.filter(d => now - d.ts < DOC_TTL_MS).slice(-DOC_KEEP_PER_CHAT);
+    if (keep.length) docTextCache.set(jid, keep); else docTextCache.delete(jid);
+  }
+}
+function rememberDoc(chatJid, entry){
+  const arr = (docTextCache.get(chatJid) || []).filter(d => now2() - d.ts < DOC_TTL_MS);
+  arr.push(entry);
+  docTextCache.set(chatJid, arr.slice(-DOC_KEEP_PER_CHAT));
+}
+function now2(){ return Date.now(); }
+function listRecentDocs(chatJid){
+  pruneDocs();
+  return (docTextCache.get(chatJid) || []).map((d,i) => ({
+    n: i + 1, name: d.name, chars: d.chars, ageMin: Math.round((Date.now() - d.ts) / 60000)
+  }));
+}
+function docContextFor(chatJid){
+  pruneDocs();
+  const arr = docTextCache.get(chatJid) || [];
+  if (!arr.length) return '';
+  const d = arr[arr.length - 1];
+  return 'A document titled "' + d.name + '" was received in this chat ' +
+    Math.max(1, Math.round((Date.now() - d.ts) / 60000)) + ' min ago. Its text (excerpt):\n' +
+    d.text.slice(0, 6000);
+}
+
+/* Which group messages are "updates the admin needs" — the ONLY thing
+ * the school account (and the groups account, for non-main groups)
+ * queues and forwards. Everything else stays unread noise. */
+function isNeededUpdate(text){
+  const s = String(text || '');
+  if (s.length < 8 || s.length > 1500) return false;
+  for (const re of UPDATE_KEYWORDS){ if (re.test(s)) return true; }
+  return false;
+}
+function queueNeededUpdate(groupName, text){
+  schoolUpdatesBus.push({ ts: new Date().toISOString(), group: String(groupName||'?'), text: String(text||'').replace(/\s+/g,' ').slice(0, 300) });
+  if (schoolUpdatesBus.length > UPDATES_MAX) schoolUpdatesBus.shift();
+  resetDailyStats(); dailyStats.updatesCaptured++;
+}
+/* On-demand flush (also piggy-backed on the log digest) */
+async function flushGroupUpdates(account){
+  if (!schoolUpdatesBus.length) return 0;
+  const ups = schoolUpdatesBus.splice(0, 10);
+  const lines = ups.map(u => '• [' + u.group + '] ' + u.text.slice(0, 160));
+  const text = '📌 Group updates you need (' + ups.length + (schoolUpdatesBus.length ? ', +' + schoolUpdatesBus.length + ' more queued' : '') + '):\n' + lines.join('\n');
+  await sendBuffer(ADMIN_JID, { text: text.slice(0, 3000) }, 1, 'fast', 'admin', false, { account: account || undefined, force: false });
+  return ups.length;
+}
+
+/* ── Document reading: PDF / DOCX / TXT / CSV / MD ── */
+const DOC_OK_EXTS = ['pdf','docx','txt','csv','md'];
+async function readDocumentBuffer(buffer, name){
+  const ext = (String(name||'').split('.').pop() || '').toLowerCase();
+  if (ext === 'pdf'){
+    if (!pdfParse) return { ok:false, error:'pdf-parse not installed' };
+    const d = await pdfParse(buffer);
+    return { ok:true, text:String(d.text||''), pages:d.numpages };
+  }
+  if (ext === 'docx'){
+    if (!mammoth) return { ok:false, error:'mammoth not installed' };
+    const d = await mammoth.extractRawText({ buffer });
+    return { ok:true, text:String(d.value||'') };
+  }
+  /* .doc (old binary Word) has no pure-JS reader — say so honestly */
+  if (ext === 'doc') return { ok:false, error:'old .doc format — send as .docx or .pdf' };
+  return { ok:true, text: buffer.toString('utf8').replace(/[^\x09\x0A\x0D\x20-\x7E\u00A0-\u024F\u1E00-\u1EFF]/g, ' ') };
+}
+/* Downloads + extracts + remembers a document message.
+ * account: 'groups' | 'school'.  Returns { name, chars, text } or null. */
+async function handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, account){
+  const dm = m && (m.documentMessage || (m.documentWithCaptionMessage && m.documentWithCaptionMessage.documentMessage));
+  if (!dm || !DOC_ENABLED) return null;
+  const name = dm.fileName || 'document';
+  const ext  = (name.split('.').pop() || '').toLowerCase();
+  const size = Number(dm.fileLength || 0);
+  /* replies about docs go out through the SAME account that received them */
+  const docReply = (t) => (account === 'school'
+    ? schoolReply(chatJid, t)
+    : sendBuffer(chatJid, { text: t }, 0, 'fast', 'admin', false).catch(() => {}));
+  const groupName = account === 'school' ? (getSchoolGroupName(chatJid) || chatJid) : (getGroupName(chatJid) || chatJid);
+  if (!DOC_OK_EXTS.includes(ext)){
+    pushLog('info','docs','Skipped .' + ext + ' (' + name + ') — unsupported format');
+    if (isAdmin && !isGroup) await docReply('📄 I can read PDF, DOCX, TXT, CSV and MD. "' + name + '" is .' + ext + ' — send it as PDF or DOCX.');
+    return null;
+  }
+  if (size > DOC_MAX_BYTES){
+    pushLog('warn','docs','Doc too large: ' + name + ' (' + (size/1048576).toFixed(1) + 'MB > ' + (DOC_MAX_BYTES/1048576) + 'MB)');
+    if (isAdmin && !isGroup) await docReply('📄 "' + name + '" is ' + (size/1048576).toFixed(1) + 'MB — over my ' + (DOC_MAX_BYTES/1048576) + 'MB reading limit.');
+    return null;
+  }
+  try {
+    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level:'silent' }) });
+    if (!buffer){ pushLog('warn','docs','Download failed: ' + name); return null; }
+    const r = await readDocumentBuffer(buffer, name);
+    if (!r.ok){
+      pushLog('warn','docs','Extract failed for ' + name + ': ' + r.error);
+      if (isAdmin && !isGroup) await docReply('📄 Could not read "' + name + '": ' + r.error);
+      return null;
+    }
+    const text = String(r.text || '').slice(0, DOC_MAX_TEXT);
+    if (!text.trim()){
+      pushLog('warn','docs','No readable text in ' + name + ' (scanned images?)');
+      if (isAdmin && !isGroup) await docReply('📄 "' + name + '" has no readable text — it looks like scanned images, which I cannot OCR.');
+      return null;
+    }
+    rememberDoc(chatJid, { name, ts: Date.now(), chars: text.length, text });
+    resetDailyStats(); dailyStats.docsRead++;
+    pushLog('success','docs','Read "' + name + '" (' + text.length + ' chars' + (r.pages ? ', ' + r.pages + 'p' : '') + ') from ' + (isGroup ? groupName : 'DM') + ' [' + account + ']');
+
+    /* ASSIGNMENTS GO TO THE ADMIN, NEVER TO ANY GROUP.
+     * Digest fires for: school-account docs (any chat) and MAIN-group
+     * docs on the groups account. Other groups: silent cache only —
+     * strangers' documents must not spam the admin. */
+    if (account === 'school' || (isGroup && chatJid === mainGroupJid)){
+      const found = await extractAssignments(text);
+      await deliverDocDigestToAdmin(name, groupName, found, account);
+    } else if (isAdmin && !isGroup){
+      await docReply('📄 Read "' + name + '" (' + text.length + ' chars). Ask me anything about it — or "study from it".');
+    }
+    return { name, chars: text.length, text };
+  } catch(e){
+    pushLog('error','docs','handleIncomingDocument: ' + e.message);
+    return null;
+  }
+}
+/* Extraction: AI-first (precise), keyword fallback (always works) */
+async function extractAssignments(text){
+  const viaAI = await extractAssignmentsAI(text);
+  if (viaAI && viaAI.length) return viaAI;
+  return extractAssignmentsHeuristic(text);
+}
+async function extractAssignmentsAI(text){
+  if (!activeProvider) return null;
+  try {
+    const sys = 'Extract assignments, tests, exams and deadlines from school documents. Reply ONLY a JSON array like [{"module":"","type":"assignment|test|exam|presentation|quiz","title":"","due":"YYYY-MM-DD or unknown"}]. Maximum 15 items. No prose, no markdown.';
+    const r = await askAI(String(text||'').slice(0, 8000), sys);
+    if (!r) return null;
+    const m = r.match(/\[[\s\S]*\]/);
+    if (!m) return null;
+    const arr = JSON.parse(m[0]);
+    if (!Array.isArray(arr) || !arr.length) return null;
+    return arr.slice(0, 15).map(a => ({
+      module: String(a.module || '').slice(0, 24),
+      type: String(a.type || 'assignment').slice(0, 24),
+      title: String(a.title || 'Untitled').slice(0, 160),
+      due: String(a.due || 'unknown').slice(0, 24)
+    }));
+  } catch(e){ return null; }
+}
+function extractAssignmentsHeuristic(text){
+  const out = [];
+  const lines = String(text||'').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const DATE = /(\d{1,2})[\/\-.](\d{1,2})(?:[\/\-.](\d{2,4}))?/;
+  const DUEW = /\b(due|deadline|submit|submission|hand[ -]?in|closing)\b/i;
+  const KIND = /\b(assignment|task|essay|practical|report|presentation|quiz|test|exam)\b/i;
+  for (let i = 0; i < lines.length && out.length < 12; i++){
+    const l = lines[i];
+    if (!KIND.test(l) || l.length < 12 || l.length > 220) continue;
+    let due = '';
+    for (let j = i; j < Math.min(i + 3, lines.length); j++){
+      const dm = lines[j].match(DATE);
+      if (dm && DUEW.test(lines[j])){
+        const dd = dm[1].padStart(2,'0'), mm = dm[2].padStart(2,'0');
+        const yy = dm[3] ? (dm[3].length === 2 ? '20' + dm[3] : dm[3]) : String(new Date().getFullYear());
+        due = yy + '-' + mm + '-' + dd;
+        break;
+      }
+    }
+    out.push({ module:'', type:(l.match(KIND)||['assignment'])[0].toLowerCase(), title:l.slice(0,160), due: due || 'unknown' });
+  }
+  return out;
+}
+async function deliverDocDigestToAdmin(name, groupName, found, account){
+  try {
+    let text = '📄 Document read: ' + name + '\n🏫 From: ' + (groupName || 'DM') + ' [' + (account||'groups') + ' account]';
+    if (found && found.length){
+      text += '\n\n📌 Deadlines / assignments detected:\n' + found.map((a,i) =>
+        (i+1) + '. ' + (a.module ? '[' + a.module + '] ' : '') + a.title + (a.due && a.due !== 'unknown' ? ' — due ' + a.due : '')
+      ).join('\n');
+      text += '\n\nAdd to my timetable with !addassignment, or say "study plan".';
+    } else {
+      text += '\nNo assignment/deadline lines detected in it.';
+    }
+    text += '\n(Group stays silent — this went to you only.)';
+    await sendBuffer(ADMIN_JID, { text: text.slice(0, 3000) }, 1, 'fast', 'admin', false, { account: account === 'school' ? 'school' : undefined });
+  } catch(e){ pushLog('warn','docs','digest: ' + e.message); }
+}
+
+/* ── STUDY BUDDY ── */
+const STUDY_BUDDY_SYS = 'You are the admin\u2019s study buddy for Bindura University of Science Education (BUSE), Zimbabwe. ' +
+  'You give SPECIFIC, ordered, doable study guidance: what to study first and why, where to start (chapter/topic/source), how long to spend, and a quick self-check task. ' +
+  'Use the timetable, deadlines and documents provided as context. Keep it tight (max ~12 short lines), warm, practical. No AI disclaimers, no role-play fluff.';
+function buildStudyContext(){
+  const d = localNow();
+  const dayIdx = d.getUTCDay();
+  const parts = [];
+  const lects = lecturesForDay(dayIdx);
+  if (lects.length){
+    parts.push('Today\u2019s lectures: ' + lects.map(l => l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : '')).join('; ') + '.');
+  }
+  const work = upcomingWork(14);
+  if (work.length){
+    parts.push('Deadlines: ' + work.slice(0, 6).map(w => '[' + (w.dueIn < 0 ? 'OVERDUE' : w.dueIn + 'd left') + '] ' + (w.module||'') + ' ' + w.title).join('; ') + '.');
+  }
+  return parts.join(' ');
+}
+async function studyAnswer(topic, chatJid){
+  const docs = listRecentDocs(chatJid);
+  const lastDoc = (docTextCache.get(chatJid) || []).slice(-1)[0];
+  let ctx = buildStudyContext();
+  if (lastDoc) ctx += ' Recent document in this chat: "' + lastDoc.name + '" (' + lastDoc.chars + ' chars) — excerpt follows on the next line.\n' + lastDoc.text.slice(0, 4000);
+  const q = topic
+    ? ('Make me a focused study plan for: ' + topic + '. ' + ctx)
+    : ('What should I study next and in what exact order? Be specific. ' + ctx);
+  return askAI(q, STUDY_BUDDY_SYS);
+}
+async function studyBuddyChat(chatJid, text){
+  const r = await studyAnswer('', chatJid);
+  const replyText = r
+    ? informalize(r)
+    : 'AI is not answering right now — give me a minute and ask again.';
+  await schoolReply(chatJid, replyText);
+  return replyText;
+}
+
+/* ── PDF CREATION — zero-dependency, hand-rolled PDF writer ──
+ * WHY: pdfkit 0.15's xref table is rejected by pdf-parse (pdf.js 1.10)
+ * with "bad XRef entry" — proven by the round-trip test. A spec-perfect
+ * text-only PDF is ~80 lines of pure JS and parses EVERYWHERE. */
+function pdfEscape(s){
+  return String(s).replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+function latin1(s){
+  return String(s || '').replace(/[^\x20-\x7E\xA0-\xFF\n]/g, '?');
+}
+function pdfWrap(text, maxChars){
+  const out = [];
+  for (const raw of String(text).split('\n')){
+    if (raw.length <= maxChars){ out.push(raw); continue; }
+    let line = '';
+    for (const word of raw.split(' ')){
+      if (!line){ line = word; }
+      else if (line.length + 1 + word.length <= maxChars){ line += ' ' + word; }
+      else { out.push(line); line = word; }
+      while (line.length > maxChars){ out.push(line.slice(0, maxChars)); line = line.slice(maxChars); }
+    }
+    if (line) out.push(line);
+  }
+  return out;
+}
+function makePdf(title, bodyText){
+  return new Promise((resolve, reject) => {
+    try {
+      const W = 612, H = 792, MARGIN = 54;
+      const SIZE_TITLE = 17, SIZE_HEAD = 12.5, SIZE_BODY = 10.5;
+      const maxCharsFor = (size) => Math.max(20, Math.floor((W - 2 * MARGIN) / (size * 0.5)));
+      const pages = [];
+      let ops = [];
+      let y = H - MARGIN - SIZE_TITLE;
+      const put = (txt, size, font) => {
+        ops.push('BT /' + font + ' ' + size + ' Tf ' + MARGIN + ' ' + Math.round(y) + ' Td (' + pdfEscape(latin1(txt)) + ') Tj ET');
+        y -= size * 1.45;
+      };
+      const newPage = () => {
+        if (ops.length){ pages.push(ops.join('\n')); ops = []; y = H - MARGIN - 14; }
+      };
+      /* title block */
+      for (const tl of pdfWrap(title, Math.floor(maxCharsFor(SIZE_TITLE) * 0.62))) put(tl, SIZE_TITLE, 'F2');
+      y -= 8;
+      ops.push(MARGIN + ' ' + Math.round(y) + ' m ' + (W - MARGIN) + ' ' + Math.round(y) + ' l 0.8 w S');
+      y -= 12;
+      /* body */
+      for (const raw of String(bodyText || '').replace(/\r/g, '').split('\n')){
+        if (!raw.trim()){ y -= SIZE_BODY * 0.9; if (y < MARGIN + 20) newPage(); continue; }
+        const isHead = /^#{1,4}\s+/.test(raw);
+        const size = isHead ? SIZE_HEAD : SIZE_BODY;
+        const font = isHead ? 'F2' : 'F1';
+        const wrapped = pdfWrap(raw.replace(/^#{1,4}\s+/, ''), maxCharsFor(size));
+        for (const wl of wrapped){
+          if (y < MARGIN + 20) newPage();
+          put(wl, size, font);
+        }
+      }
+      newPage();
+      if (!pages.length){ ops.push('BT /F1 10.5 Tf ' + MARGIN + ' 700 Td ( ) Tj ET'); pages.push(ops.join('\n')); }
+
+      /* ── assemble PDF objects with a spec-perfect xref ── */
+      const objs = [];                       // (objNum-1) → body string
+      objs[0] = '<< /Type /Catalog /Pages 2 0 R >>';
+      const pageObjNums = pages.map((_, p) => 5 + p * 2);
+      objs[1] = '<< /Type /Pages /Kids [' + pageObjNums.map(n => n + ' 0 R').join(' ') + '] /Count ' + pages.length + ' >>';
+      objs[2] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+      objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+      pages.forEach((content, p) => {
+        const pageN = 5 + p * 2, contN = 6 + p * 2;
+        objs[pageN - 1] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + W + ' ' + H + '] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' + contN + ' 0 R >>';
+        objs[contN - 1] = '<< /Length ' + Buffer.byteLength(content, 'latin1') + ' >>\nstream\n' + content + '\nendstream';
+      });
+      let pdf = '%PDF-1.4\n';
+      const offsets = [];
+      for (let i = 0; i < objs.length; i++){
+        offsets.push(Buffer.byteLength(pdf, 'latin1'));
+        pdf += (i + 1) + ' 0 obj\n' + objs[i] + '\nendobj\n';
+      }
+      const xrefStart = Buffer.byteLength(pdf, 'latin1');
+      pdf += 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n';
+      for (const off of offsets) pdf += String(off).padStart(10, '0') + ' 00000 n \n';
+      pdf += 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xrefStart + '\n%%EOF\n';
+      resolve(Buffer.from(pdf, 'latin1'));
+    } catch(e){ reject(e); }
+  });
+}
+
+/* ── BUTTONS (native flow → legacy → plain text; an answer ALWAYS lands) ── */
+const MENUS = {
+  main:   { title: '🤖 BreadBot — what do you need?', buttons: [
+            { id:'menu:school', label:'🏫 School' }, { id:'menu:groups', label:'👥 Groups' },
+            { id:'menu:study',  label:'📚 Study' },  { id:'menu:ads',    label:'📣 Ads' },
+            { id:'cmd:status',  label:'📊 Status' } ] },
+  school: { title: '🏫 School — pick one', buttons: [
+            { id:'cmd:today',     label:'📅 Today' },        { id:'cmd:week',      label:'🗓 Week' },
+            { id:'cmd:timetable', label:'📖 Timetable' },    { id:'cmd:weather',   label:'🌤 Weather' },
+            { id:'menu:study',    label:'📚 Study Buddy' } ] },
+  study:  { title: '📚 Study Buddy — pick one', buttons: [
+            { id:'cmd:study',     label:'🧠 What should I study?' }, { id:'cmd:deadlines', label:'📌 My deadlines' },
+            { id:'cmd:pdf',       label:'📝 Make study PDF' },       { id:'cmd:docs',      label:'📄 My documents' } ] },
+  groups: { title: '👥 Groups — pick one', buttons: [
+            { id:'cmd:groups',   label:'📋 List groups' },  { id:'cmd:registry', label:'📛 Registry' },
+            { id:'cmd:main',     label:'⭐ Main group' },   { id:'cmd:inbox',    label:'📥 Inbox' } ] },
+  ads:    { title: '📣 Ads — pick one', buttons: [
+            { id:'cmd:ad',       label:'✍️ Write an ad' },  { id:'cmd:bcad',     label:'📤 Send last ad' },
+            { id:'cmd:adstatus', label:'📊 Ad status' } ] }
+};
+async function sendButtons(jid, menuKeyOrText, opts = {}){
+  const menu = MENUS[menuKeyOrText];
+  const title = menu ? menu.title : String(menuKeyOrText);
+  const btns  = (menu ? menu.buttons : (opts.buttons || [])).slice(0, 5);
+  const S = opts.account === 'school' ? (schoolSock || sock) : (sock || schoolSock);
+  if (!S || !btns.length){ return sendBuffer(jid, { text: title }, 0, 'fast', 'admin', false, { account: opts.account }); }
+  resetDailyStats(); dailyStats.buttonsSent++;
+  pushLog('info','buttons','Menu "' + (menu ? menuKeyOrText : 'custom') + '" → ' + jid + ' [' + (opts.account||'groups') + ']');
+  /* 1) native-flow interactive message — current WhatsApp builds */
+  try {
+    const content = {
+      viewOnceMessage: {
+        message: {
+          interactiveMessage: {
+            body: { text: String(title).slice(0, 900) },
+            footer: { text: 'BreadBot v68 · tap a button' },
+            nativeFlowMessage: {
+              buttons: btns.map(b => ({
+                name: 'quick_reply',
+                buttonParamsJson: JSON.stringify({ display_text: b.label, id: b.id })
+              }))
+            }
+          }
+        }
+      }
+    };
+    const wam = generateWAMessageFromContent(jid, content, { userJid: (S.user && S.user.id) || jid });
+    await S.relayMessage(jid, wam.message, { messageId: wam.key.id });
+    if (wam.key && wam.key.id) markBotSent(wam.key.id);
+    return { ok: true, via: 'native' };
+  } catch(e){ pushLog('warn','buttons','native flow failed: ' + e.message); }
+  /* 2) legacy quick-reply buttons — older builds */
+  try {
+    const sent = await S.sendMessage(jid, {
+      text: String(title).slice(0, 900),
+      buttons: btns.map(b => ({ buttonId: b.id, buttonText: { displayText: b.label }, type: 1 })),
+      headerType: 1
+    });
+    if (sent && sent.key && sent.key.id) markBotSent(sent.key.id);
+    return { ok: true, via: 'legacy' };
+  } catch(e){ pushLog('warn','buttons','legacy buttons failed: ' + e.message); }
+  /* 3) plain text — never leave the admin without an answer */
+  const plain = title + '\n' + btns.map(b => '• ' + b.label + ' → send ' + b.id.replace(/^(cmd|menu):/, '!')).join('\n');
+  return sendBuffer(jid, { text: plain }, 0, 'fast', 'admin', false, { account: opts.account });
+}
+/* Pull a button tap out of a raw message (both WhatsApp formats) */
+function extractButtonCommand(raw){
+  const b = raw && raw.buttonsResponseMessage;
+  if (b && b.selectedButtonId) return { id: String(b.selectedButtonId), label: b.selectedDisplayText || '' };
+  const ir = raw && raw.interactiveResponseMessage;
+  if (ir && ir.nativeFlowResponseMessage){
+    try {
+      const p = JSON.parse(ir.nativeFlowResponseMessage.paramsJson || '{}');
+      if (p && p.id) return { id: String(p.id), label: '' };
+    } catch(e){}
+  }
+  return null;
+}
+/* Route a tapped button into the SAME admin commands — both accounts */
+async function routeButton(jid, id, account, msg){
+  pushLog('info','buttons','tap [' + account + ']: ' + id);
+  if (id.startsWith('menu:')){
+    const key = id.slice(5);
+    await sendButtons(jid, MENUS[key] ? key : 'main', { account });
+    return;
+  }
+  if (id.startsWith('cmd:')){
+    const mapped = '!' + id.slice(4).trim();
+    const replyFn = (t) => sendBuffer(jid, { text: t }, 0, 'fast', 'admin', false, { account: account === 'school' ? 'school' : undefined }).catch(() => {});
+    await handleAdminCommand(mapped, jid, msg || {}, { account, replyFn });
+    return;
+  }
+  await sendButtons(jid, 'main', { account });
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1093,25 +1852,40 @@ function isVague(q){ return !q || VAGUE.includes(q.toLowerCase().trim()); }
 function detectMediaIntent(text){
   const low = (text||'').toLowerCase().trim();
   if (!low) return null;
+  /* v68.1: query cleaning — filler words made searches like "the nsana",
+   * "that", "please", "ndipe". Strip leading/trailing junk + Shona request
+   * verbs so the scrapper gets the ACTUAL query. */
+  const LEAD_FILL = /^(the|a|an|that|this|those|these|any|some|please|pls|plz|of|by|from|for|ya|ye|za|ndipe|ndipewo|ndoda|mungandipe|hey|yo|chief|mukoma)\b[\s-]*/i;
+  const TRAIL_FILL = /[\s,.-]*(please|pls|plz|thanks|thank you)\s*$/i;
+  function cleanQuery(q){
+    let s = String(q||'').replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
+    let prev = null;
+    while (s && s !== prev){ prev = s; s = s.replace(LEAD_FILL,'').trim(); }
+    let prevT = null;
+    while (s && s !== prevT){ prevT = s; s = s.replace(TRAIL_FILL,'').trim(); }
+    return s;
+  }
   if (/\b(gif|gifs)\b/i.test(low)){
     let q = low.replace(/^.*?\b(gif|gifs)\b\s*(of|ya|ye|za)?\s*/i,'').trim();
+    q = cleanQuery(q);
     return { type:'gif', query: q||'funny' };
   }
   if (/\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b/i.test(low)){
     let q = low.replace(/^.*?\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b\s*(of|ya|ye|za)?\s*/i,'').trim();
+    q = cleanQuery(q);
     return { type:'video', query: q||'funny' };
   }
   if (/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/i.test(low)){
-    let q = low.replace(/^(please\s+|pls\s+|hey\s+|hi\s+|yo\s+)?(can\s+you\s+)?(send|share|give|show|drop|post|download|get)\s+(me\s+)?(a\s+|some\s+|any\s+)?/i,'');
-    q = q.replace(/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/gi,'').replace(/\b(of|by|from|for)\b/gi,'');
-    q = q.replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
+    let q = low.replace(/^(please\s+|pls\s+|hey\s+|hi\s+|yo\s+)?(can\s+you\s+)?(send|share|give|show|drop|post|download|get|ndipe|ndipewo|mungandipe)\s+(me\s+)?(a\s+|some\s+|any\s+)?/i,'');
+    q = q.replace(/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/gi,'').replace(/\b(of|by|from|for|the|that|this)\b/gi,'');
+    q = cleanQuery(q);
     return { type:'music', query: q || 'top hits' };
   }
   if (/\b(pic|pics|picture|pictures|image|images|photo|photos|mapic|mapics|mufananidzo|mifananidzo)\b/i.test(low)){
     let q = low.replace(/^(please\s+|pls\s+|hey\s+|hi\s+|yo\s+)?(can\s+you\s+)?(send|share|give|show|drop|post|ndipe|ndipoo|nditumire|ndiratidze|ndoda)\s+(me\s+)?(a\s+|some\s+|any\s+)?/i,'');
     q = q.replace(/\b(pic|pics|picture|pictures|image|images|photo|photos|mapic|mapics|mufananidzo|mifananidzo)\b/gi,'');
     q = q.replace(/\b(of|ya|ye|za|for|about|ndiye|wa)\b/gi,'');
-    q = q.replace(/[?.!,]+/g,' ').replace(/\s+/g,' ').trim();
+    q = cleanQuery(q);
     return { type:'image', query: q || 'naija' };
   }
   return null;
@@ -1171,7 +1945,10 @@ function saveGroupSettingsDebounced(){
 }
 function getGroupSetting(jid){
   if (!groupSettings.has(jid)){
-    groupSettings.set(jid, { antilink:true, welcome:true, goodbye:true,
+    /* v67: welcome/goodbye default OFF — calm engagement ("welcome can
+     * be done rarely", no "removed by admin" noise). Admin can still
+     * run !welcome on / !goodbye on for the main group. */
+    groupSettings.set(jid, { antilink:true, welcome:WELCOME_ENABLED, goodbye:GOODBYE_ENABLED,
       welcomeMsg:'Welcome {user}!', goodbyeMsg:'{user} left.' });
     saveGroupSettingsDebounced();
   }
@@ -1295,6 +2072,11 @@ async function autoSetMainGroup(){
  * ══════════════════════════════════════════════════════════════ */
 async function probeMainGroup(){
   if (!mainGroupJid || !sock || connectionStatus !== 'connected') return;
+  /* v66 FIX: this probe sent "Anyone online? 👋" on EVERY reconnect —
+   * a repeated-greeting source the user complained about. Now max once/day. */
+  const today = new Date().toISOString().slice(0,10);
+  if (lastProbeDate === today) return;
+  lastProbeDate = today;
   try {
     const sent = await sock.sendMessage(mainGroupJid, { text: 'Anyone online? 👋' });
     if (sent?.key?.id) markBotSent(sent.key.id);
@@ -1339,18 +2121,34 @@ async function generateGoodbye(userName){
 async function handleParticipants(update){
   const { id, participants, action } = update;
   if (!mainGroupJid || id !== mainGroupJid) return;
-  for (const p of participants){
-    const user = p.split('@')[0];
-    if (action === 'add'){
+  /* v67 CALM ENGAGEMENT:
+   *  - welcome only in the MAIN group, WELCOME_PER_DAY (3) per day max,
+   *    WELCOME_COOLDOWN_MS (7 days) per user, OFF by default.
+   *  - goodbye OFF by default — no more "removed by admin" messages.
+   *  Admin opt-in: !welcome on / !goodbye on. */
+  const settings = getGroupSetting(id);
+  if (action === 'add' && (settings.welcome || WELCOME_ENABLED)){
+    const today = new Date().toISOString().slice(0,10);
+    if (welcomesDay !== today){ welcomesDay = today; welcomesToday = 0; }
+    for (const p of participants){
+      if (welcomesToday >= WELCOME_PER_DAY){
+        pushLog('info','welcome','Daily welcome cap (' + WELCOME_PER_DAY + ') reached — staying quiet');
+        break;
+      }
+      const last = welcomeLastAt.get(p) || 0;
+      if (Date.now() - last < WELCOME_COOLDOWN_MS) continue;
       try {
-        const msg = await generateWelcome(user);
+        const msg = await generateWelcome(p.split('@')[0]);
         await sendBuffer(id, { text: msg, mentions:[p] }, 0, 'fast', 'admin', false);
-        pushLog('success','welcome',`Welcomed ${user}`);
+        welcomeLastAt.set(p, Date.now()); welcomesToday++;
+        pushLog('success','welcome',`Welcomed ${p.split('@')[0]} (${welcomesToday}/${WELCOME_PER_DAY} today)`);
       } catch(e){ pushLog('warn','welcome',e.message); }
     }
-    if (action === 'remove'){
+  }
+  if (action === 'remove' && (settings.goodbye || GOODBYE_ENABLED)){
+    for (const p of participants){
       try {
-        const msg = await generateGoodbye(user);
+        const msg = await generateGoodbye(p.split('@')[0]);
         await sendBuffer(id, { text: msg }, 0, 'fast', 'admin', false);
       } catch(e){ pushLog('warn','goodbye',e.message); }
     }
@@ -1412,13 +2210,257 @@ function discoverGroup(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  v68.2: ADMIN TASK SCHEDULER
+ *  "send 5 chess videos to this group by 5" → the bot plans the sends
+ *  like a person: ONE item at a time, spread out with human-ish gaps,
+ *  never a burst. Works on BOTH accounts (groups + school) — the group
+ *  name is resolved across both registries.
+ * ══════════════════════════════════════════════════════════════ */
+const TASKS_FILE         = 'tasks.json';
+const TASKS_MAX_ACTIVE   = 12;
+const TASK_MAX_ITEMS     = 20;
+const TASK_MIN_GAP_MS    = 3 * 60 * 1000;   /* never faster than a human */
+const TASK_DEFAULT_GAP   = [4, 8];          /* minutes between sends when no deadline */
+const TASK_MAX_FAILURES  = 5;
+const scheduledTasks = new Map();
+let tasksSaveTimer = null;
+
+function loadTasks(){
+  try {
+    if (fs.existsSync(TASKS_FILE)){
+      for (const t of JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8'))){
+        if (t && t.id) scheduledTasks.set(t.id, t);
+      }
+      if (scheduledTasks.size) pushLog('info','tasks',`Loaded ${scheduledTasks.size} saved task(s)`);
+    }
+  } catch(e){ pushLog('warn','tasks','load: '+e.message); }
+}
+function saveTasks(){
+  clearTimeout(tasksSaveTimer);
+  tasksSaveTimer = setTimeout(function(){
+    try { fs.writeFileSync(TASKS_FILE, JSON.stringify([...scheduledTasks.values()], null, 1)); } catch(e){}
+  }, 800);
+}
+
+/* "by 5" → 17:00 (Zim speak), "by 5pm", "by 17:30", "in 2 hours",
+ * "in 30 min", "tonight", "tomorrow", "tomorrow morning", "now/asap" */
+function parseDeadline(s){
+  const now = new Date();
+  s = String(s||'').toLowerCase().trim();
+  if (!s) return 0;
+  if (/^(now|asap|immediately|just now|right now)/.test(s)) return Date.now() + TASK_MIN_GAP_MS;
+  let m = s.match(/^in\s+(\d+)\s*(min|mins|minutes?|h|hr|hrs|hours?)\b/);
+  if (m){ const n = parseInt(m[1],10); return Date.now() + (/^h/.test(m[2]) ? n*3600000 : n*60000); }
+  m = s.match(/^(tonight|this evening)/);
+  if (m){ const d = new Date(now); d.setHours(21,0,0,0); if (d <= now) d.setDate(d.getDate()+1); return d.getTime(); }
+  m = s.match(/^tomorrow(\s+morning)?\b/);
+  if (m){ const d = new Date(now); d.setDate(d.getDate()+1); d.setHours(m[1] ? 8 : 12, 0, 0, 0); return d.getTime(); }
+  m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (m){
+    let h = parseInt(m[1],10); const min = parseInt(m[2]||'0',10); const ap = m[3];
+    if (ap === 'pm' && h < 12) h += 12;
+    if (ap === 'am' && h === 12) h = 0;
+    if (!ap && h <= 7) h += 12;                 /* "by 5" = 5pm, "by 9" = 9pm */
+    const d = new Date(now); d.setHours(h, min, 0, 0);
+    if (d <= now) d.setDate(d.getDate()+1);
+    return d.getTime();
+  }
+  return 0;
+}
+
+const TASK_NOUNS = 'videos?|clips?|songs?|music|tracks?|mixtapes?|mixtape|pics?|pictures?|photos?|images?|gifs?';
+/* "send 5 chess videos to this group by 5" / "send videos of chess into
+ * the chess club by 5pm" / "send 3 winky d songs to main group" */
+function parseTaskRequest(text){
+  if (!text) return null;
+  const t = String(text).toLowerCase().trim();
+  if (t.length > 200 || t.includes('\n')) return null;
+  if (!/^send\b/.test(t)) return null;
+  let m = t.match(new RegExp('^send\\s+(?:(\\d{1,2})\\s+)?\\s*(?:(.+?)\\s+)?(' + TASK_NOUNS + ')\\s+of\\s+(.+?)\\s+(?:to|into|in)\\s+(.+)$'));
+  let count, query, noun, targetSpec;
+  if (m){ count = m[1]; query = m[4] || m[2] || ''; noun = m[3]; targetSpec = m[5]; }
+  else {
+    m = t.match(new RegExp('^send\\s+(?:(\\d{1,2})\\s+)?(.+?)\\s+(' + TASK_NOUNS + ')\\s+(?:to|into|in)\\s+(.+)$'));
+    if (!m) return null;
+    count = m[1]; query = m[2]; noun = m[3]; targetSpec = m[4];
+  }
+  query = String(query||'')
+    .replace(/^(the|a|an|some|new|latest|more|please|pls)\s+/i,'')
+    .replace(/\s+(please|pls)$/i,'')
+    .replace(/[?.!,]/g,'').trim() || 'top hits';
+  const kind = /^(videos?|clips?)$/.test(noun) ? 'video'
+             : /^(songs?|music|tracks?|mixtapes?|mixtape)$/.test(noun) ? 'music'
+             : /^gifs?$/.test(noun) ? 'gif' : 'image';
+  count = Math.min(TASK_MAX_ITEMS, Math.max(1, parseInt(count,10) || 3));
+  /* trailing duration without "by": "… to funny group in 2 hours" */
+  const inM = targetSpec.match(/^(.*?)\s+in\s+(\d+\s*(?:min|mins|minutes?|h|hr|hrs|hours?))\s*$/);
+  if (inM){ targetSpec = inM[1]; }
+  const byM = targetSpec.match(/^(.*?)\s+by\s+(.+)$/);
+  let deadline = 0;
+  if (inM){
+    deadline = parseDeadline('in ' + inM[2]);
+  } else if (byM){
+    deadline = parseDeadline(byM[2]);
+    if (!deadline) return { badTime: byM[2], query, kind, count, targetSpec: byM[1] };
+    targetSpec = byM[1];
+  }
+  return { count, query, kind, targetSpec: targetSpec.trim(), deadline };
+}
+
+/* "this group" / "main group" / exact group name / raw @g.us jid —
+ * names are fuzzy-matched across BOTH accounts' registries */
+function resolveTaskTarget(spec, fromJid){
+  const s = String(spec||'').toLowerCase().trim();
+  let jid = null, account = 'groups', label = spec;
+  if (/^(this group|main group|the main group|the group|main|here)$/.test(s)){
+    jid = mainGroupJid; label = getGroupName(jid) || 'main group';
+  } else if (/\d+@g\.us/.test(s)){
+    jid = (s.match(/(\d+@g\.us)/) || [])[1]; label = getGroupName(jid) || jid;
+  } else {
+    const norm = x => String(x||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const want = norm(s);
+    if (want){
+      for (const [g, info] of joinedGroups){
+        const n = norm(info && info.name);
+        if (n && (n.includes(want) || want.includes(n))){ jid = g; account = 'groups'; label = info.name; break; }
+      }
+      if (!jid){
+        for (const [g, name] of schoolRegistry){
+          const n = norm(name);
+          if (n && (n.includes(want) || want.includes(n))){ jid = g; account = 'school'; label = name; break; }
+        }
+      }
+    }
+  }
+  if (!jid && fromJid && fromJid.endsWith('@g.us')){
+    jid = fromJid; account = 'groups'; label = getGroupName(fromJid) || fromJid;
+  }
+  return jid ? { jid, account, label } : null;
+}
+
+function scheduleAdminTask(spec, fromJid){
+  if (scheduledTasks.size >= TASKS_MAX_ACTIVE){
+    const active = [...scheduledTasks.values()].filter(t => t.status === 'active').length;
+    if (active >= TASKS_MAX_ACTIVE) return { error:'Too many active tasks — cancel one first ("tasks" to list).' };
+  }
+  const target = resolveTaskTarget(spec.targetSpec, fromJid);
+  if (!target) return { error:'I could not find that group. Use a name from "groups" or "registry", or type "this group" from inside the group.' };
+  const id = Math.random().toString(36).slice(2,6);
+  const gapMs = spec.deadline
+    ? Math.max(TASK_MIN_GAP_MS, Math.floor((spec.deadline - Date.now()) / (spec.count + 1)))
+    : Math.floor((TASK_DEFAULT_GAP[0] + Math.random() * (TASK_DEFAULT_GAP[1] - TASK_DEFAULT_GAP[0])) * 60000);
+  const task = {
+    id, kind: spec.kind, query: spec.query, count: spec.count,
+    targetJid: target.jid, account: target.account, targetLabel: target.label,
+    deadline: spec.deadline || 0, gapMs,
+    sent: 0, sentUrls: [], failures: 0,
+    createdAt: Date.now(),
+    nextSendAt: Date.now() + Math.floor(TASK_MIN_GAP_MS / 2),
+    status: 'active'
+  };
+  scheduledTasks.set(id, task); saveTasks();
+  const nounTxt = spec.kind === 'music' ? 'songs' : spec.kind + 's';
+  const whenTxt = spec.deadline
+    ? 'until ' + new Date(spec.deadline).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})
+    : 'at my own pace';
+  const plan = '📌 Task #' + id + ': ' + spec.count + ' ' + nounTxt + ' "' + spec.query + '" → '
+    + target.label + ' (' + target.account + ' account)\n'
+    + 'I\'ll drop ONE every ~' + Math.round(gapMs/60000) + ' min ' + whenTxt + ' — like a person would, no flooding.\n'
+    + 'Check: "tasks" · Cancel: "cancel task ' + id + '"';
+  pushLog('info','tasks','Scheduled #' + id + ': ' + spec.count + ' ' + nounTxt + ' "' + spec.query + '" → ' + target.label);
+  return { task, plan };
+}
+
+async function tickTasks(){
+  if (botPaused) return;
+  const now = Date.now();
+  for (const [id, t] of scheduledTasks){
+    try {
+      if (t.status !== 'active') continue;
+      if (t.sent >= t.count){
+        t.status = 'done';
+        adminReply(ADMIN_JID, '✅ Task #' + id + ' finished — ' + t.count + ' ' + (t.kind==='music'?'songs':t.kind+'s') + ' "' + t.query + '" sent to ' + t.targetLabel + '.');
+        saveTasks(); continue;
+      }
+      if (t.deadline && now > t.deadline){
+        t.status = 'expired';
+        adminReply(ADMIN_JID, '⌛ Task #' + id + ' ran out of time — sent ' + t.sent + '/' + t.count + ' to ' + t.targetLabel + '.');
+        saveTasks(); continue;
+      }
+      if (t.failures >= TASK_MAX_FAILURES){
+        t.status = 'failed';
+        adminReply(ADMIN_JID, '⚠️ Task #' + id + ' gave up after ' + t.failures + ' failures (' + t.sent + '/' + t.count + ' sent). Scrapper may be down.');
+        saveTasks(); continue;
+      }
+      if (now < t.nextSendAt) continue;
+      /* fetch the next item — never repeat one already sent */
+      let r = null;
+      for (let tries = 0; tries < 2; tries++){
+        r = t.kind === 'music' ? await scraperMusic(t.query)
+          : t.kind === 'video' ? await scraperVideo(t.query)
+          : t.kind === 'gif'   ? await scraperGif(t.query)
+          : await scraperSearch(t.query);
+        if (r && r.ok) break;
+      }
+      let url = null, caption = t.query, mimetype = '';
+      if (r && r.ok){
+        if (t.kind === 'gif' && r.gifs && r.gifs.length){
+          url = r.gifs.find(g => !t.sentUrls.includes(g)) || r.gifs[0];
+        } else if (t.kind === 'image' && r.images && r.images.length){
+          url = r.images.find(i => !t.sentUrls.includes(i)) || r.images[0];
+        } else if (r.mediaUrl){
+          url = t.sentUrls.includes(r.mediaUrl) ? null : r.mediaUrl;
+          caption = r.title || t.query; mimetype = r.mimetype || '';
+        }
+      }
+      if (!url){
+        t.failures++;
+        t.nextSendAt = now + TASK_MIN_GAP_MS;
+        if (t.failures >= TASK_MAX_FAILURES) pushLog('warn','tasks','Task #' + id + ' hitting failure limit (' + (r && r.error ? r.error : 'no result') + ')');
+        saveTasks(); continue;
+      }
+      t.failures = 0;
+      if (t.kind === 'gif'){
+        await sendGifSafe(t.targetJid, url, caption, 2, 'slow', 'admin', false, { account: t.account });
+      } else if (t.kind === 'image'){
+        await sendImageSafe(t.targetJid, url, caption, 2, 'slow', 'admin', false, { account: t.account });
+      } else {
+        await sendMediaUrl(t.targetJid, url, {
+          kind: t.kind === 'music' ? 'audio' : 'video', mimetype, caption,
+          priority: 2, lane: 'slow', taskType: 'admin', typing: false, account: t.account
+        });
+      }
+      t.sent++; t.sentUrls.push(url);
+      const remaining = Math.max(1, t.count - t.sent);
+      const remainingMs = t.deadline ? Math.max(0, t.deadline - now) : 0;
+      t.nextSendAt = t.deadline
+        ? now + Math.max(TASK_MIN_GAP_MS, Math.floor(remainingMs / remaining) + Math.floor(Math.random() * 3 * 60000))
+        : now + Math.floor((TASK_DEFAULT_GAP[0] + Math.random() * (TASK_DEFAULT_GAP[1] - TASK_DEFAULT_GAP[0])) * 60000);
+      pushLog('info','tasks','Task #' + id + ': sent ' + t.sent + '/' + t.count + ' to ' + t.targetLabel);
+      saveTasks();
+    } catch(e){
+      pushLog('error','tasks','Task #' + id + ': ' + e.message);
+      t.nextSendAt = now + TASK_MIN_GAP_MS;
+      saveTasks();
+    }
+  }
+}
+function startTaskScheduler(){
+  loadTasks();
+  setInterval(tickTasks, 30 * 1000).unref?.();
+  pushLog('info','tasks','Task scheduler started (30s tick, human-paced sends)');
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  SCHEDULERS
  * ══════════════════════════════════════════════════════════════ */
+/* v66: pools expanded (was 3-4 phrases each — the direct cause of the
+ * "same greeting over and over" complaint) */
 const GREETING_PHRASES = {
-  morning:['Morning all','Mangwanani guys','Good morning fam'],
-  midday:['Hi guys','Hey everyone','Hello fam'],
-  evening:['Good evening fam','Evening all','Manheru guys'],
-  night:['Good night all','Manheru akanaka','Sleep well fam']
+  morning:['Morning all','Mangwanani guys','Good morning fam','Morning fam ☀️','Mhoroi everyone','Rise and shine fam','Mhoro chomi','Bhoo mangwanani mdhara','Sharp sharp, morning fam','Ndiwo mangwanani'],
+  midday:['Hi guys','Hey everyone','Hello fam','Afternoon all','Masikati akanaka','Bhoo fam','Mhoro mdhara','Sharp sharp chomi','Hey hey, how is everyone','Zvakanaka here fam'],
+  evening:['Good evening fam','Evening all','Manheru guys','Evening everyone 🌆','Bhoo manheru chomi','Evening mdhara','Sharp fam, mhoro','Manheru akanaka'],
+  night:['Good night all','Manheru akanaka','Sleep well fam','Night night everyone','Lala zvakanaka chomi','Nyarara bhoo mdhara','Sharp, lala zvakanaka','Rest well fam']
 };
 function getTimeOfDay(){
   const h = localHour();
@@ -1430,33 +2472,51 @@ function getTimeOfDay(){
 function pickGreeting(p){ const pool = GREETING_PHRASES[p] || GREETING_PHRASES.midday; return pool[Math.floor(Math.random()*pool.length)]; }
 
 function scheduleGreetings(){
+  /* v67 CALM ENGAGEMENT: the bot no longer announces its presence in
+   * every group. Greetings go to the MAIN GROUP ONLY, at most
+   * GREETINGS_PER_DAY (default 2) per day, and never right after the
+   * bot has already spoken there. */
   setInterval(async function(){
     if (!sock || connectionStatus!=='connected' || !mainGroupJid || botPaused) return;
     if (Date.now() < botOfflineUntil) return;
     if (isAdminActive()) return;
+    if (SCHOOL_MODE) return; // school monitor never posts greetings
+    if (GREETINGS_PER_DAY <= 0) return;
+    const today = new Date().toISOString().slice(0,10);
+    if (greetingsDay !== today){ greetingsDay = today; greetingsToday = 0; }
+    if (greetingsToday >= GREETINGS_PER_DAY) return;
     const now = Date.now();
     const minMs = GREETING_MIN_HOURS*3600000, maxMs = GREETING_MAX_HOURS*3600000;
-    for (const [jid] of joinedGroups){
-      if (jid === mainGroupJid) continue;
-      const sinceLast = now - (lastGreetingAt.get(jid)||0);
-      if (sinceLast < minMs) continue;
-      const progress = (sinceLast - minMs) / (maxMs - minMs);
-      if (Math.random() > Math.min(progress, 1)) continue;
-      try {
-        await sendBuffer(jid, { text: pickGreeting(getTimeOfDay()) }, 3, 'slow', 'group', false);
-        lastGreetingAt.set(jid, now); resetDailyStats(); dailyStats.greetingsSent++;
-      } catch(e){}
-    }
+    /* main group only — all other groups are left alone */
+    const jid = mainGroupJid;
+    const sinceLast = now - Math.max(lastGreetingAt.get(jid)||0, lastBotSendAt.get(jid)||0);
+    if (sinceLast < minMs) return;
+    const progress = (sinceLast - minMs) / (maxMs - minMs);
+    if (Math.random() > Math.min(progress, 1)) return;
+    const lastPhrase = lastGreetingPhrase.get(jid);
+    let phrase = pickGreeting(getTimeOfDay());
+    let tries = 0;
+    while (phrase === lastPhrase && tries++ < 6) phrase = pickGreeting(getTimeOfDay());
+    if (phrase === lastPhrase) return;
+    try {
+      await sendBuffer(jid, { text: phrase }, 3, 'slow', 'group', false);
+      lastGreetingAt.set(jid, now); lastGreetingPhrase.set(jid, phrase);
+      greetingsToday++;
+      resetDailyStats(); dailyStats.greetingsSent++;
+      pushLog('info','greet',`Main-group greeting ${greetingsToday}/${GREETINGS_PER_DAY} today`);
+    } catch(e){}
     saveGroups();
   }, 900000);
-  pushLog('info','system','scheduleGreetings started');
+  pushLog('info','system','scheduleGreetings started (MAIN GROUP ONLY, max ' + GREETINGS_PER_DAY + '/day)');
 }
 
 function scheduleDailyReport(){
   setInterval(async function(){
     if (!sock || connectionStatus!=='connected') return;
-    const now = new Date(); const today = now.toISOString().slice(0,10);
-    if (now.getHours() !== DAILY_REPORT_HOUR || lastReportSentDate === today) return;
+    /* v66 FIX: was now.getHours() — server-UTC on Render, so the report
+     * fired at the wrong "time of day" for Zimbabwe. Use localHour(). */
+    const today = new Date().toISOString().slice(0,10);
+    if (localHour() !== DAILY_REPORT_HOUR || lastReportSentDate === today) return;
     lastReportSentDate = today;
     resetDailyStats();
     const s = dailyStats;
@@ -1567,13 +2627,31 @@ function startDmAiCycle(){
   pushLog('info','ai',`DM AI cycle: ${DM_BATCH_MIN}-${DM_BATCH_MAX} random DMs per ${DM_CYCLE_MS/1000}s`);
 }
 
+/* v68.2: INTERACTIVITY GATE — reply to people who are actually talking
+ * with the bot, not to every message in the pool:
+ *   • 2+ texts queued            = engaged, reply
+ *   • replied within 45 min of the bot's last reply = active convo
+ *   • brand-new DM while clearly online (≤15 min)   = reply now
+ *   • everything else            = wait (a second text promotes it) */
+function dmIsInteractive(jid, e){
+  if (!e || !e.text) return false;
+  if (e.messages && e.messages.length >= 2) return true;
+  const hist = userHistories.get(jid) || [];
+  const last = hist[hist.length - 1];
+  if (last && last.role === 'user' && Date.now() - last.ts < 45 * 60 * 1000) return true;
+  return (Date.now() - e.ts) < DM_FRESH_MS;
+}
 async function runDmAiBatch(){
   if (!sock || connectionStatus !== 'connected') return;
   if (botPaused || Date.now() < botOfflineUntil) return;
   if (focus.busy) return;
   if (isAdminActive()) return;
 
-  const candidates = [...dmPool.entries()].filter(([jid, e]) => e && e.text && e.lastMsg && !e.replied);
+  /* v68.2: focused — only interactive people, one chat at a time */
+  const all = [...dmPool.entries()].filter(([jid, e]) => e && e.text && e.lastMsg && !e.replied);
+  const candidates = all.filter(([jid, e]) => dmIsInteractive(jid, e));
+  const quiet = all.length - candidates.length;
+  if (quiet > 0) pushLog('info','ai',`DM focus: ${candidates.length} interactive · ${quiet} quiet (waiting for engagement)`);
   if (!candidates.length) return;
 
   const n = Math.min(
@@ -1593,6 +2671,7 @@ async function runDmAiBatch(){
         senderJid: jid,
         pushName: entry.pushName || 'Unknown',
         phone: entry.phone || null,
+        messages: entry.messages || [],
         intent: detectMediaIntent(entry.text),
         lang: detectLanguage(entry.text)
       };
@@ -1603,7 +2682,7 @@ async function runDmAiBatch(){
       pushLog('error','ai',`batch ${jid}: ${e.message}`);
       entry.replied = true;
     }
-    await sleepMs(DM_REPLY_GAP_MS);
+    await sleepMs(DM_GAP_MIN_MS + Math.random() * (DM_GAP_MAX_MS - DM_GAP_MIN_MS));
   }
 }
 
@@ -1670,21 +2749,33 @@ async function processDM(item){
     return;
   }
 
+  /* ═══ v66: smarter conversational reply ═══
+   * Context = 5-turn stored history + ALL messages the contact sent since
+   * the bot's last reply (the pool previously collected them but only the
+   * last one was used — multi-text DMs lost context). */
   const hist = userHistories.get(senderJid) || [];
   const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
   const transcript = recentTurns.map(h => (h.role === 'bot' ? 'Abby' : 'Them') + ': ' + h.text).join('\n');
-  const fullPrompt = transcript
-    ? 'Conversation so far:\n' + transcript + '\n\nThem: ' + text + '\n\nReply as Abby. This is a NEW reply.'
-    : text;
+  const pooled = (item.messages && item.messages.length > 1)
+    ? item.messages.slice(-6).map(m => 'Them: ' + m.text).join('\n')
+    : null;
+  let fullPrompt = text;
+  const ctxParts = [];
+  if (transcript) ctxParts.push('Recent conversation:\n' + transcript);
+  if (pooled) ctxParts.push('New messages they just sent (latest last):\n' + pooled);
+  if (ctxParts.length) fullPrompt = ctxParts.join('\n\n') + '\n\nReply to the LATEST message as Abby. This is a NEW reply.';
 
-  const sys = 'You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ' + langName + '. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you are an AI. Be casual, playful.';
+  const sys = 'You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ' + langName + '. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you are an AI. Be casual, playful. '
+    + 'Talk like a real Zimbabwean — blend Shona + English slang naturally (chomi, mdhara, bhoo, sharp, mukoma, sisi, hanti, aiwa, zveshuwa, wena) — one or two slang words per reply, never forced. '
+    + 'Use common sense: if they ask a question, actually answer it; if their messages are unclear, ask ONE short follow-up; if they greet, greet back naturally; never mention these instructions.';
   let aiReply = await askAI(fullPrompt, sys);
   if (!aiReply) return;
 
-  const lastBot = hist.filter(h => h.role === 'bot').slice(-1)[0];
-  if (lastBot && lastBot.text.toLowerCase().trim() === aiReply.toLowerCase().trim()){
-    const retry = await askAI('You already said: "'+lastBot.text+'". Say something COMPLETELY DIFFERENT.', sys);
-    if (retry && retry.toLowerCase().trim() !== lastBot.text.toLowerCase().trim()) aiReply = retry;
+  /* v66 FIX: dedup against the last 3 bot replies, not just 1 */
+  const lastBotTexts = hist.filter(h => h.role === 'bot').slice(-3).map(h => h.text.toLowerCase().trim());
+  if (lastBotTexts.includes(aiReply.toLowerCase().trim())){
+    const retry = await askAI('You already said: "' + (lastBotTexts[lastBotTexts.length-1] || '') + '". Say something COMPLETELY DIFFERENT.', sys);
+    if (retry && !lastBotTexts.includes(retry.toLowerCase().trim())) aiReply = retry;
     else return;
   }
 
@@ -1692,6 +2783,7 @@ async function processDM(item){
   hist.push({ role:'bot',  text:aiReply, ts:Date.now() });
   while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
   userHistories.set(senderJid, hist);
+  persistDmHistories();
 
   await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow', 'dmreply', true);
   resetDailyStats(); dailyStats.dmsReplied++;
@@ -1756,11 +2848,317 @@ class AdBuilder {
 
 let previewCache = { imageUrls:[], imageIndex:0, gifUrls:[], gifIndex:0, currentType:null, currentUrl:null };
 const replyCache = new NodeCache({ stdTTL:600 });
+const dmInfoCache = new NodeCache({ stdTTL:3600 });
+
+/* ══════════════════════════════════════════════════════════════
+ *  GROUP REGISTRY (v66) — id, name/subject, open-to-send, members
+ * ══════════════════════════════════════════════════════════════ */
+function saveGroupRegistry(){
+  try { fs.writeFileSync(GROUP_REGISTRY_FILE, JSON.stringify([...groupRegistry.entries()],null,2)); } catch(e){}
+}
+function loadGroupRegistry(){
+  try {
+    if (fs.existsSync(GROUP_REGISTRY_FILE)){
+      const arr = JSON.parse(fs.readFileSync(GROUP_REGISTRY_FILE,'utf8')) || [];
+      for (const [jid, v] of arr) groupRegistry.set(jid, v);
+    }
+  } catch(e){}
+}
+async function refreshGroupRegistry(){
+  if (!sock || connectionStatus !== 'connected') return;
+  try {
+    const all = await sock.groupFetchAllParticipating();
+    let added = 0;
+    for (const [jid, meta] of Object.entries(all || {})){
+      const prev = groupRegistry.get(jid) || {};
+      let botAdmin = false;
+      const me = (meta.participants || []).find(function(p){
+        const pid = (p.id || '').split('@')[0].split(':')[0];
+        return (botNumber && pid === botNumber) || (botLid && p.lid && p.lid === botLid) || (botJid && p.id === botJid);
+      });
+      botAdmin = !!(me && (me.admin === 'admin' || me.admin === 'superadmin'));
+      groupRegistry.set(jid, {
+        subject: meta.subject || prev.subject || 'unknown',
+        owner: meta.owner || prev.owner || null,
+        size: (meta.participants && meta.participants.length) || meta.size || prev.size || 0,
+        announce: !!meta.announce,
+        restrict: !!meta.restrict,
+        botAdmin: botAdmin,
+        participants: (meta.participants || []).map(function(p){
+          return { id: p.id, lid: p.lid || null, pn: (p.phoneNumber || p.id || '').split('@')[0] };
+        }),
+        updatedAt: Date.now()
+      });
+      if (!joinedGroups.has(jid)){ discoverGroup(jid); added++; }
+    }
+    saveGroupRegistry();
+    pushLog('success','registry',`Group registry refreshed: ${groupRegistry.size} groups (${added} new)`);
+  } catch(e){ pushLog('warn','registry','refresh failed: '+e.message); }
+}
+function getGroupName(jid){
+  const g = groupRegistry.get(jid);
+  if (g && g.subject) return g.subject;
+  const jg = joinedGroups.get(jid);
+  return (jg && jg.name) || null;
+}
+/* "know which groups are open to send messages": announce-only groups
+ * only accept admin posts — the bot must not broadcast into them. */
+function canSendToGroup(jid){
+  const g = groupRegistry.get(jid);
+  if (!g) return { ok:true, reason:'no metadata (assume open)' };
+  if (g.announce && !g.botAdmin) return { ok:false, reason:'announce-only (admins write)' };
+  return { ok:true, reason:'open' };
+}
+function commonGroupsWith(identifier){
+  if (!identifier) return [];
+  const out = [];
+  for (const [jid, g] of groupRegistry){
+    if (!g.participants) continue;
+    const hit = g.participants.some(function(p){
+      return p.pn === identifier || p.lid === identifier || (p.id||'').split('@')[0] === identifier;
+    });
+    if (hit) out.push(g.subject || jid);
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  WEATHER — Open-Meteo (free, NO API key)  v66
+ *  Harare (home) + Bindura (BUSE). WMO codes per Open-Meteo docs.
+ * ══════════════════════════════════════════════════════════════ */
+const WMO_CODES = {
+  0:'Clear sky', 1:'Mainly clear', 2:'Partly cloudy', 3:'Overcast',
+  45:'Fog', 48:'Depositing rime fog',
+  51:'Light drizzle', 53:'Moderate drizzle', 55:'Dense drizzle',
+  56:'Light freezing drizzle', 57:'Dense freezing drizzle',
+  61:'Slight rain', 63:'Moderate rain', 65:'Heavy rain',
+  66:'Light freezing rain', 67:'Heavy freezing rain',
+  71:'Slight snowfall', 73:'Moderate snowfall', 75:'Heavy snowfall', 77:'Snow grains',
+  80:'Slight rain showers', 81:'Moderate rain showers', 82:'Violent rain showers',
+  85:'Slight snow showers', 86:'Heavy snow showers',
+  95:'Thunderstorm', 96:'Thunderstorm with slight hail', 99:'Thunderstorm with heavy hail'
+};
+async function getWeather(locKey){
+  const loc = WEATHER_LOCATIONS.find(function(l){ return l.key === (locKey||'harare'); }) || WEATHER_LOCATIONS[0];
+  const url = 'https://api.open-meteo.com/v1/forecast'
+    + '?latitude=' + loc.lat + '&longitude=' + loc.lon
+    + '&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m'
+    + '&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code'
+    + '&timezone=Africa%2FHarare&forecast_days=1';
+  const r = await axios.get(url, { timeout: 15000 });
+  const c = r.data?.current, d = r.data?.daily;
+  if (!c) throw new Error('Open-Meteo returned no current data');
+  return {
+    label: loc.label,
+    desc: WMO_CODES[c.weather_code] || 'Unknown (' + c.weather_code + ')',
+    temp: Math.round(c.temperature_2m),
+    feels: Math.round(c.apparent_temperature ?? c.temperature_2m),
+    humidity: c.relative_humidity_2m,
+    wind: Math.round(c.wind_speed_10m ?? 0),
+    max: d?.temperature_2m_max?.[0] != null ? Math.round(d.temperature_2m_max[0]) : null,
+    min: d?.temperature_2m_min?.[0] != null ? Math.round(d.temperature_2m_min[0]) : null,
+    rain: d?.precipitation_sum?.[0] != null ? d.precipitation_sum[0] : null
+  };
+}
+function weatherLine(w){
+  let s = w.label + ': ' + w.desc + ', ' + w.temp + '°C (feels ' + w.feels + '°C)';
+  if (w.max != null && w.min != null) s += ', range ' + w.min + '–' + w.max + '°C';
+  s += ', humidity ' + w.humidity + '%, wind ' + w.wind + 'km/h';
+  if (w.rain != null) s += ', rain ' + w.rain + 'mm';
+  return s;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  SCHOOL DATA (v66) — lectures / assignments / presentations
+ *  Source of truth: school_data.json (editable) + !add* commands.
+ * ══════════════════════════════════════════════════════════════ */
+let schoolData = { lectures: [], assignments: [] };
+function loadSchoolData(){
+  try {
+    if (fs.existsSync(SCHOOL_DATA_FILE)){
+      const d = JSON.parse(fs.readFileSync(SCHOOL_DATA_FILE,'utf8'));
+      schoolData = { lectures: Array.isArray(d.lectures) ? d.lectures : [], assignments: Array.isArray(d.assignments) ? d.assignments : [] };
+    }
+  } catch(e){ pushLog('warn','school','school_data.json load failed: '+e.message); }
+}
+function saveSchoolData(){
+  try { fs.writeFileSync(SCHOOL_DATA_FILE, JSON.stringify(schoolData,null,2)); } catch(e){}
+}
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+function dayIndexFromName(name){
+  const n = String(name||'').toLowerCase().slice(0,3);
+  const i = ['sun','mon','tue','wed','thu','fri','sat'].indexOf(n);
+  return i;
+}
+function localNow(){ return new Date(Date.now() + TZ_OFFSET_HOURS * 3600000); }
+function lecturesForDay(dayIdx){
+  return schoolData.lectures
+    .filter(function(l){ return Number(l.day) === dayIdx; })
+    .sort(function(a,b){ return String(a.start||'').localeCompare(String(b.start||'')); });
+}
+function upcomingWork(days){
+  const now = Date.now(); const out = [];
+  for (const a of schoolData.assignments){
+    const due = new Date(String(a.due) + 'T23:59:59Z').getTime();
+    if (isNaN(due)) continue;
+    const dLeft = Math.ceil((due - now) / 86400000);
+    if (dLeft <= days) out.push(Object.assign({}, a, { dueIn: dLeft }));
+  }
+  return out.sort(function(a,b){ return a.dueIn - b.dueIn; });
+}
+async function buildMorningReport(){
+  const d = localNow();
+  const dayIdx = d.getUTCDay();
+  const lines = [];
+  lines.push('☀️ Morning report — ' + DAY_NAMES[dayIdx] + ' ' + d.getUTCDate() + '/' + (d.getUTCMonth()+1) + '/' + d.getUTCFullYear());
+  lines.push('');
+  try {
+    for (const loc of WEATHER_LOCATIONS){ lines.push(weatherLine(await getWeather(loc.key))); }
+  } catch(e){ lines.push('Weather: unavailable (' + e.message + ')'); }
+  lines.push('');
+  const lects = lecturesForDay(dayIdx);
+  if (lects.length){
+    lines.push('📚 Lectures today:');
+    for (const l of lects) lines.push('• ' + l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : ''));
+  } else {
+    lines.push('📚 No lectures scheduled today.');
+  }
+  const work = upcomingWork(7);
+  if (work.length){
+    lines.push('');
+    lines.push('📝 Due within 7 days:');
+    for (const w of work){
+      const tag = w.dueIn < 0 ? 'OVERDUE' : (w.dueIn === 0 ? 'TODAY' : w.dueIn + 'd');
+      lines.push('• [' + tag + '] ' + (w.type || 'assignment') + ': ' + w.title + ' (' + w.module + ') — due ' + w.due);
+    }
+  } else {
+    lines.push('');
+    lines.push('📝 Nothing due in the next 7 days.');
+  }
+  /* v68: study buddy — what to attack first, in order */
+  const prio = upcomingWork(14).filter(w => w.dueIn >= 0).slice(0, 3);
+  if (prio.length){
+    lines.push('');
+    lines.push('🧠 Study first (my order):');
+    prio.forEach((w, i) => lines.push((i+1) + '. ' + (w.module || '') + ' ' + w.title + ' (' + (w.dueIn === 0 ? 'due TODAY' : w.dueIn + 'd left') + ')'));
+  }
+  if (SCHOOL_MODE){
+    lines.push('');
+    lines.push('👥 Monitoring ' + groupRegistry.size + ' groups · ' + activeDMs.size + ' DM contacts · msgs today: ' + ((dailyStats && dailyStats.messagesDropped !== undefined) ? dailyStats.readsSent : 0) + ' read');
+  }
+  return lines.join('\n');
+}
+function scheduleMorningReport(){
+  setInterval(async function(){
+    try {
+      /* v67: the SCHOOL account (second QR) sends the morning report when
+       * it is connected — it is the admin's school line. Falls back to
+       * the groups account. */
+      const useS = schoolSock && schoolStatus === 'connected';
+      const S = useS ? schoolSock : sock;
+      if (!S || (useS ? schoolStatus : connectionStatus) !== 'connected') return;
+      const today = localNow().toISOString().slice(0,10);
+      if (localHour() !== MORNING_REPORT_HOUR || morningReportSentDate === today) return;
+      morningReportSentDate = today;
+      const report = await buildMorningReport();
+      await S.sendMessage(ADMIN_JID, { text: report });
+      pushLog('success','school','Morning report sent to admin via ' + (useS ? 'school' : 'groups') + ' account');
+    } catch(e){ pushLog('error','school','morning report: '+e.message); }
+  }, 60000);
+  pushLog('info','system','scheduleMorningReport started (' + MORNING_REPORT_HOUR + ':00 local, Open-Meteo)');
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  SELF-MONITOR (v66) — health checks + error prediction
+ * ══════════════════════════════════════════════════════════════ */
+function startSelfMonitor(){
+  setInterval(function(){
+    try {
+      const mem = process.memoryUsage().rss / 1048576;
+      if (mem > 450) pushLog('warn','health','High memory: ' + mem.toFixed(0) + 'MB RSS — restart recommended');
+      if (connectionStatus === 'connecting' && Date.now() - lastStatusChangeAt > 5*60*1000){
+        pushLog('warn','health','Stuck in "connecting" >5min — forcing reconnect');
+        lastStatusChangeAt = Date.now();
+        try { if (sock) sock.end(undefined); } catch(e){}
+      }
+      const badAi = Object.entries(aiFailStreak).filter(function(e){ return e[1] >= 3; });
+      if (badAi.length) pushLog('warn','health','AI providers failing: ' + badAi.map(function(e){ return e[0] + '×' + e[1]; }).join(', '));
+      resetDailyStats();
+      if (dailyStats.aiErrors > 15) pushLog('warn','health','AI errors today: ' + dailyStats.aiErrors + ' — check provider keys in .env');
+      if (joinQueue.length >= JOIN_QUEUE_MAX) pushLog('warn','health','Join queue full (' + joinQueue.length + '/' + JOIN_QUEUE_MAX + ')');
+      if (dmPool.size > 200) pushLog('warn','health','DM pool large (' + dmPool.size + ') — replies may lag');
+      const now = Date.now();
+      for (const [k, t] of recentJoinAttempts){ if (now - t > 3600000) recentJoinAttempts.delete(k); }
+    } catch(e){}
+  }, 5*60*1000);
+  pushLog('info','health','Self-monitor started (memory / stuck-connect / AI failures / queues)');
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  DM CONTACT INFO (v66) — phone, name, status, common groups
+ * ══════════════════════════════════════════════════════════════ */
+async function buildDmContactInfo(jid, phone, lid, pushName){
+  const cached = dmInfoCache.get('dm:'+jid);
+  if (cached) return cached;
+  const info = { pushName: pushName || null, phone: phone || null, lid: lid || null, status: null, commonGroups: [] };
+  const ident = phone || lid || (jid||'').split('@')[0];
+  try { if (ident) info.commonGroups = commonGroupsWith(ident).slice(0,6); } catch(e){}
+  try {
+    if (phone && sock){
+      const st = await sock.fetchStatus(phone + '@s.whatsapp.net');
+      const s = Array.isArray(st) ? (st[0]?.status ?? st[0]?.about) : (st?.status ?? st?.about);
+      if (s) info.status = String(s).slice(0,80);
+    }
+  } catch(e){}
+  dmInfoCache.set('dm:'+jid, info);
+  return info;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  DM HISTORY PERSISTENCE (v66) — AI remembers across restarts
+ * ══════════════════════════════════════════════════════════════ */
+let dmHistoriesDirty = false;
+function persistDmHistories(){
+  if (dmHistoriesDirty) return;
+  dmHistoriesDirty = true;
+  setTimeout(function(){
+    try {
+      const obj = {};
+      for (const [jid, hist] of userHistories) obj[jid] = hist.slice(-USER_HISTORY_SIZE*2);
+      fs.writeFileSync(DM_HISTORIES_FILE, JSON.stringify(obj,null,2));
+    } catch(e){}
+    dmHistoriesDirty = false;
+  }, 8000);
+}
+function loadDmHistories(){
+  try {
+    if (fs.existsSync(DM_HISTORIES_FILE)){
+      const obj = JSON.parse(fs.readFileSync(DM_HISTORIES_FILE,'utf8') || '{}');
+      for (const [jid, hist] of Object.entries(obj)){
+        if (Array.isArray(hist)) userHistories.set(jid, hist);
+      }
+      pushLog('info','ai','Restored DM histories for ' + Object.keys(obj).length + ' contacts');
+    }
+  } catch(e){}
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  BROADCAST TARGET PICKER (v66) — cap 30/run + rotation
+ * ══════════════════════════════════════════════════════════════ */
+function pickBroadcastTargets(mode){
+  if (mode === 'dms') return [...activeDMs].slice(0, BROADCAST_BATCH_MAX);
+  const groups = [...joinedGroups.keys()]
+    .filter(function(j){ return j !== mainGroupJid && canSendToGroup(j).ok; })
+    .sort(function(a,b){ return (broadcastLastAt.get(a)||0) - (broadcastLastAt.get(b)||0); });
+  const targets = mode === 'groups' ? groups : groups.concat([...activeDMs]);
+  return targets.slice(0, BROADCAST_BATCH_MAX);
+}
+function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v65 — Admin
+const COMMAND_LIST = `BreadBot v67 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -1769,16 +3167,24 @@ MAIN GROUP
 !clearmain              — unset main group
 !join <invite-link>     — join a group manually
 !admins                 — list admins in main group
+!registry               — group registry (names + open/blocked)
+!common <phone|lid>     — groups you share with that number
+
+CASUAL — no "!" needed in DM:
+"status" · "help" · "pause" · "resume" · "broadcast <msg>"
+"ad <product> | <details>" · "adsend" · "weather" · "groups"
+(force a repeat message: !force <msg>)
 
 BASICS
 !help / !ping / !status / !jobs / !flow
 !test / !testall / !aitest
 !scraperstatus / !whoami / !stats / !summary
 !logs / !errors / !count / !groups / !inbox
+!mode / !groupchat on|off
 
-MESSAGING
+MESSAGING (cap ${BROADCAST_BATCH_MAX}/run, rotation)
 !broadcast <msg> / !bcgroup <msg> / !bcdm <msg> / !all <msg>
-!send <jid> <msg> / !grouplink <link>
+!send <jid> <msg>
 
 GROUP MANAGEMENT (main group only)
 !antilink on|off / !welcome on|off / !goodbye on|off
@@ -1795,11 +3201,26 @@ DOWNLOADS (via intelligent scrapper)
 !dl <q> / !download <url> / !music <q>
 !nsfwvideo <q> / !nsfw <url> / !nsfwroleplay on|off
 
+STUDY BUDDY (v68 — buttons: send "menu")
+!menu — tap-button menus (main · school · study · groups · ads)
+!study [topic] / "what should I study" — ordered study plan
+!deadlines — everything due, soonest first
+!pdf <topic> / !pdf from <doc> — AI study notes as a real PDF
+!docs / !forgetdocs — documents I've read (PDF · DOCX · TXT, 12h)
+!updates — flush the group updates you need
+!tasks / !canceltask <id> — scheduled sends ("send 5 chess videos to this group by 5pm")
+
+SCHOOL (works in both modes)
+!today / !week / !timetable
+!addlecture <day> <HH:MM> <HH:MM> <name> | <venue>
+!dellecture <n> / !addassignment <YYYY-MM-DD> <module> <type> <title>
+!delassignment <n> / !weather [harare|bindura]
+
 CONTROL
 !pause / !resume / !offline <mins> / !online
 !limit <n> / !unlimit
 
-AI: Rewind only. Typing: ON. Reads: ON. Blocklist: OFF.`;
+AI: failover chain. Typing: ON. Reads: ON. DM-only replies: ${groupRepliesEnabled ? 'OFF' : 'ON'}.`;
 
 function logRepeatedCmd(cmd, chatJid){
   const now = Date.now();
@@ -1808,11 +3229,74 @@ function logRepeatedCmd(cmd, chatJid){
   recentAdminCmds.set(key, now);
 }
 
-async function handleAdminCommand(text, chatJid, msg){
+/* v67 CASUAL COMMANDS — admin commands no longer require "!". Natural,
+ * general phrasing in DM (or the main group) maps onto the same admin
+ * commands. Explicit "!cmd" text still passes through untouched. */
+const CASUAL_ALIASES = [
+  { re:/^(menu|buttons|start)\s*$/i,                                to:'menu' },
+  { re:/^(study plan|what should i study|what to study|study)\b(.*)$/i, to:'study$2' },
+  { re:/^(make (me )?a pdf|create (a )?pdf|pdf)\b(.*)$/i,           to:'pdf$4' },
+  { re:/^(deadlines|my deadlines|whats due|what'?s due)\s*$/i,      to:'deadlines' },
+  { re:/^(docs|documents|my documents|my docs)\s*$/i,               to:'docs' },
+  { re:/^(updates|group updates|any updates)\s*$/i,                 to:'updates' },
+  { re:/^(help|commands|what can you do|menu)\b/i,                 to:'help' },
+  { re:/^(status|stats|how are you|system status|you good)\b/i,    to:'status' },
+  { re:/^(ping|you there|you awake)\s*$/i,                          to:'ping' },
+  { re:/^(pause|stop the bot|go quiet|sleep)\b/i,                  to:'pause' },
+  { re:/^(resume|come back|start again|wake up|unpause)\b/i,       to:'resume' },
+  { re:/^(groups|group list|list groups)\s*$/i,                     to:'groups' },
+  { re:/^(registry|group names)\s*$/i,                              to:'registry' },
+  { re:/^(weather)\b(.*)$/i,                                       to:'weather$2' },
+  { re:/^(today|timetable|schedule)\s*$/i,                          to:'today' },
+  { re:/^(week)\s*$/i,                                              to:'week' },
+  { re:/^(broadcast|bc)\b(.*)$/i,                                  to:'broadcast$2' },
+  { re:/^(bcgroup)\b(.*)$/i,                                       to:'bcgroup$2' },
+  { re:/^(bcdm)\b(.*)$/i,                                          to:'bcdm$2' },
+  { re:/^(ad|advert|market)\b(.*)$/i,                              to:'ad$2' },
+  { re:/^(adsend|send ad|post the ad)\s*$/i,                        to:'bcad' },
+  { re:/^(force|urgent)\b(.*)$/i,                                  to:'force$2' },
+  { re:/^(inbox|dms)\s*$/i,                                         to:'inbox' },
+  { re:/^(logs?|errors?)\s*$/i,                                     to:'logs' },
+  { re:/^(summary|report)\s*$/i,                                    to:'summary' },
+  { re:/^(who are you|who r u)\b/i,                                to:'whoami' },
+  { re:/^(groupchat)\b(.*)$/i,                                     to:'groupchat$2' },
+  { re:/^(antilink)\b(.*)$/i,                                      to:'antilink$2' }
+];
+function parseCasualAdmin(text){
+  if (!text) return null;
+  const t = String(text).trim();
+  if (t.startsWith('!')) return t;                    // explicit command
+  if (!t || t.length > 120 || t.includes('\n')) return null; // long text = chat
+  for (const a of CASUAL_ALIASES){
+    const m = t.match(a.re);
+    if (m){
+      let out = '!' + a.to;
+      /* v67 fix: do NOT trim captured args here — the trailing space of
+       * group 2 is the separator ('weather bindura' → '!weather bindura',
+       * not '!weatherbindura'). Final collapse happens below. */
+      out = out.replace(/\$(\d+)/g, (s, d) => (m[Number(d)] || ''));
+      return out.replace(/\s+/g, ' ').trim();
+    }
+  }
+  return null;
+}
+
+async function handleAdminCommand(text, chatJid, msg, opts={}){
   const args = text.slice(1).trim().split(/\s+/);
   const cmd  = args[0].toLowerCase();
-  const reply = (t)=>adminReply(chatJid, t);
+  /* v67: replyFn lets the SCHOOL account reuse this whole command set
+   * while replying through its own socket. */
+  const reply = (opts && opts.replyFn) ? opts.replyFn : ((t)=>adminReply(chatJid, t));
   logRepeatedCmd(cmd, chatJid);
+
+  /* v66: school instance = read-only monitor. Mass-messaging, joining,
+   * downloads and NSFW are disabled there; reports work everywhere. */
+  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick'];
+  const schoolBlockedNow = SCHOOL_MODE || (opts && opts.account === 'school');
+  if (schoolBlockedNow && SCHOOL_BLOCKED.includes(cmd)){
+    await reply('🏫 School mode — this instance only READS groups and sends reports.\nUse: !today · !week · !timetable · !weather');
+    return;
+  }
 
   switch(cmd){
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
@@ -1823,6 +3307,19 @@ async function handleAdminCommand(text, chatJid, msg){
     case 'online': botOfflineUntil = 0; await reply('Online.'); break;
     case 'limit': { const n = Math.max(1, parseInt(args[1],10)||20); MESSAGE_FLOOD_THRESHOLD = n; await reply(`Limit ${n}/s.`); break; }
     case 'unlimit': MESSAGE_FLOOD_THRESHOLD = 9999; await reply('No limit.'); break;
+
+    /* v67: admin urgency — bypass the repeat-suppression and pause for
+     * one message ("unless admin add urgency"). */
+    case 'force': {
+      const body = args.slice(1).join(' ').trim();
+      if (!body){ await reply('Usage: !force <msg> — sends even if the same text went out recently.'); break; }
+      const target = chatJid.endsWith('@g.us') ? chatJid : (mainGroupJid || chatJid);
+      try {
+        await sendBuffer(target, { text: body }, 0, 'fast', 'admin', false, { force:true });
+        await reply('Sent (forced) to ' + (getGroupName(target) || target));
+      } catch(e){ await reply('Err: ' + e.message); }
+      break;
+    }
 
     case 'setmain': {
       const linkArg = args.slice(1).join(' ').trim();
@@ -1974,14 +3471,20 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!mainGroupJid){ await reply('Set main group first: `!setmain`'); break; }
       const m = args.slice(1).join(' ');
       if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
-      await reply('Broadcasting to '+joinedGroups.size+' groups...');
+      /* v66: cap ${BROADCAST_BATCH_MAX}/run, skip announce-only groups,
+       * rotate least-recently-sent first */
+      const eligible = [...joinedGroups.keys()].filter(function(j){ return j !== mainGroupJid && canSendToGroup(j).ok; })
+        .sort(function(a,b){ return (broadcastLastAt.get(a)||0) - (broadcastLastAt.get(b)||0); });
+      if (!eligible.length){ await reply('No eligible groups (announce-only ones are skipped).'); return; }
+      const batch = eligible.slice(0, BROADCAST_BATCH_MAX);
+      await reply('Broadcasting to ' + batch.length + '/' + eligible.length + ' groups (cap ' + BROADCAST_BATCH_MAX + '/run)...');
       let sent=0;
-      for (const jid of joinedGroups.keys()){
-        if (jid === mainGroupJid) continue;
-        try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast', false); sent++; } catch(e){}
+      for (const jid of batch){
+        try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast', false); sent++; noteBroadcast(jid); } catch(e){}
       }
       resetDailyStats(); dailyStats.broadcastsSent += sent;
-      await reply('Queued '+sent+'/'+joinedGroups.size);
+      const remaining = eligible.length - batch.length;
+      await reply('Queued ' + sent + '/' + eligible.length + (remaining > 0 ? ' — ' + remaining + ' left for the next run (rotation).' : ''));
       break;
     }
     case 'all': case 'bcdm': {
@@ -1990,13 +3493,11 @@ async function handleAdminCommand(text, chatJid, msg){
       const m = args.slice(1).join(' ');
       if (!m){ await reply('Usage: !'+cmd+' <msg>'); return; }
       const mode = cmd === 'all' ? 'all' : 'dms';
-      const targets = mode === 'all'
-        ? [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs]
-        : [...activeDMs];
+      const targets = pickBroadcastTargets(mode);
       if (!targets.length){ await reply('None.'); return; }
-      for (const jid of targets){ try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast', false); } catch(e){} }
+      for (const jid of targets){ try { await sendBuffer(jid, { text:m }, 3, 'slow', 'broadcast', false); noteBroadcast(jid); } catch(e){} }
       resetDailyStats(); dailyStats.broadcastsSent += targets.length;
-      await reply('Done.');
+      await reply('Queued ' + targets.length + ' (cap ' + BROADCAST_BATCH_MAX + '/run, rotation).');
       break;
     }
     case 'pic': case 'search': {
@@ -2038,21 +3539,19 @@ async function handleAdminCommand(text, chatJid, msg){
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
       const cap = args.slice(1).join(' ') || '';
       const mode = cmd === 'bcastpic' ? 'all' : cmd === 'bcastpicdm' ? 'dms' : 'groups';
-      const targets = mode === 'all'
-        ? [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs]
-        : mode === 'groups' ? [...joinedGroups.keys()].filter(j=>j!==mainGroupJid) : [...activeDMs];
+      const targets = pickBroadcastTargets(mode);
       if (!targets.length){ await reply('No '+mode+'.'); return; }
-      for (const jid of targets){ await sendImageSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast', false); }
-      await reply('Done.');
+      for (const jid of targets){ await sendImageSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast', false); noteBroadcast(jid); }
+      await reply('Queued ' + targets.length + ' (cap ' + BROADCAST_BATCH_MAX + '/run).');
       break;
     }
     case 'bcastgif': {
       if (!previewCache.currentUrl || previewCache.currentType !== 'gif'){ await reply('No preview.'); return; }
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
       const cap = args.slice(1).join(' ') || '';
-      const targets = [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs];
-      for (const jid of targets){ await sendGifSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast', false); }
-      await reply('Done.');
+      const targets = pickBroadcastTargets('all');
+      for (const jid of targets){ await sendGifSafe(jid, previewCache.currentUrl, cap, 3, 'slow', 'broadcast', false); noteBroadcast(jid); }
+      await reply('Queued ' + targets.length + ' (cap ' + BROADCAST_BATCH_MAX + '/run).');
       break;
     }
     case 'allimg': {
@@ -2060,27 +3559,44 @@ async function handleAdminCommand(text, chatJid, msg){
       const parts = args.slice(1).join(' ').split('|').map(s=>s.trim());
       const url = parts[0]; const cap = parts[1] || '';
       if (!url){ await reply('Usage: !allimg <url> | <cap>'); return; }
-      const targets = [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs];
-      for (const jid of targets){ await sendImageSafe(jid, url, cap, 3, 'slow', 'broadcast', false); }
-      await reply('Done.');
+      const targets = pickBroadcastTargets('all');
+      for (const jid of targets){ await sendImageSafe(jid, url, cap, 3, 'slow', 'broadcast', false); noteBroadcast(jid); }
+      await reply('Queued ' + targets.length + ' (cap ' + BROADCAST_BATCH_MAX + '/run).');
       break;
     }
     case 'ad': {
+      /* v67: AI marketing — per-product luring, interactive copy.
+       * Usage: !ad <product> | <details> [| <cta>] [| <link>] [| <style>]
+       * The AI writes a hook + desire + question ad; template fallback
+       * (AdBuilder) if no AI key/provider is available. */
       const parts = args.slice(1).join(' ').split('|').map(p=>p.trim());
       const [title, body, cta, link, style] = parts;
-      if (!title || !body){ await reply('Usage: !ad <title>|<body>|[cta]|[link]|[style]'); return; }
-      const ad = AdBuilder.build({ title, body, cta, link, footer:'Reply STOP to opt out', style: style||'fancy' });
-      await reply('Preview:\n\n'+ad);
+      if (!title || !body){ await reply('Usage: !ad <product> | <details> [| <cta>] [| <link>]'); break; }
+      await reply('✍️ Writing your ad...');
+      const sys = 'You are a WhatsApp marketing copywriter for a Zimbabwean online seller. Write ONE short luring ad (max 70 words) for the product. First line = scroll-stopping hook. Build desire with concrete benefits. End with a playful question that invites people to reply. 1-3 fitting emojis. Casual street-smart tone. Never mention AI. Output ONLY the ad text.';
+      const prompt = 'Product: ' + title + '\nDetails: ' + body
+        + (cta ? '\nCall to action: ' + cta : '')
+        + (link ? '\nLink to include: ' + link : '')
+        + (style ? '\nStyle notes: ' + style : '');
+      let ad = await askAI(prompt, sys);
+      if (ad && !containsForbidden(ad)){
+        ad = informalize(ad);
+        if (link && !ad.includes(link)) ad += '\n' + link;
+      } else {
+        pushLog('warn','ad','AI ad unavailable — using template fallback');
+        ad = AdBuilder.build({ title, body, cta, link, footer:'Reply STOP to opt out', style: style||'fancy' });
+      }
       replyCache.set('LAST_AD', ad);
+      await reply('Preview:\n\n' + ad + '\n\nPost it with: !bcad');
       break;
     }
     case 'bcad': {
       const ad = replyCache.get('LAST_AD');
       if (!ad){ await reply('No ad.'); return; }
       if (!broadcastsAllowed()){ await reply('Broadcasts paused.'); break; }
-      const targets = [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs];
-      for (const jid of targets){ await sendBuffer(jid, { text:ad }, 3, 'slow', 'broadcast', false); }
-      await reply('Done.');
+      const targets = pickBroadcastTargets('all');
+      for (const jid of targets){ await sendBuffer(jid, { text:ad }, 3, 'slow', 'broadcast', false); noteBroadcast(jid); }
+      await reply('Queued ' + targets.length + ' (cap ' + BROADCAST_BATCH_MAX + '/run).');
       break;
     }
     case 'antilink': { getGroupSetting(chatJid).antilink = args[1]==='on'; saveGroupSettingsDebounced(); await reply(args[1]==='on'?'ON':'OFF'); break; }
@@ -2187,6 +3703,22 @@ async function handleAdminCommand(text, chatJid, msg){
       break;
     }
 
+    case 'tasks': {
+      const list = [...scheduledTasks.values()].filter(t => t.status === 'active');
+      if (!list.length){ await reply('No scheduled tasks.\nTry: "send 5 chess videos to this group by 5pm"'); break; }
+      const lines = list.map(t => '#' + t.id + ' — ' + (t.count - t.sent) + '/' + t.count + ' ' + (t.kind==='music'?'songs':t.kind+'s') + ' "' + t.query + '" → ' + t.targetLabel + ' (' + t.account + ')' + (t.deadline ? ' · until ' + new Date(t.deadline).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : ''));
+      await reply('Scheduled tasks\n\n' + lines.join('\n'));
+      break;
+    }
+    case 'canceltask': {
+      const id = (args[1]||'').toLowerCase();
+      const t = scheduledTasks.get(id);
+      if (!t || t.status !== 'active'){ await reply('No active task #' + id + '. See "tasks".'); break; }
+      t.status = 'cancelled'; saveTasks();
+      await reply('Cancelled #' + id + ' (' + t.sent + '/' + t.count + ' already sent).');
+      break;
+    }
+
     case 'logs': {
       const recent = logBuffer.slice(-30).map(e=>'['+e.level+'] '+e.source+': '+e.message).join('\n');
       await reply('Logs (30)\n\n'+recent.slice(0,3500));
@@ -2259,6 +3791,202 @@ async function handleAdminCommand(text, chatJid, msg){
       await reply('JID: '+(msg.key.participant||msg.key.remoteJid)+'\nLID: '+(l||'-')+'\nPN: '+(p||'-')+'\nCandidates: '+(c.join(', ')||'none')+'\nIs admin: '+(a?'YES':'NO')+'\n\nKnown LIDs: '+([...adminLids].join(', ')||'none'));
       break;
     }
+    /* ═══ v66 new commands ═══ */
+    case 'mode': {
+      await reply([
+        'Mode: ' + BOT_MODE.toUpperCase(),
+        SCHOOL_MODE ? 'School: read-only monitor + morning report' : 'Manager: full group management',
+        'Group AI replies: ' + (groupRepliesEnabled ? 'ON' : 'OFF (DM only)'),
+        'Broadcast cap: ' + BROADCAST_BATCH_MAX + '/run',
+        'Join queue: ' + joinQueue.length + '/' + JOIN_QUEUE_MAX,
+        'AI chain: ' + (AI_PROVIDERS.map(function(p){ return p.name; }).join(' → ') || 'none') + ' (active: ' + (activeProvider||'NONE') + ')',
+        'Morning report: ' + MORNING_REPORT_HOUR + ':00 local'
+      ].join('\n'));
+      break;
+    }
+    case 'groupchat': {
+      if (SCHOOL_MODE){ await reply('School mode: group replies are always OFF.'); break; }
+      if (args[1] === 'on'){ groupRepliesEnabled = true; await reply('Group AI replies ON.'); }
+      else if (args[1] === 'off'){ groupRepliesEnabled = false; await reply('Group AI replies OFF (DM only).'); }
+      else await reply('Usage: !groupchat on|off (currently ' + (groupRepliesEnabled?'ON':'OFF') + ')');
+      break;
+    }
+    case 'registry': {
+      if (!groupRegistry.size){ await reply('Registry empty — waits for connect.'); break; }
+      const rows = [...groupRegistry.entries()].map(function(kv, i){
+        const g = kv[1]; const open = canSendToGroup(kv[0]);
+        return (i+1) + '. ' + (kv[0]===mainGroupJid?'⭐ ':'') + (g.subject||'?') + ' (' + (g.size||0) + ')' + (open.ok ? '' : ' 🔒' );
+      }).join('\n');
+      await reply('Group registry (' + groupRegistry.size + ')\n' + rows.slice(0, 3500));
+      break;
+    }
+    case 'common': {
+      const ident = (args[1]||'').replace(/\D/g,'');
+      const lidArg = args[1] && !/^\+?\d+$/.test(args[1]) ? args[1] : null;
+      const use = ident || lidArg;
+      if (!use){ await reply('Usage: !common <phone-number or lid>'); break; }
+      const groups = commonGroupsWith(use);
+      await reply(groups.length ? 'Groups in common with ' + use + ' (' + groups.length + '):\n' + groups.map(function(n){ return '• ' + n; }).join('\n')
+                              : 'No groups in common with ' + use + '.');
+      break;
+    }
+    /* ═══ v68: BUTTONS + STUDY BUDDY + DOCS + PDF ═══ */
+    case 'menu': case 'buttons': {
+      await sendButtons(chatJid, opts.account === 'school' ? 'school' : 'main', { account: opts.account });
+      break;
+    }
+    case 'study': {
+      const topic = args.slice(1).join(' ').trim();
+      await reply('📚 Working out what to study' + (topic ? ' for "' + topic + '"' : ' next') + '...');
+      const r = await studyAnswer(topic, chatJid);
+      await reply(r ? informalize(r) : 'AI is quiet right now — try again in a minute.');
+      break;
+    }
+    case 'deadlines': {
+      const work = upcomingWork(60);
+      if (!work.length){ await reply('Nothing on the deadline list. Add one: !addassignment <YYYY-MM-DD> <module> <type> <title>'); break; }
+      await reply('📌 Your deadlines:\n' + work.map(w =>
+        '• [' + (w.dueIn < 0 ? 'OVERDUE' : w.dueIn + 'd') + '] ' + (w.module||'') + ' ' + w.title + ' — due ' + w.due
+      ).join('\n'));
+      break;
+    }
+    case 'pdf': {
+      const topic = args.slice(1).join(' ').trim();
+      const lastDoc = (docTextCache.get(chatJid) || []).slice(-1)[0];
+      if (!topic){
+        await reply('Usage: !pdf <topic> — I write study notes and send a real PDF.\ne.g. !pdf osmosis and diffusion' +
+          (lastDoc ? '\nOr: !pdf from ' + lastDoc.name + ' (I still remember it)' : ''));
+        break;
+      }
+      await reply('✍️ Writing "' + topic + '" as a PDF...');
+      let body;
+      if (lastDoc && /^from\b/i.test(topic)){
+        body = await askAI('Turn this document into compact study notes. Keep the key facts, definitions, dates and formulas. Short sections, bullets, end with a 5-point summary.\n\nDocument "' + lastDoc.name + '":\n' + lastDoc.text.slice(0, 9000), STUDY_BUDDY_SYS);
+      } else {
+        body = await askAI('Write compact study notes about: ' + topic + '. Short headed sections, bullet points, definitions, end with a 5-point "Remember this" summary. Plain text only.', STUDY_BUDDY_SYS);
+      }
+      if (!body){ await reply('AI is quiet right now — try again in a minute.'); break; }
+      try {
+        const buf = await makePdf('Study Notes — ' + topic, body);
+        await sendBuffer(chatJid, {
+          document: buf, mimetype: 'application/pdf',
+          fileName: ('study-' + topic).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,48) + '.pdf'
+        }, 1, 'fast', 'admin', false, { account: opts.account === 'school' ? 'school' : undefined });
+        resetDailyStats(); dailyStats.pdfsMade++;
+        pushLog('success','pdf','Study PDF sent: ' + topic + ' (' + Math.round(buf.length/1024) + 'KB) via ' + (opts.account||'groups'));
+      } catch(e){ await reply('PDF failed: ' + e.message); }
+      break;
+    }
+    case 'docs': {
+      const docs = listRecentDocs(chatJid);
+      if (!docs.length){ await reply('No documents in memory for this chat. Send me a PDF or DOCX — I keep the last ' + DOC_KEEP_PER_CHAT + ' for ' + (DOC_TTL_MS/3600000) + 'h.'); break; }
+      await reply('📄 Documents I remember here:\n' + docs.map(d =>
+        d.n + '. ' + d.name + ' — ' + d.chars + ' chars, ' + d.ageMin + 'min ago'
+      ).join('\n') + '\n\nAsk me anything about the last one, or: !pdf from <name>');
+      break;
+    }
+    case 'forgetdocs': {
+      docTextCache.delete(chatJid);
+      await reply('Forgotten the documents for this chat.');
+      break;
+    }
+    case 'updates': {
+      const n = await flushGroupUpdates(opts.account === 'school' ? 'school' : undefined);
+      await reply(n ? 'Sent ' + n + ' update(s) above ⬆️' + (schoolUpdatesBus.length ? ' — ' + schoolUpdatesBus.length + ' more still queued.' : '.') : 'No pending group updates.');
+      break;
+    }
+    case 'adstatus': {
+      const lastAd = replyCache.get('LAST_AD');
+      await reply(lastAd ? ('Last ad written:\n\n' + String(lastAd).slice(0, 600)) : 'No ad written yet — use !ad <product> | <details>');
+      break;
+    }
+    case 'weather': {
+      const which = (args[1]||'').toLowerCase();
+      try {
+        if (which === 'harare' || which === 'bindura'){
+          await reply(weatherLine(await getWeather(which)));
+        } else {
+          const lines = [];
+          for (const loc of WEATHER_LOCATIONS){ lines.push(weatherLine(await getWeather(loc.key))); }
+          await reply(lines.join('\n'));
+        }
+      } catch(e){ await reply('Weather failed: ' + e.message); }
+      break;
+    }
+    case 'today': {
+      await reply(await buildMorningReport());
+      break;
+    }
+    case 'week': {
+      const lines = ['📅 This week'];
+      for (let d = 1; d <= 5; d++){
+        const lects = lecturesForDay(d);
+        lines.push('');
+        lines.push(DAY_NAMES[d] + ':' + (lects.length ? '' : ' —'));
+        for (const l of lects) lines.push('• ' + l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : ''));
+      }
+      const work = upcomingWork(14);
+      if (work.length){
+        lines.push(''); lines.push('📝 Due in the next 14 days:');
+        for (const w of work) lines.push('• [' + (w.dueIn < 0 ? 'OVERDUE' : w.dueIn + 'd') + '] ' + (w.type||'assignment') + ': ' + w.title + ' (' + w.module + ')');
+      }
+      await reply(lines.join('\n'));
+      break;
+    }
+    case 'timetable': {
+      const lines = ['🗓 Timetable (' + schoolData.lectures.length + ' lectures)'];
+      for (let d = 0; d < 7; d++){
+        const lects = lecturesForDay(d);
+        if (!lects.length) continue;
+        lines.push(''); lines.push(DAY_NAMES[d] + ':');
+        lects.forEach(function(l, i){ lines.push((i+1) + '. ' + l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : '')); });
+      }
+      await reply(lines.join('\n') + '\n\nDelete: !dellecture <n>');
+      break;
+    }
+    case 'addlecture': {
+      // !addlecture monday 08:00 10:00 Data Structures | Block A
+      const dayIdx = dayIndexFromName(args[1]);
+      const start = args[2], end = args[3];
+      const rest = args.slice(4).join(' ');
+      if (dayIdx == null || !start || !end || !rest){ await reply('Usage: !addlecture <day> <HH:MM> <HH:MM> <name> | <venue>\ne.g. !addlecture monday 0800 1000 Data Structures | Block A'); break; }
+      const bits = rest.split('|').map(function(s){ return s.trim(); });
+      schoolData.lectures.push({ day: dayIdx, start: start, end: end, name: bits[0], venue: bits[1] || '' });
+      saveSchoolData();
+      await reply('Added: ' + DAY_NAMES[dayIdx] + ' ' + start + '-' + end + ' ' + bits[0] + (bits[1] ? ' @ ' + bits[1] : ''));
+      break;
+    }
+    case 'dellecture': {
+      const allLects = schoolData.lectures;
+      const n = parseInt(args[1],10);
+      if (!n || n < 1 || n > allLects.length){ await reply('Usage: !dellecture <n> — check numbering in !timetable per day'); break; }
+      // numbering is per-day as printed by !timetable: rebuild flat list per day
+      const removed = allLects.splice(n-1, 1)[0];
+      saveSchoolData();
+      await reply('Removed: ' + DAY_NAMES[removed.day] + ' ' + removed.start + '-' + removed.end + ' ' + removed.name);
+      break;
+    }
+    case 'addassignment': {
+      // !addassignment 2026-09-30 CS201 assignment Chapter 4 exercises
+      const due = args[1], mod = args[2], type = (args[3]||'assignment').toLowerCase();
+      const title = args.slice(4).join(' ') || 'Untitled';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(due||'') || !mod){ await reply('Usage: !addassignment <YYYY-MM-DD> <module> <assignment|presentation|test|quiz> <title>'); break; }
+      schoolData.assignments.push({ due, module: mod.toUpperCase(), type, title });
+      schoolData.assignments.sort(function(a,b){ return String(a.due).localeCompare(String(b.due)); });
+      saveSchoolData();
+      await reply('Added: [' + type + '] ' + title + ' (' + mod.toUpperCase() + ') due ' + due);
+      break;
+    }
+    case 'delassignment': {
+      const n = parseInt(args[1],10);
+      const work = upcomingWork(365);
+      if (!n || n < 1 || n > work.length){ await reply('Usage: !delassignment <n> — numbering from !week list'); break; }
+      const target = work[n-1];
+      const idx = schoolData.assignments.findIndex(function(a){ return a.due === target.due && a.module === target.module && a.title === target.title; });
+      if (idx >= 0){ schoolData.assignments.splice(idx, 1); saveSchoolData(); await reply('Removed: ' + target.title); }
+      else await reply('Not found.');
+      break;
+    }
     default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
   }
 }
@@ -2267,15 +3995,25 @@ async function handleAdminCommand(text, chatJid, msg){
  *  FLOOD
  * ══════════════════════════════════════════════════════════════ */
 let msgCountInWindow=0, windowStart=Date.now(), floodIgnoreUntil=0;
+/* v67: GRACEFUL flood gate. v66 hard-ignored EVERYTHING for 5s once the
+ * rate crossed the threshold — and because the window re-armed every
+ * second, a sustained 500 msg/s feed latched the bot silent forever
+ * (found by the 500 msg/s load test: 300/15000 handled).
+ * Now: up to MESSAGE_FLOOD_THRESHOLD msgs/s pass as normal; above that
+ * the gate SAMPLES (~1 message per decay tick) instead of latching, so
+ * the bot keeps sensing the chat under sustained load. Admin messages
+ * bypass the gate entirely. */
 function checkFlood(){
   const now = Date.now();
   if (now - windowStart > 1000){ windowStart = now; msgCountInWindow = 0; }
   msgCountInWindow++;
-  if (msgCountInWindow > MESSAGE_FLOOD_THRESHOLD){
-    if (floodIgnoreUntil < now) pushLog('warn','flood',`Flood: ${msgCountInWindow} msgs/s`);
-    floodIgnoreUntil = now + FLOOD_IGNORE_MS;
-    return true;
-  }
+  if (msgCountInWindow <= MESSAGE_FLOOD_THRESHOLD) return false;
+  if (Date.now() < floodIgnoreUntil) return true;
+  /* admit one sample, then pause proportional to how far over the cap
+   * we are (e.g. 500/s vs 300 cap → ~250ms pause → ~300/s processed) */
+  const over = msgCountInWindow - MESSAGE_FLOOD_THRESHOLD;
+  floodIgnoreUntil = now + Math.max(20, Math.min(1000, Math.round(1000 * over / msgCountInWindow)));
+  if (over === 1) pushLog('warn','flood',`Overload ${msgCountInWindow}/s — sampling below ${MESSAGE_FLOOD_THRESHOLD}/s (graceful)`);
   return false;
 }
 
@@ -2293,21 +4031,33 @@ async function handleMessage(msg){
     }
   }
 
-  if (checkFlood()){ resetDailyStats(); dailyStats.messagesDropped++; return; }
-  if (Date.now() < floodIgnoreUntil) return;
+  if (checkFlood()){
+    /* v67: admin messages are never dropped by the flood gate */
+    const chatJidEarly = msg.key?.remoteJid;
+    const sEarly = chatJidEarly?.endsWith('@g.us') ? (msg.key.participant || chatJidEarly) : chatJidEarly;
+    if (!isAdminSender(msg, sEarly)){
+      resetDailyStats(); dailyStats.messagesDropped++; if (LOADTEST) lt.droppedFlood++; return;
+    }
+  }
+  /* (v67 note: the old second floodIgnoreUntil check is gone — the gate
+   * itself now decides admission, including the sampled messages.) */
 
   const chatJid = msg.key?.remoteJid;
   if (!chatJid) return;
-  activeChats.add(chatJid);
+  /* v67: bound the chat sets — a runaway 500 msg/s feed must never
+   * grow memory without limits */
+  if (activeChats.size < ACTIVE_SET_CAP) activeChats.add(chatJid);
 
   const msgId = msg.key.id;
-  if (processedMessages.has(msgId)) return;
+  if (processedMessages.has(msgId)){ if (LOADTEST) lt.droppedDup++; return; }
   processedMessages.add(msgId);
   if (processedMessages.size > 10000){
     const a=[...processedMessages]; processedMessages.clear();
     for (const i of a.slice(-5000)) processedMessages.add(i);
   }
   if (botSentIds.has(msgId)) return;
+  if (LOADTEST) lt.handled++;   // passed the gates — this message is being processed
+  accountStats.groups.in++;     // v68: per-account counter (two connections, handled differently)
 
   const rawMsg = msg.message;
   if (!rawMsg) return;
@@ -2329,6 +4079,18 @@ async function handleMessage(msg){
     if (m.deviceSentMessage?.message){ m=m.deviceSentMessage.message; continue; }
     if (m.documentWithCaptionMessage?.message){ m=m.documentWithCaptionMessage.message; continue; }
     break;
+  }
+
+  /* ═══ v68: BUTTON TAPS — a tap IS a command. Handled before the text
+   * gate because button responses carry no conversation text. ═══ */
+  const btnTap = extractButtonCommand(m);
+  if (btnTap){
+    if (msg.key.fromMe) return;
+    const bSender = chatJid.endsWith('@g.us') ? (msg.key.participant || chatJid) : chatJid;
+    if (!isAdminSender(msg, bSender)){ pushLog('warn','buttons','tap from non-admin ignored'); return; }
+    markRead(msg).catch(()=>{});
+    await routeButton(chatJid, btnTap.id, 'groups', msg);
+    return;
   }
 
   const hasText = !!(m?.conversation || m?.extendedTextMessage?.text
@@ -2353,7 +4115,7 @@ async function handleMessage(msg){
 
   if (isGroup) discoverGroup(chatJid);
   if (isGroup) recordGroupMessage(chatJid, text);
-  else activeDMs.add(chatJid);
+  else if (activeDMs.size < ACTIVE_SET_CAP) activeDMs.add(chatJid);
 
   recordReply(chatJid);
   markRead(msg).catch(()=>{});
@@ -2362,34 +4124,72 @@ async function handleMessage(msg){
   if (isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
 
-  pushLiveMessage({
+  /* v66: live panel enrichment — group name for groups; phone / name /
+   * contact status / common groups for DMs ("app aware of everything") */
+  let liveEntry = {
     id:msgId, ts:new Date().toISOString(), chatJid, chatType,
     senderJid, senderName:pushName, phone:phone||'-', lid:lid||'-',
     text:text.slice(0,200)||'['+mediaType+']', mediaType, isAdmin
-  });
+  };
+  if (isGroup){
+    liveEntry.groupName = getGroupName(chatJid) || '-';
+  } else {
+    try {
+      const di = await buildDmContactInfo(chatJid, phone, lid, pushName);
+      if (di.commonGroups && di.commonGroups.length) liveEntry.commonGroups = di.commonGroups;
+      if (di.status) liveEntry.contactStatus = di.status;
+    } catch(e){}
+  }
+  pushLiveMessage(liveEntry);
 
-  /* ═══ ADMIN COMMANDS ═══ */
-  if (isAdmin && text.startsWith('!')){
-    const inDM = !isGroup;
-    const inMainGroup = mainGroupJid && chatJid === mainGroupJid;
-    if (!inDM && !inMainGroup){
-      pushLog('warn','admin',`Cmd ignored in non-main group ${chatJid}`);
-      return;
-    }
-    const hit = contentBlocked(text);
-    if (hit){
-      pushLog('error','admin',`Command blocked (${hit})`);
-      resetDailyStats(); dailyStats.policyBlocks++;
-      await adminReply(chatJid, 'Command refused.');
-      return;
-    }
-    pushLog('info','admin','Cmd: '+text.split(' ')[0]);
-    await handleAdminCommand(text, chatJid, msg);
-    return;
+  /* ═══ v68: NEEDED-UPDATES FILTER — from ANY group on the groups
+   * account, only messages that look like real deadlines/changes are
+   * queued for the admin. Main group included; noise stays noise. ═══ */
+  if (isGroup && text && isNeededUpdate(text)){
+    queueNeededUpdate(getGroupName(chatJid) || chatJid, text);
+    pushLog('info','updates','Queued needed update from ' + (getGroupName(chatJid) || chatJid));
   }
 
-  /* ═══ AUTO-JOIN — extract invite codes from ANY message ═══ */
-  if (text){
+  /* ═══ ADMIN COMMANDS (v67: "!" OR casual natural phrasing — no prefix
+   * needed in DM; the main group also accepts them) ═══ */
+  if (isAdmin){
+    const mapped = parseCasualAdmin(text);
+    if (mapped){
+      const inDM = !isGroup;
+      const inMainGroup = mainGroupJid && chatJid === mainGroupJid;
+      if (!inDM && !inMainGroup){
+        pushLog('warn','admin',`Cmd ignored in non-main group ${chatJid}`);
+        return;
+      }
+      const hit = contentBlocked(mapped);
+      if (hit){
+        pushLog('error','admin',`Command blocked (${hit})`);
+        resetDailyStats(); dailyStats.policyBlocks++;
+        await adminReply(chatJid, 'Command refused.');
+        return;
+      }
+      pushLog('info','admin','Cmd: '+mapped.split(' ')[0]);
+      await handleAdminCommand(mapped, chatJid, msg);
+      return;
+    }
+    /* v68.2: admin task orders — "send 5 chess videos to this group by 5" */
+    if (!isGroup && text && text.length < 200){
+      const spec = parseTaskRequest(text);
+      if (spec){
+        if (spec.badTime){
+          await adminReply(chatJid, 'I did not understand the time "' + spec.badTime + '".\nTry: by 5pm · by 17:30 · in 2 hours · tonight · tomorrow');
+          return;
+        }
+        const r = scheduleAdminTask(spec, chatJid);
+        await adminReply(chatJid, r.plan || ('Err: ' + r.error));
+        return;
+      }
+    }
+  }
+
+  /* ═══ AUTO-JOIN — extract invite codes from ANY message ═══
+   * v66: disabled on the school instance (read-only monitor). */
+  if (text && !SCHOOL_MODE){
     const codes = extractInviteCodes(text);
     if (codes.length){
       let added = 0;
@@ -2398,6 +4198,15 @@ async function handleMessage(msg){
         try { await sendBuffer(chatJid, { text:`Queued ${added}. Total ${joinQueue.length}/${JOIN_QUEUE_MAX}` }, 3, 'slow', 'admin', false); } catch(e){}
       }
     }
+  }
+
+  /* ═══ v68: DOCUMENTS — read PDFs/Word docs from ANY chat on the groups
+   * account. Group docs: silent cache (AI context only). Admin DM docs:
+   * read + confirm. Nothing is ever sent back to a group. ═══ */
+  if (mediaType === 'document'){
+    const doc = await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'groups');
+    if (doc && isAdmin && !isGroup){ /* confirmation already sent inside */ }
+    if (doc) return;                 // docs are not chat text — stop here
   }
 
   /* ═══ NO MAIN GROUP → IGNORE ALL GROUPS ═══ */
@@ -2419,11 +4228,9 @@ async function handleMessage(msg){
         if (!buffer){ adminReply(chatJid, 'Failed.'); return; }
         if (buffer.length > MEDIA_MAX_BYTES){ adminReply(chatJid, (buffer.length/1024/1024).toFixed(1)+'MB > 34MB'); return; }
         const mode = cmd==='bcdm'?'dms':cmd==='bcgroup'?'groups':'all';
-        const targets = mode === 'all'
-          ? [...[...joinedGroups.keys()].filter(j=>j!==mainGroupJid), ...activeDMs]
-          : mode === 'groups' ? [...joinedGroups.keys()].filter(j=>j!==mainGroupJid) : [...activeDMs];
+        const targets = pickBroadcastTargets(mode);
         if (!targets.length){ adminReply(chatJid, 'No '+mode+'.'); return; }
-        adminReply(chatJid, 'Queued to '+targets.length+'.');
+        adminReply(chatJid, 'Queued to '+targets.length+' (cap '+BROADCAST_BATCH_MAX+'/run).');
         for (const jid of targets) await sendBuffer(jid, { image: buffer, caption }, 3, 'slow', 'broadcast', false);
         adminReply(chatJid, 'Done.');
       } catch(e){ adminReply(chatJid, 'Err: '+e.message); }
@@ -2431,8 +4238,13 @@ async function handleMessage(msg){
     }
   }
 
-  /* ═══ DM path — pool for the batch AI cycle (FIX: no history push) ═══ */
+  /* ═══ DM path — pool for the batch AI cycle (FIX: no history push) ═══
+   * v66: school monitor never auto-replies to DMs. */
   if (!isGroup && !isAdmin && text){
+    if (SCHOOL_MODE){
+      pushLog('info','school','DM recorded (school mode — no reply): ' + pushName);
+      return;
+    }
     poolDm(senderJid, msg, text, pushName, phone);
     pushLog('info','dm',`Pooled DM from ${pushName} (pool=${dmPool.size})`);
     return;
@@ -2441,6 +4253,11 @@ async function handleMessage(msg){
   /* ═══ GROUP MESSAGES — MAIN ONLY ═══ */
   if (isGroup){
     await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
+
+    /* v66: "the bot only replies to the dms" — group conversation replies
+     * are OFF by default (REPLY_IN_GROUPS=false, toggle !groupchat).
+     * Management features (antilink above, welcome/goodbye) stay active. */
+    if (!groupRepliesEnabled) return;
 
     if (text){
       if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
@@ -2482,7 +4299,7 @@ async function handleMessage(msg){
       }
       const analysis = analyzeGroup(chatJid);
       const lang = detectLanguage(text);
-      const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ' + LANG_NAMES[lang] + '. Mix light Shona. Never say you are AI. ' + (analysis?'Members often use: '+analysis.topWords.slice(0,6).join(', '):'');
+      const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ' + LANG_NAMES[lang] + '. Blend Zim slang (bhoo, mdhara, chomi, sharp, hanti). Never say you are AI. ' + (analysis?'Members often use: '+analysis.topWords.slice(0,6).join(', '):'');
       const aiReply = await askAI(text, sys);
       if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true); resetDailyStats(); dailyStats.greetingsSent++; }
       return;
@@ -2542,6 +4359,7 @@ async function connectBot(){
       }
       if (connection === 'open'){
         isConnecting = false; connectionStatus = 'connected';
+        lastStatusChangeAt = Date.now();
         reconnectAttempts = 0; botStartTime = Date.now();
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
@@ -2564,6 +4382,9 @@ async function connectBot(){
           })
           .catch(e => pushLog('error','main','auto-set: '+e.message));
 
+        /* v66: build group registry (names, announce-only flags, members) */
+        setTimeout(function(){ refreshGroupRegistry().catch(function(){}); }, 5000);
+
         detectAIBackend().catch(e => pushLog('error','ai','detect: '+e.message));
 
         const lidList = [...adminLids];
@@ -2579,7 +4400,8 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v65 ONLINE\n' +
+            'BreadBot v68 ONLINE\n' +
+            'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
@@ -2595,6 +4417,7 @@ async function connectBot(){
       }
       if (connection === 'close'){
         isConnecting = false;
+        lastStatusChangeAt = Date.now();
         const { code, msg } = describeDisconnect(lastDisconnect);
         pushLog('warn','bot',`Disconnected (${code ?? '?'}) — ${msg}`);
 
@@ -2693,13 +4516,346 @@ function refreshQR(){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  SCHOOL ACCOUNT (v67) — SECOND QR, SAME BOT, ONE PANEL
+ *  Account 1 ("groups", auth_info)  = group manager (all existing logic)
+ *  Account 2 ("school", auth_info_school) = read-only school monitor:
+ *    · NEVER posts in school groups, NEVER replies to members
+ *    · talks ONLY to the admin (reports + school commands)
+ *    · shares the SAME AI chain, the SAME log buffer and live panel
+ *  Logs of both accounts flow into the same panel + admin digest.
+ * ══════════════════════════════════════════════════════════════ */
+const schoolRegistry = new Map();   // jid -> subject (names known by the school account)
+async function refreshSchoolRegistry(){
+  if (!schoolSock) return;
+  try {
+    const groups = await schoolSock.groupFetchAllParticipating();
+    const map = groups && groups[Object.keys(groups)[0]] !== undefined ? groups : (groups || {});
+    let n = 0;
+    for (const [jid, meta] of Object.entries(map)){
+      schoolRegistry.set(jid, meta.subject || 'unknown'); n++;
+    }
+    pushLog('success','school','School account sees ' + n + ' groups (names cached)');
+  } catch(e){ pushLog('warn','school','registry: ' + e.message); }
+}
+function getSchoolGroupName(jid){ return schoolRegistry.get(jid) || null; }
+
+/* ══════════════════════════════════════════════════════════════
+ *  v68 SCHOOL ACCOUNT — LOCKED TO THE ADMIN'S DM
+ *  · Replies ONLY to the admin's DM (commands, buttons, study chat).
+ *  · EVERY other message — every group, every other DM — is silently
+ *    ignored (counted + live-panel only, never answered).
+ *  · School groups: read-only monitor. The ONLY traffic that leaves
+ *    them is (a) "needed" updates and (b) assignments extracted from
+ *    documents — both go to the ADMIN, never back to a group.
+ * ══════════════════════════════════════════════════════════════ */
+const SCHOOL_COMMANDS = ['help','commands','menu','ping','status','stats','today','week',
+  'timetable','weather','addlecture','dellecture','addassignment','delassignment',
+  'study','deadlines','pdf','docs','forgetdocs','updates','tasks','canceltask',
+  'whoami','summary','jobs','flow','registry','logs','errors'];
+
+async function handleSchoolAdminCommand(text, chatJid, msg){
+  const mapped = parseCasualAdmin(text);
+  if (mapped){
+    const cmd = mapped.slice(1).split(/\s+/)[0].toLowerCase();
+    if (SCHOOL_COMMANDS.includes(cmd)){
+      await handleAdminCommand(mapped, chatJid, msg, { account:'school', replyFn:(t)=>schoolReply(chatJid, t) });
+      return;
+    }
+    await schoolReply(chatJid, '🏫 School account — reports, docs and studying only.\nGroup management lives on the groups account.');
+    await sendButtons(chatJid, 'school', { account:'school' });
+    return;
+  }
+  /* v68.2: admin task orders from the school line too — group names
+   * resolve across BOTH registries, sends go out on the right account. */
+  const taskSpec = parseTaskRequest(text);
+  if (taskSpec){
+    if (taskSpec.badTime){
+      await schoolReply(chatJid, 'I did not understand the time "' + taskSpec.badTime + '".\nTry: by 5pm · by 17:30 · in 2 hours · tonight · tomorrow');
+      return;
+    }
+    const r = scheduleAdminTask(taskSpec, chatJid);
+    await schoolReply(chatJid, r.plan || ('Err: ' + r.error));
+    return;
+  }
+  /* v68: free-text from the admin = study-buddy chat (grounded in
+   * timetable + deadlines + recently received documents). */
+  await studyBuddyChat(chatJid, text);
+}
+
+async function handleSchoolMessage(msg){
+  if (!schoolSock) return;
+  try {
+    const chatJid = msg.key?.remoteJid;
+    if (!chatJid) return;
+    if (msg.key?.fromMe) return;
+    const raw = msg.message;
+    if (!raw || raw.protocolMessage || raw.reactionMessage || raw.pollUpdateMessage || msg.messageStubType) return;
+    const m = raw.ephemeralMessage?.message || raw.viewOnceMessage?.message
+           || raw.viewOnceMessageV2?.message || raw.deviceSentMessage?.message || raw;
+    accountStats.school.in++;          /* v68: per-account counter */
+    const isGroup = chatJid.endsWith('@g.us');
+    const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
+    const isAdmin = isAdminSender(msg, senderJid);
+
+    /* self-detection on the school account */
+    const cand = extractAllPhoneCandidates(msg, senderJid);
+    const selfBase = (schoolNumber || '').split('@')[0];
+    if (selfBase && cand.includes(selfBase)) return;
+
+    if (LOADTEST) lt.handled++;
+    if (isAdmin && !isGroup) touchAdminActive();
+
+    /* read-only live panel — same stream, tagged account:school */
+    pushLiveMessage({
+      id: msg.key.id, ts: new Date().toISOString(), chatJid,
+      chatType: isGroup ? 'group' : 'dm', senderJid,
+      senderName: msg.pushName || 'Unknown', phone: cand[0] || '-',
+      lid: extractLidFromMsg(msg, senderJid) || '-',
+      text: (m?.conversation || m?.extendedTextMessage?.text || m?.imageMessage?.caption
+          || m?.videoMessage?.caption || m?.documentMessage?.fileName || '[media]').slice(0,200),
+      mediaType: m?.documentMessage ? 'document' : 'text', isAdmin,
+      account: 'school',
+      groupName: isGroup ? (getSchoolGroupName(chatJid) || '-') : undefined
+    });
+    resetDailyStats(); dailyStats.readsSent++;
+
+    /* v68: BUTTON TAPS from the admin DM — handled before any text gate */
+    const btnTap = extractButtonCommand(m);
+    if (btnTap){
+      if (SCHOOL_STRICT_ADMIN && (!(!isGroup && isAdmin))) return;
+      markRead(msg).catch(()=>{});
+      await routeButton(chatJid, btnTap.id, 'school', msg);
+      return;
+    }
+
+    /* v68: DOCUMENTS — the school account reads PDFs/Word docs from
+     * school groups AND from the admin's DM. Group docs are silent in
+     * the group; whatever is found goes to the ADMIN only. */
+    if (m?.documentMessage || m?.documentWithCaptionMessage){
+      await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'school');
+      return;                            // docs never fall through to chat
+    }
+
+    const text = m?.conversation || m?.extendedTextMessage?.text
+              || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
+
+    /* school group message: monitor ONLY. Queue the few updates the
+     * admin actually needs. NEVER reply into the group. */
+    if (isGroup){
+      if (text && isNeededUpdate(text)){
+        queueNeededUpdate(getSchoolGroupName(chatJid) || chatJid, text);
+        pushLog('info','updates','[school] Needed update from ' + (getSchoolGroupName(chatJid) || chatJid));
+      }
+      return;                            // strictly read-only in groups
+    }
+
+    /* ── DM path ── */
+    if (isAdmin){
+      await handleSchoolAdminCommand(text, chatJid, msg);
+      return;
+    }
+    /* v68 STRICT GATE: not the admin's DM → ignore completely.
+     * No reply, no AI, nothing — just a quiet note in the logs. */
+    pushLog('info','school','Non-admin DM ignored (school answers admin only): ' + (msg.pushName || cand[0] || senderJid));
+  } catch(e){ pushLog('error','school', e.message); }
+}
+
+async function connectSchoolBot(){
+  if (schoolIsConnecting) return;
+  if (LOADTEST) return;               // loadtest: manager stub only
+  schoolIsConnecting = true; schoolManualDisconnect = false;
+  try {
+    pushLog('info','school','Initializing school account...');
+    const { state, saveCreds } = await useMultiFileAuthState(SCHOOL_AUTH_FOLDER);
+    const version = await getVersion();
+
+    const baseSocket = makeWASocket({
+      version, auth: state, printQRInTerminal: false,
+      browser: Browsers.macOS('Desktop'),
+      logger: pino({ level:'silent' }),
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: false,
+      getMessage: async ()=>undefined,
+      qrTimeout: 90000,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      defaultQueryTimeoutMs: 30000
+    });
+
+    schoolSock = baseSocket;
+
+    schoolSock.ev.on('connection.update', async (update)=>{
+      const { connection, lastDisconnect, qr } = update;
+      if (qr){
+        schoolQrDataUri = await QRCode.toDataURL(qr);
+        schoolStatus = 'qr';
+        pushLog('info','school','School QR generated — scan the SCHOOL card on the panel');
+      }
+      if (connection === 'open'){
+        schoolIsConnecting = false; schoolStatus = 'connected';
+        schoolReconnectAttempts = 0;
+        const jid = schoolSock.user?.id || null;
+        schoolNumber = jid?.split(':')[0]?.split('@')[0] || 'unknown';
+        pushLog('success','school','School account connected as ' + schoolNumber);
+
+        try { await schoolSock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
+        try { await schoolSock.sendPresenceUpdate('available'); } catch(e){}
+
+        setTimeout(function(){ refreshSchoolRegistry(); }, 4000);
+
+        pushLiveMessage({
+          id: 'school-boot-' + Date.now(), ts: new Date().toISOString(),
+          chatJid: ADMIN_JID, chatType: 'system', senderJid: jid,
+          senderName: 'SCHOOL ACCOUNT ONLINE', phone: schoolNumber,
+          text: 'School account ONLINE as ' + schoolNumber + '\nRead-only monitor — replies to admin only.',
+          mediaType: 'system', isAdmin: true, account: 'school'
+        });
+        try {
+          await schoolSock.sendMessage(ADMIN_JID, { text:
+            '🏫 BreadBot v68 SCHOOL account online\n' +
+            'Bot: ' + schoolNumber + '\n' +
+            'Role: your study buddy (replies to YOU only — ignores everyone else)\n' +
+            'Send "menu" for buttons · "today" · "weather" · send me PDFs/DOCX to read',
+          });
+        } catch(e){ pushLog('warn','school','hello: ' + e.message); }
+      }
+      if (connection === 'close'){
+        schoolIsConnecting = false;
+        const { code, msg } = describeDisconnect(lastDisconnect);
+        pushLog('warn','school',`Disconnected (${code ?? '?'}) — ${msg}`);
+        if (schoolManualDisconnect){ schoolStatus = 'disconnected'; return; }
+        if (code === DisconnectReason.loggedOut){ schoolStatus = 'disconnected'; pushLog('error','school','Logged out'); return; }
+        if (schoolReconnectAttempts < MAX_RECONNECT){
+          schoolReconnectAttempts++;
+          const delay = Math.min(3000 * schoolReconnectAttempts, 20000);
+          schoolStatus = 'reconnecting';
+          pushLog('warn','school','Retry '+delay/1000+'s ['+schoolReconnectAttempts+'/'+MAX_RECONNECT+']');
+          setTimeout(function(){
+            try { schoolSock.end(undefined); } catch(e){}
+            schoolSock = null; connectSchoolBot();
+          }, delay);
+        } else {
+          schoolStatus = 'disconnected';
+          pushLog('error','school','Max retries');
+        }
+      }
+    });
+
+    schoolSock.ev.on('creds.update', saveCreds);
+    schoolSock.ev.on('messages.upsert', async function(data){
+      const messages = data.messages || [];
+      for (const msg of messages){
+        try { await handleSchoolMessage(msg); }
+        catch(e){ pushLog('error','school-handler',e.message); }
+      }
+    });
+  } catch(err){
+    schoolIsConnecting = false;
+    pushLog('error','school','Connection failed: '+err.message);
+    schoolStatus = 'error';
+  }
+}
+
+async function disconnectSchoolBot(){
+  schoolManualDisconnect = true;
+  if (schoolSock){
+    try { schoolSock.end(undefined); } catch(e){}
+    schoolSock = null;
+    schoolStatus = 'disconnected'; schoolQrDataUri = null; schoolIsConnecting = false;
+    schoolNumber = null;
+    pushLog('warn','school','School account disconnected');
+  }
+}
+function refreshSchoolQR(){
+  schoolQrDataUri = null; schoolStatus = 'disconnected'; schoolManualDisconnect = true;
+  if (schoolSock){ try { schoolSock.end(undefined); } catch(e){} schoolSock = null; }
+  schoolIsConnecting = false; schoolNumber = null; schoolReconnectAttempts = 0;
+  pushLog('info','school','Manual school QR refresh');
+  setTimeout(function(){ schoolManualDisconnect = false; connectSchoolBot(); }, 1000);
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  ADMIN LOG DIGEST (v67) — all logs flow to the admin chat
+ *  warn/error/success events are batched and sent every
+ *  ADMIN_LOG_DIGEST_MIN minutes by whichever account is connected.
+ * ══════════════════════════════════════════════════════════════ */
+function startAdminLogDigest(){
+  setInterval(async function(){
+    if (!LOG_TO_ADMIN || digestInFlight) return;
+    if (!adminLogBus.length) return;
+    const useS = schoolSock && schoolStatus === 'connected';
+    const S = useS ? schoolSock : sock;
+    if (!S || (useS ? schoolStatus : connectionStatus) !== 'connected') return;
+    digestInFlight = true;
+    const batch = adminLogBus.splice(0, 25);
+    try {
+      const lines = batch.map(e => '• [' + e.level + '][' + e.source + '] ' + e.message);
+      const extra = adminLogBus.length;
+      const text = '📋 Log digest (' + batch.length + (extra ? ', +' + extra + ' more queued' : '') + '):\n' + lines.join('\n');
+      await S.sendMessage(ADMIN_JID, { text: text.slice(0, 3500) });
+      pushLog('info','logdigest','Sent ' + batch.length + ' log entries to admin');
+      /* v68: flush the group updates the admin needs with the digest */
+      if (schoolUpdatesBus.length){
+        try {
+          const ups = schoolUpdatesBus.splice(0, 10);
+          const utext = '📌 Group updates you need (' + ups.length + (schoolUpdatesBus.length ? ', +' + schoolUpdatesBus.length + ' more queued' : '') + '):\n' +
+            ups.map(u => '• [' + u.group + '] ' + u.text.slice(0, 160)).join('\n');
+          await S.sendMessage(ADMIN_JID, { text: utext.slice(0, 3000) });
+          pushLog('info','logdigest','Flushed ' + ups.length + ' group updates to admin');
+        } catch(e){ pushLog('warn','logdigest','updates flush: ' + e.message); }
+      }
+    } catch(e){
+      adminLogBus.unshift(...batch);
+      if (adminLogBus.length > ADMIN_LOG_BUS_MAX) adminLogBus.length = ADMIN_LOG_BUS_MAX;
+      pushLog('warn','logdigest','Digest send failed: ' + e.message);
+    } finally { digestInFlight = false; lastDigestAt = Date.now(); }
+  }, ADMIN_LOG_DIGEST_MIN * 60 * 1000);
+  pushLog('info','system','Admin log digest started (every ' + ADMIN_LOG_DIGEST_MIN + 'min)');
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  LOADTEST MODE (v67) — prove the bot survives 500 msg/s
+ *  Run: LOADTEST=1 PORT=x node server.js
+ *  Then: POST /loadtest/inject {"ratePerSec":500,"seconds":30}
+ *  Watch: GET /loadtest/stats
+ *  A stub socket replaces the WhatsApp connection so the REAL
+ *  handler pipeline (dedup, flood, registry, queues, pacing) runs.
+ * ══════════════════════════════════════════════════════════════ */
+function makeLoadtestStub(){
+  pushLog('info','loadtest','STUB MODE — full pipeline, zero WhatsApp network');
+  sock = {
+    user: { id: '263777000001:1@s.whatsapp.net' },
+    sendPresenceUpdate: async ()=>{}, readMessages: async ()=>{},
+    updateOnlinePrivacy: async ()=>{}, updateLastSeenPrivacy: async ()=>{},
+    groupMetadata: async (jid)=>({ id:jid, subject:'Group ' + String(jid).slice(0,6), participants: [] }),
+    groupFetchAllParticipating: async ()=>({}),
+    sendMessage: async (jid)=>({ key:{ id:'stub-'+Date.now()+'-'+Math.random().toString(36).slice(2,8), remoteJid:jid, fromMe:true } }),
+    groupAcceptInvite: async ()=>null,
+    fetchStatus: async ()=>({ status:'loadtest' }),
+    end: ()=>{}
+  };
+  botJid = sock.user.id; botNumber = '263777000001'; botLid = null;
+  connectionStatus = 'connected'; lastStatusChangeAt = Date.now();
+  mainGroupJid = '120000000000001@g.us';
+  joinedGroups.set(mainGroupJid, { name:'Main Loadtest', joinedAt:Date.now(), discovered:false });
+  groupRegistry.set(mainGroupJid, { subject:'Main Loadtest', size:100, announce:false, botAdmin:true, participants:[] });
+  for (let i=1;i<=6;i++){
+    const j = '1200000000000' + i + '2@g.us';
+    joinedGroups.set(j, { name:'Other ' + i, joinedAt:Date.now(), discovered:true });
+    groupRegistry.set(j, { subject:'Other ' + i, size:50, announce:false, botAdmin:false, participants:[] });
+  }
+  pushLog('success','loadtest','Stub connected as ' + botNumber + ' — main group set');
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  EXPRESS APP
  * ══════════════════════════════════════════════════════════════ */
 const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v65</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v67</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -2719,9 +4875,9 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v65</h1>
+<h1>BreadBot v67 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — bot ignores all group messages. Send <b>!setmain &lt;link&gt;</b> from DM.</div>
-<div class="sub">Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b></div>
+<div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">
 <div class="card"><h2>Connection</h2>
 <div><span class="dot" id="dot"></span><span id="st">-</span></div>
@@ -2737,6 +4893,17 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <button class="danger" onclick="a('clear-session')">Clear Session</button>
 <button class="danger" onclick="a('disconnect')">Disconnect</button>
 <button onclick="a('pause')">Pause</button><button onclick="a('resume')">Resume</button>
+</div></div>
+<div class="card"><h2>School Account (QR 2)</h2>
+<div><span class="dot" id="dot2"></span><span id="st2">-</span></div>
+<div class="row"><span>Bot</span><span class="val" id="bn2">-</span></div>
+<div class="row"><span>Role</span><span class="val" style="font-size:11px">read-only · admin only · reports</span></div>
+<img id="qrImg2" src="" style="display:none">
+<div style="margin-top:10px">
+<button class="primary" onclick="a('connect-school')">Start</button>
+<button onclick="a('refresh-qr-school')">Refresh QR</button>
+<button class="danger" onclick="a('clear-session-school')">Clear Session</button>
+<button class="danger" onclick="a('disconnect-school')">Disconnect</button>
 </div></div>
 <div class="card"><h2>Main Group</h2>
 <div class="row"><span>Status</span><span class="val" id="mgStatus">-</span></div>
@@ -2782,6 +4949,7 @@ async function testAI(){var b=$('aiList');b.innerHTML='Testing...';var r=await a
   var x=r.rewind;if(x&&x.ok)b.innerHTML='<div>OK rewind: '+x.ms+'ms ACTIVE</div>';
   else b.innerHTML='<div style="color:#f85149">FAIL rewind: '+(x?.status||'')+' '+esc(x?.error||'')+'</div>';}
 async function refresh(){try{var d=await api('stats');setS(d.status);
+$('md').textContent=(d.mode||'-').toUpperCase();
 $('ap').textContent=d.adminPhone||'-';
 $('w').textContent=(d.window&&d.window.time)||'-';
 $('ns').textContent=(d.window&&d.window.nsfw)||'-';
@@ -2816,7 +4984,12 @@ if(x){if(x.ok)$('aiList').innerHTML='<div>OK rewind: '+x.ms+'ms <span class="ai-
 else $('aiList').innerHTML='<div style="color:#f85149">FAIL rewind: '+(x.status||'')+' '+esc(x.error||'')+'</div>';}
 else $('aiList').innerHTML='<div style="opacity:0.5">Not tested</div>';
 var q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
-else $('qrImg').style.display='none';}catch(e){}}
+else $('qrImg').style.display='none';
+var qs=await api('qr-school-data');
+$('dot2').className='dot s-'+(qs.status||'disconnected');$('st2').textContent=qs.status||'-';$('bn2').textContent=qs.botNumber||'-';
+$('ss').textContent=qs.status||'-';
+if(qs.qr&&qs.status==='qr'){$('qrImg2').src='/admin/qr-school?t='+Date.now();$('qrImg2').style.display='block';}
+else $('qrImg2').style.display='none';}catch(e){}}
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
 function logs(){var es=new EventSource('/admin/logs');es.onmessage=function(e){try{var en=JSON.parse(e.data);var div=document.createElement('div');var t=new Date(en.ts).toLocaleTimeString();
 div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);
@@ -2827,7 +5000,12 @@ div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4p
 div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
 div.style.background=m.mediaType==='system'?'#1a1d3a':(m.isAdmin?'#2d1517':'transparent');
 var badge=m.mediaType==='system'?'<span class="sys-badge">SYSTEM</span>':(m.isAdmin?'<span class="admin-badge">ADMIN</span>':'');
-div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' | <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' | '+esc(m.phone)+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
+if(m.account==='school')badge+='<span class="sys-badge">SCHOOL</span>';
+var extra='';
+if(m.groupName&&m.groupName!=='-')extra+=' | 👥 '+esc(m.groupName);
+if(m.commonGroups&&m.commonGroups.length)extra+=' | 🤝 '+esc(m.commonGroups.join(', '));
+if(m.contactStatus)extra+=' | ℹ️ '+esc(m.contactStatus);
+div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' | <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' | '+esc(m.phone)+extra+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
 var b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);}catch(e){}};
 es.onerror=function(){es.close();setTimeout(msgs,5000);};}
 refresh();logs();msgs();setInterval(refresh,5000);
@@ -2836,8 +5014,65 @@ refresh();logs();msgs();setInterval(refresh,5000);
 app.get('/', function(req,res){ res.send(PANEL_HTML); });
 app.get('/admin', function(req,res){ res.send(PANEL_HTML); });
 
+/* v67: LOADTEST endpoints (only exist when LOADTEST=1 is meaningful) */
+app.post('/loadtest/inject', function(req,res){
+  if (!LOADTEST) return res.status(400).json({ error:'Start the server with LOADTEST=1' });
+  if (lt.injecting) return res.status(409).json({ error:'Injection already running' });
+  const ratePerSec = Math.max(1, parseInt((req.body||{}).ratePerSec,10) || 500);
+  const seconds    = Math.max(1, parseInt((req.body||{}).seconds,10) || 30);
+  const dmRatio    = Math.min(0.9, Math.max(0, parseFloat((req.body||{}).dmRatio != null ? (req.body||{}).dmRatio : 0.3)));
+  const total = ratePerSec * seconds;
+  lt.injecting = true; lt.startedAt = Date.now();
+  lt.injected = 0; lt.handled = 0; lt.droppedFlood = 0; lt.droppedDup = 0;
+  lt.sendsQueued = 0; lt.sendsDone = 0; lt.sendsFailed = 0;
+  res.json({ ok:true, total, ratePerSec, seconds, dmRatio });
+  pushLog('info','loadtest','Injecting ' + total + ' msgs @ ' + ratePerSec + '/s for ' + seconds + 's (dmRatio ' + dmRatio + ')');
+  let sent = 0;
+  const timer = setInterval(function(){
+    const n = Math.min(ratePerSec, total - sent);
+    for (let i=0;i<n;i++){
+      const idx = sent + i;
+      const isDM = Math.random() < dmRatio;
+      let jid, participant;
+      const phone = '263700000' + String(1000 + (idx % 9000));
+      if (isDM){ jid = phone + '@s.whatsapp.net'; }
+      else {
+        const others = [...joinedGroups.keys()];
+        jid = (Math.random() < 0.7 || others.length < 2) ? mainGroupJid : others[1 + (idx % (others.length - 1))];
+        participant = phone + '@s.whatsapp.net';
+      }
+      lt.injected++;
+      const fake = {
+        key: { id: 'lt-' + idx + '-' + Date.now(), remoteJid: jid, participant, fromMe: false },
+        pushName: 'Tester' + (idx % 50),
+        message: { conversation: (idx % 25 === 0 ? 'hello bot how are you' : 'casual message number ' + idx) }
+      };
+      handleMessage(fake).catch(function(){ if (LOADTEST) lt.droppedOther++; });
+    }
+    sent += n;
+    if (sent >= total){ clearInterval(timer); lt.injecting = false; pushLog('info','loadtest','Injection complete: ' + total + ' msgs'); }
+  }, 1000);
+});
+app.get('/loadtest/stats', function(req,res){
+  const mem = process.memoryUsage();
+  const lags = lt.lagSamples.slice().sort((a,b)=>a-b);
+  res.json({
+    enabled: LOADTEST, injecting: !!lt.injecting,
+    injected: lt.injected, handled: lt.handled,
+    droppedFlood: lt.droppedFlood, droppedDup: lt.droppedDup, droppedOther: lt.droppedOther,
+    sendsQueued: lt.sendsQueued, sendsDone: lt.sendsDone, sendsFailed: lt.sendsFailed,
+    queue: jobs.stats(),
+    eventLoop: { lastMs: +Number(lt.lagMs).toFixed(2), maxMs: +Number(lt.lagMax).toFixed(2),
+                 p95Ms: lags.length ? +lags[Math.floor(lags.length*0.95)].toFixed(2) : 0 },
+    memory: { rssMB: +(mem.rss/1048576).toFixed(1), heapUsedMB: +(mem.heapUsed/1048576).toFixed(1) },
+    uptimeSec: Math.floor((Date.now()-(lt.startedAt||botStartTime))/1000),
+    floodThreshold: MESSAGE_FLOOD_THRESHOLD
+  });
+});
+
 app.get('/health', function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,
+  school: { status: schoolStatus, number: schoolNumber },
   uptime: Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
   window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
@@ -2864,6 +5099,18 @@ app.get('/admin/qr', async function(req,res){
   res.end(Buffer.from(b64, 'base64'));
 });
 app.get('/admin/qr-data', function(req,res){ res.json({ qr: qrDataUri, status: connectionStatus, botNumber }); });
+/* v67: SCHOOL account QR + control (second WhatsApp, same process) */
+app.get('/admin/qr-school', async function(req,res){
+  if (!schoolQrDataUri) return res.status(404).json({ error:'No QR' });
+  const b64 = schoolQrDataUri.replace(/^data:image\/\w+;base64,/,'');
+  res.writeHead(200, { 'Content-Type':'image/png' });
+  res.end(Buffer.from(b64, 'base64'));
+});
+app.get('/admin/qr-school-data', function(req,res){ res.json({ qr: schoolQrDataUri, status: schoolStatus, botNumber: schoolNumber }); });
+app.post('/admin/connect-school', function(req,res){ if (!schoolSock) connectSchoolBot(); res.json({ ok:true }); });
+app.post('/admin/disconnect-school', async function(req,res){ await disconnectSchoolBot(); res.json({ ok:true }); });
+app.post('/admin/refresh-qr-school', function(req,res){ refreshSchoolQR(); res.json({ ok:true }); });
+app.post('/admin/clear-session-school', function(req,res){ try { fs.rmSync(SCHOOL_AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
 app.post('/admin/connect', function(req,res){ if (!sock) connectBot(); res.json({ ok:true }); });
 app.post('/admin/reconnect', async function(req,res){ await disconnectBot(); setTimeout(function(){ manualDisconnect=false; connectBot(); },1000); res.json({ ok:true }); });
 app.post('/admin/disconnect', async function(req,res){ await disconnectBot(); res.json({ ok:true }); });
@@ -2916,6 +5163,8 @@ app.get('/admin/stats', function(req,res){
   const age = getAccountAgeDays();
   res.json({
     status: connectionStatus, botNumber, botLid,
+    school: { status: schoolStatus, number: schoolNumber, groups: schoolRegistry.size },
+    mode: BOT_MODE,
     uptime: Math.floor((Date.now()-botStartTime)/1000),
     dmCount: activeDMs.size, groupCount: joinedGroups.size,
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
@@ -2923,6 +5172,13 @@ app.get('/admin/stats', function(req,res){
     dailyStats, adminPhone: ADMIN_PHONE, adminLids: [...adminLids],
     pendingCount: pendingRequests.size,
     lanes: jobs.stats(), focus: focus.stats(),
+    engagement: {
+      groupRepliesEnabled, greetingsToday, welcomesToday,
+      engagedGroups: [...engagedGroups.keys()].map(g => getGroupName(g) || g),
+      dedupHours: OUT_DEDUP_HOURS
+    },
+    accounts: accountStats,
+    docs: { cachedChats: docTextCache.size, updatesQueued: schoolUpdatesBus.length },
     window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
     paused: botPaused,
     adminActive: isAdminActive(),
@@ -2946,6 +5202,8 @@ app.get('/admin/stats', function(req,res){
  *  PERIODIC TASKS
  * ══════════════════════════════════════════════════════════════ */
 setInterval(function(){ axios.get('http://localhost:'+PORT+'/health').catch(function(){}); }, 240000);
+/* v66: keep the group registry fresh (names / announce-only / members) */
+setInterval(function(){ refreshGroupRegistry().catch(function(){}); }, 30 * 60 * 1000);
 setInterval(function(){
   const now = Date.now();
   for (const [k, t] of antilinkWarnCooldown){ if (now - t > 10 * 60 * 1000) antilinkWarnCooldown.delete(k); }
@@ -2960,15 +5218,19 @@ loadState();
 loadGroupSettings();
 loadLearningData();
 loadPolicy();
+loadGroupRegistry();   /* v66 */
+loadDmHistories();     /* v66 */
+loadSchoolData();      /* v66 */
 
 app.listen(PORT, async function(){
   console.log('Port '+PORT);
+  console.log('Mode: '+BOT_MODE.toUpperCase()+(SCHOOL_MODE ? ' (read-only monitor + reports)' : ' (group management)'));
   console.log('Admin: '+ADMIN_PHONE);
   console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
-  console.log('AI: Rewind only');
+  console.log('AI: failover chain (' + (AI_PROVIDERS.map(function(p){ return p.name; }).join(' → ') || 'no keys') + ')');
   console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?'ON':'OFF'));
   console.log('Admin active window: '+ADMIN_ACTIVE_MS/1000+'s');
-  console.log('ENV: REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
+  console.log('ENV keys: ' + (AI_PROVIDERS.length ? AI_PROVIDERS.map(function(p){ return p.name; }).join(',') : 'NONE'));
   console.log('LID-aware admin detection: ENABLED');
   console.log('DM AI: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' random DMs every '+(DM_CYCLE_MS/1000)+'s');
   console.log('Scrapper: '+SCRAPER_URL);
@@ -2978,28 +5240,49 @@ app.listen(PORT, async function(){
   pushLog('info','system','Main: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
   pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
   pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
-  pushLog('info','env','REWIND='+(REWIND_KEY_ENV?'set':'MISSING'));
+  pushLog('info','env','AI keys: ' + (AI_PROVIDERS.length ? AI_PROVIDERS.map(function(p){ return p.name; }).join(',') : 'NONE'));
   pushLog('info','env','SCRAPER='+SCRAPER_URL);
   pushLog('info','admin','LID-aware detection enabled');
   pushLog('info','ai','DM batch: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' per '+(DM_CYCLE_MS/1000)+'s');
 
-  scheduleGreetings();
+  scheduleMorningReport();  /* v66: weather + lectures + due dates */
+  if (SCHOOL_MODE){
+    pushLog('info','system','SCHOOL MODE — greetings / joins / DM-AI / broadcasts disabled (read-only monitor)');
+  } else {
+    scheduleGreetings();
+    scheduleGroupJoins();
+    startDmAiCycle();
+  }
   scheduleDailyReport();
-  scheduleGroupJoins();
   scheduleHumanPresence();
-  startDmAiCycle();
+  startSelfMonitor();   /* v66: health + error prediction */
+  startAdminLogDigest(); /* v67: logs → admin chat, batched */
+  startTaskScheduler();  /* v68.2: admin task orders, human-paced sends */
 
-  connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
+  /* v67: TWO ACCOUNTS, ONE PROCESS — groups account + school account,
+   * each with its own QR on the same panel, sharing the same AI. */
+  if (LOADTEST){
+    makeLoadtestStub();
+  } else {
+    connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
+    if (!SCHOOL_MODE){
+      setTimeout(function(){ connectSchoolBot().catch(function(err){ pushLog('error','system','Boot school: '+err.message); }); }, 2500);
+    } else {
+      pushLog('info','system','BOT_MODE=school — second QR skipped (the groups socket is already the school monitor)');
+    }
+  }
 });
 
 process.on('SIGINT', async function(){
   pushLog('warn','system','SIGINT');
   try { if (sock) sock.end(undefined); } catch(e){}
+  try { if (schoolSock) schoolSock.end(undefined); } catch(e){}
   process.exit(0);
 });
 process.on('SIGTERM', async function(){
   pushLog('warn','system','SIGTERM');
   try { if (sock) sock.end(undefined); } catch(e){}
+  try { if (schoolSock) schoolSock.end(undefined); } catch(e){}
   process.exit(0);
 });
 process.on('uncaughtException', function(e){ pushLog('error','uncaught', e.message); });

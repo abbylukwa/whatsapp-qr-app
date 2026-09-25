@@ -1,0 +1,24 @@
+whatsapp-qr-app v68.1 — file list
+server.js          BreadBot v68 (dual-account, doc brain, study buddy, buttons,
+                   load-tested) + v68.1 trigger-word query cleaning fix
+package.json       68.0.0 (pdf-parse + mammoth added, pdfkit removed)
+package-lock.json  regenerated (ytdl-free)
+render.yaml        Render deploy config
+build.sh           Render build script
+env                legacy env file (keys REMOVED — rotate yours!)
+.gitignore         covers env, auth_info*, state JSONs
+.env.example       all config vars documented (incl. v68)
+school_data.json   your timetable + assignments (editable)
+CHANGES.md         v68.1 + v67 → v68 change log (with test evidence)
+FILES.txt          this file
+tools/test_full.js    140 component tests (DM cmds, admin cmds, scraper trigger
+                      words, duplicate suppression, 5-msg history, school gate,
+                      updates filter) — ALL PASSING
+tools/test_v68.js     65 unit tests (parser, buttons, filters, PDF/DOCX roundtrip)
+tools/test_casual.js  v67 casual-parser tests (still passing)
+tools/loadtest.js     load-test driver
+tools/results/     load-test JSON results
+tools/fixtures/sample_assignment.docx  test fixture for the docx reader
+
+Not shipped (recreated automatically on first boot):
+dm_histories.json, learning_data.json, policy_state.json, group_settings.json

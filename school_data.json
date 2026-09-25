@@ -1,0 +1,11 @@
+{
+  "lectures": [
+    { "day": 1, "start": "08:00", "end": "10:00", "name": "Lecture 1", "venue": "BUSE" },
+    { "day": 1, "start": "10:00", "end": "12:00", "name": "Lecture 2", "venue": "BUSE" },
+    { "day": 3, "start": "09:00", "end": "11:00", "name": "Lecture 3", "venue": "BUSE" },
+    { "day": 5, "start": "14:00", "end": "16:00", "name": "Lecture 4", "venue": "BUSE" }
+  ],
+  "assignments": [
+    { "due": "2026-10-05", "module": "CS201", "type": "assignment", "title": "Replace me: !addassignment <YYYY-MM-DD> <module> <type> <title>" }
+  ]
+}

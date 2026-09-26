@@ -1,5 +1,60 @@
 # BreadBot v68 — whatsapp-qr-app
 
+## v68.7 — MESSAGE DELIVERY + SCRAPER TEST (panel + !st)
+
+### The problems (user log evidence)
+1. "its not recieving my messages ... any of them" — admin's own texts were
+   being dropped: on the SCHOOL account the old blanket `if (fromMe) return;`
+   threw the admin's messages away before any admin check could run, and on
+   the GROUPS account plain-text admin DMs were read-and-ignored (blue tick,
+   no reply).
+2. "its blue ticking me not responding" — same root: admin DMs never reached
+   a reply path.
+3. "add the test of my web scrapper i give it a name and see if it downloads"
+   — no end-to-end scraper proof existed (search AND download AND delivery).
+4. AI showed "NONE" at boot until the groups account connected.
+
+### The fixes
+| Problem | Fix |
+|---|---|
+| Admin messages dropped (school) | fromMe traffic is now PROCESSED — the school login IS the admin's number (ADMIN_PHONE), so admin's own texts route as admin; bot's own sends filtered by botSentIds; self-echoes guarded; command channel = self-chat |
+| Blue tick, no reply (groups) | NEW `adminDmChat()` — admin plain-text DMs get INSTANT AI replies 24/7 (bypasses quiet hours + DM pool): greeting restart, 5-message memory, history persisted, fast-lane priority 0; AI-down still acknowledges ("AI is down right now — but I got your message") |
+| Groups bot offline while admin texts it | school account warns IN THE SELF-CHAT (never into the bot chat): "⚠️ GROUPS BOT IS OFFLINE — Your message to it was NOT received", rate-limited 5 min, quotes the lost text, groupsNumberBase() works even while the bot socket is down |
+| Scraper proof | NEW `!st <name>` / `!scrapertest <name>` (both accounts): 1/3 search → 2/3 download → 3/3 deliver the image, with per-step timings and cold-start hints |
+| Scraper proof ON THE INTERFACE | NEW panel card "🧪 Scraper Test" + `POST /admin/scraper-test` — type a query, press Run Test, watch search→download live with an open-media link (JSON verdict, never sends into WhatsApp) |
+| AI: NONE at boot | `detectAIBackend()` runs at BOOT, independent of bot connect (still refreshed on connect too) |
+| Panel confusion about QRs | QR 1 card says it is the BOT's own number (your phone cannot activate it); QR 2 card says it is YOUR phone; "Main NOT SET" alert now tells the truth (auto-sets after QR 1 scans, retries every 3 min) |
+
+### Admin recognition (263777627210)
+The number is ADMIN_PHONE by default in code + env; on the school account it
+is the login itself (fromMe = admin), on the groups account it is matched by
+phone AND LID (adminLids persisted). Both accounts now honour it everywhere.
+
+### Test evidence
+- NEW tools/test_v687.js — 55 tests: adminDmChat routing + memory + fallback,
+  bot-offline warning (rate-limit, self-chat only, no loop), !st 3-step flow,
+  PANEL scraper-test endpoint + card + verdicts, boot AI detection, panel QR
+  honesty, versions, prior guarantees untouched — ALL PASSING
+- NEW tools/check_panel_js.js — extracts the panel's inline <script> and
+  compiles it as real JS (panel code lives in a template literal, invisible
+  to node --check) — PARSING CLEAN
+- LIVE SMOKE: POST /admin/scraper-test {"query":"test chess"} →
+  search OK (15.3s cold start, 1 result) → download OK (206ms, 5.5KB PNG)
+  → mediaUrl returned, total 15.5s — REAL scraper round-trip PROVEN
+- Regression gate ALL GREEN: test_full 164/164 · test_v68 65/65 ·
+  test_casual 17/17 · test_v683 53/53 · test_v684 42/42 · test_v685 43/43 ·
+  test_v686 43/43 · test_v687 55/55 · boot_test 17/17
+
+### What the user must do
+1. DEPLOY this build (v68.7) — the logs showed an older build running
+2. SCAN QR 1 with the BOT's phone (panel Connection showed "qr" the whole
+   time — the groups account was never logged in, which is why Main was NOT
+   SET and no messages flowed)
+3. QR 2 with your own phone (263777627210) — that IS the admin everywhere
+4. Then: panel → 🧪 Scraper Test → type a name → Run Test (or WhatsApp `!st chess`)
+5. Main group auto-sets within ~3 min of QR 1 connecting
+
+
 ## v68.6 — HUMAN MODE: the four bot tells are gone
 
 ### The problem (behaviour audit)

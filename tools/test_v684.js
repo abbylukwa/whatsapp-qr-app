@@ -177,15 +177,15 @@ section('SHARED-GROUP TASKS — resolveTaskTarget');
 }
 
 /* ═══ 6. VERSIONS ═══ */
-section('VERSIONS — v68.6 everywhere');
+section('VERSIONS — v68.7 everywhere');
 {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  ok('package.json is 68.6.0', pkg.version === '68.6.0', pkg.version);
-  ok('COMMAND_LIST says v68.6', /BreadBot v68\.6 — Admin/.test(src));
-  ok('self-test says v68.6', /BreadBot v68\.6 SELF-TEST/.test(src));
-  ok('panel <title> says v68.6', /<title>BreadBot v68\.6<\/title>/.test(src));
-  ok('panel <h1> says v68.6', /<h1>BreadBot v68\.6 — dual account<\/h1>/.test(src));
-  ok('boot banners say v68.6', /BreadBot v68\.6 ONLINE/.test(src) && /SCHOOL account online/.test(src));
+  ok('package.json is 68.7.0', pkg.version === '68.7.0', pkg.version);
+  ok('COMMAND_LIST says v68.7', /BreadBot v68.7 — Admin/.test(src));
+  ok('self-test says v68.7', /BreadBot v68.7 SELF-TEST/.test(src));
+  ok('panel <title> says v68.7', /<title>BreadBot v68.7<\/title>/.test(src));
+  ok('panel <h1> says v68.7', /<h1>BreadBot v68.7 — dual account<\/h1>/.test(src));
+  ok('boot banners say v68.7', /BreadBot v68.7 ONLINE/.test(src) && /SCHOOL account online/.test(src));
   ok('no user-facing "BreadBot v68.4" strings left in server.js', !/BreadBot v68\.4/.test(src));
 }
 

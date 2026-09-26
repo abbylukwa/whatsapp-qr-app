@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "68.6.0",
+  "version": "68.7.0",
   "description": "BreadBot v68.3 — dual-account (groups + school), admin-locked school line, doc brain (PDF/DOCX), study buddy, PDF creation, tap buttons, load-tested",
   "main": "server.js",
   "scripts": {

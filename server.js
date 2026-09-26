@@ -17,17 +17,35 @@
 })();
 
 /* ============================================================
- *  v68.7 — MESSAGE DELIVERY + SCRAPER TEST
- *  - ADMIN PLAIN-TEXT DMs: instant AI reply 24/7 (no more
- *    "blue-ticked but silent" — the boss bypasses the DM window)
- *  - BOT-OFFLINE WARNING: texting the bot's number while QR 1 is
- *    unscanned now warns you in your self-chat (1×/5min) instead
- *    of vanishing silently
- *  - !st <name>: full scraper end-to-end test (search → download
- *    → deliver the file back to your chat)
- *  - AI backend detected at BOOT (panel no longer shows AI: NONE
- *    while the groups account is offline)
- *  - Panel QR cards labelled: QR 1 = bot's phone, QR 2 = yours
+ *  v69 — THE AUDIT BUILD (every logged failure traced to a line)
+ *  - ADMIN COMMANDS WORK EVERYWHERE: the "main group only" gate
+ *    silently ate !menu / !test / !st during the NOT-SET window.
+ *    Commands are LID-gated to you, so they are accepted in ANY
+ *    chat on both accounts now.
+ *  - SCHOOL ADMIN RECOGNITION FIXED: fromMe on the school account
+ *    IS the admin (that login is 263777627210); the school's own
+ *    LID is learned + saved at connect; the bot's LID chat is
+ *    correctly claimed as bot territory (phone OR @lid JID).
+ *  - GROUPS ACCOUNT: messages typed on the BOT's own phone are
+ *    processed as the boss (botSentIds already filters its sends).
+ *  - AI POOL: API_1= API_2= API_3=... slots in env — provider
+ *    auto-detected from the key shape; tasks ROUND-ROBIN across
+ *    every healthy provider (more APIs = load is split); dead
+ *    providers cool down and auto-revive every 5 min.
+ *  - LOG DIGEST: ERRORS ONLY, max 10 lines, max 1 per 10 min,
+ *    never to users — no more 147-entry floods.
+ *  - SCHOOL OBSERVE MODE: group messages are buffered for 2 min,
+ *    ONE AI triage pass keeps only what needs your action — no
+ *    keyword spam, no hallucinated deadlines (strict grounding
+ *    prompt: never invent exams/dates/chapters).
+ *  - Scraper (separate repo, v2.4): real image search engines
+ *    (Bing/DDG/Wikimedia + 10 PNG/photo sites) — downloads the
+ *    actual image, not the site logo; my_links category URLs are
+ *    used as-is; your domains are searched via site: operator.
+ *  - Panel: AI pool list (all providers), honest reply-rate (—
+ *    until there is data), no more [object Object], Bot LID
+ *    learned from creds.update the moment it lands.
+ *  - Main group auto-set re-syncs metadata ("1 members" ghost).
  * ============================================================ */
 
 /* ============================================================
@@ -384,7 +402,10 @@ function pushLog(level, source, message, meta={}){
   logBuffer.push(entry); if (logBuffer.length>LOG_BUFFER_MAX) logBuffer.shift();
   /* v67: feed the admin WhatsApp digest (skip the digest's own logs to
    * avoid a feedback loop; skip info-level chat noise) */
-  if (LOG_TO_ADMIN && source !== 'logdigest' && level !== 'info'){
+  if (LOG_TO_ADMIN && source !== 'logdigest' && (level === 'error' || level === 'warn')){
+    /* v69: the admin digest is ERRORS ONLY — success/info lines ("Discovered
+     * group", "rewind OK"…) flooded the boss's DM. They still show in the
+     * panel Logs. Errors NEVER go to users — only here and to the panel. */
     adminLogBus.push({ ts: entry.ts, level, source, message: String(message).slice(0,160) });
     if (adminLogBus.length > ADMIN_LOG_BUS_MAX) adminLogBus.shift();
   }
@@ -579,13 +600,14 @@ function markBotSent(id){
     for (const i of a.slice(-2500)) botSentIds.add(i);
   }
 }
-function getSelfLid(){
+function getSelfLid(s){
+  const S = s || sock;
   try {
     const candidates = [
-      sock?.user?.lid,
-      sock?.authState?.creds?.me?.lid,
-      sock?.creds?.me?.lid,
-      sock?.user?.id?.includes('@lid') ? sock.user.id : null
+      S?.user?.lid,
+      S?.authState?.creds?.me?.lid,
+      S?.creds?.me?.lid,
+      S?.user?.id?.includes('@lid') ? S.user.id : null
     ];
     for (const c of candidates){
       if (typeof c === 'string' && c.includes('@lid')){
@@ -633,25 +655,106 @@ function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLO
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI — PROVIDER FAILOVER CHAIN (v66)
- *  Order: Rewind → Venice → Gemini → OpenAI (whichever keys exist).
- *  Boot: every provider is tested, first OK becomes active.
- *  Runtime: on failure askAI() fails over to the next provider and
- *  remembers the winner, so the bot gets smarter + never hard-down.
+ *  AI — DYNAMIC PROVIDER POOL (v69)
+ *  Put as many API keys as you want in env:
+ *      API_1=<key>   API_2=<key>   API_3=<key> ...
+ *  The provider behind each slot is AUTO-DETECTED from the key:
+ *      AIza…       → Google Gemini (openai-compat endpoint)
+ *      sk-or-v1-…  → OpenRouter
+ *      gsk_…       → Groq
+ *      sk-…        → OpenAI
+ *      anything else → Rewind (the current working endpoint)
+ *  Per-slot overrides: API_1_NAME / API_1_URL / API_1_MODEL.
+ *  Legacy keys still work: REWIND_KEY / VENICE_KEY / GEMINI_KEY / OPENAI_KEY.
+ *
+ *  HOW THE WORK IS SPLIT: every askAI() call starts on the NEXT
+ *  provider in the pool (round-robin), so N working APIs share the
+ *  tasks evenly. A provider that fails twice goes on cooldown
+ *  (5 min, doubling up to 30 min) and a background re-check every
+ *  5 minutes revives it the moment it answers again. One healthy
+ *  API = everything runs on it; eight = the load spreads 8 ways.
  * ══════════════════════════════════════════════════════════════ */
-const AI_PROVIDERS = [
-  { name:'rewind', key: process.env.REWIND_KEY, model: process.env.REWIND_MODEL || 'rewind-uncensored',
-    url:'https://api.rewind.ai/v1/chat/completions' },
-  { name:'venice', key: process.env.VENICE_KEY, model: process.env.VENICE_MODEL || 'venice-uncensored',
-    url:'https://api.venice.ai/api/v1/chat/completions' },
-  { name:'gemini', key: process.env.GEMINI_KEY, model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-    url:'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions' },
-  { name:'openai', key: process.env.OPENAI_KEY, model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-    url:'https://api.openai.com/v1/chat/completions' }
-].filter(function(p){ return !!p.key; });
+const AI_COOLDOWN_BASE_MS = 5 * 60 * 1000;
+const AI_COOLDOWN_MAX_MS  = 30 * 60 * 1000;
+const AI_FAIL_STREAK_GATE = 2;
 
-let activeProvider = null;
+function aiShapeFor(key, slot, existingBases){
+  const k = String(key);
+  let name, url, model;
+  if (/^AIza/.test(k)){
+    name='gemini'; url='https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'; model='gemini-2.0-flash';
+  } else if (/^sk-or-v1-/.test(k)){
+    name='openrouter'; url='https://openrouter.ai/api/v1/chat/completions'; model='openrouter/auto';
+  } else if (/^gsk_/.test(k)){
+    name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='llama-3.3-70b-versatile';
+  } else if (/^sk-/.test(k)){
+    name='openai'; url='https://api.openai.com/v1/chat/completions'; model='gpt-4o-mini';
+  } else {
+    name='rewind'; url='https://api.rewind.ai/v1/chat/completions'; model='rewind-uncensored';
+  }
+  const nO = process.env['API_'+slot+'_NAME'], uO = process.env['API_'+slot+'_URL'], mO = process.env['API_'+slot+'_MODEL'];
+  if (nO) name = nO; if (uO) url = uO; if (mO) model = mO;
+  /* unique name per slot so reports/panel never collide */
+  const instances = existingBases.filter(b => b === name).length;
+  return { base:name, name: instances ? (name + '#' + (instances+1)) : name, url, model };
+}
+function buildAiPool(){
+  const pool = [];
+  const seen = new Set();
+  const bases = [];
+  /* numbered slots first: API_1..API_12 */
+  for (let s = 1; s <= 12; s++){
+    const key = process.env['API_'+s];
+    if (!key || !String(key).trim()) continue;
+    const shaped = aiShapeFor(String(key).trim(), s, bases);
+    if (seen.has(shaped.url + '|' + key)) continue;
+    seen.add(shaped.url + '|' + key);
+    bases.push(shaped.base);
+    pool.push(Object.assign(shaped, { key: String(key).trim(), failStreak:0, cooldownUntil:0 }));
+  }
+  /* legacy named keys still honoured (appended, deduped by key) */
+  const legacy = [
+    ['rewind', process.env.REWIND_KEY, 'https://api.rewind.ai/v1/chat/completions', process.env.REWIND_MODEL || 'rewind-uncensored'],
+    ['venice', process.env.VENICE_KEY, 'https://api.venice.ai/api/v1/chat/completions', process.env.VENICE_MODEL || 'venice-uncensored'],
+    ['gemini', process.env.GEMINI_KEY, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', process.env.GEMINI_MODEL || 'gemini-2.0-flash'],
+    ['openai', process.env.OPENAI_KEY, 'https://api.openai.com/v1/chat/completions', process.env.OPENAI_MODEL || 'gpt-4o-mini']
+  ];
+  for (const [name, key, url, model] of legacy){
+    if (!key) continue;
+    if (seen.has(url + '|' + key)) continue;
+    seen.add(url + '|' + key);
+    const instances = bases.filter(b => b === name).length;
+    bases.push(name);
+    pool.push({ base:name, name: instances ? (name+'#'+(instances+1)) : name, url, model, key, failStreak:0, cooldownUntil:0 });
+  }
+  return pool;
+}
+const AI_POOL = buildAiPool();
+const AI_PROVIDERS = AI_POOL;          /* compat alias for !mode / !test / boot logs */
+
+let aiPoolIdx = 0;                     /* round-robin cursor — the load splitter */
+let activeProvider = null;             /* last provider that answered OK (panel) */
 let providerReport = {};
+
+function healthyAiProviders(){
+  const now = Date.now();
+  const list = AI_POOL.filter(p => now >= (p.cooldownUntil || 0));
+  /* everything on cooldown? still try in order — dead is better than silent */
+  return list.length ? list : AI_POOL.slice();
+}
+function markAiOk(p, ms){
+  p.failStreak = 0; p.cooldownUntil = 0;
+  activeProvider = p.name;
+  providerReport[p.name] = Object.assign(providerReport[p.name] || {}, { ok:true, ms, error:undefined });
+}
+function markAiFail(p, err){
+  p.failStreak = (p.failStreak || 0) + 1;
+  if (p.failStreak >= AI_FAIL_STREAK_GATE){
+    const over = p.failStreak - AI_FAIL_STREAK_GATE;
+    p.cooldownUntil = Date.now() + Math.min(AI_COOLDOWN_BASE_MS * Math.pow(2, over), AI_COOLDOWN_MAX_MS);
+  }
+  providerReport[p.name] = { ok:false, status: err?.status, error: (err?.message || 'failed').slice(0, 120) };
+}
 
 async function askProvider(p, system, prompt, maxTokens, temperature, timeoutMs){
   const r = await axios.post(p.url, {
@@ -671,6 +774,7 @@ async function testProvider(p){
     const { reply } = await askProvider(p, 'You are a test bot.', 'Reply with exactly: OK', 20, 0, 15000);
     if (reply && reply.trim().length){
       providerReport[p.name] = { ok:true, ms: Date.now()-t0, sample: reply.trim().slice(0,40) };
+      markAiOk(p, Date.now()-t0);
       return true;
     }
     providerReport[p.name] = { ok:false, ms: Date.now()-t0, error:'empty response' };
@@ -683,58 +787,72 @@ async function testProvider(p){
 }
 
 async function detectAIBackend(){
-  pushLog('info','ai','Testing AI providers (' + AI_PROVIDERS.map(p=>p.name).join(', ') + ')...');
+  if (!AI_POOL.length){ pushLog('error','ai','No AI keys found — add API_1=<key> in env'); return null; }
+  pushLog('info','ai','Testing AI pool (' + AI_POOL.map(p=>p.name).join(', ') + ')...');
   providerReport = {};
   activeProvider = null;
-  for (const p of AI_PROVIDERS){
+  await Promise.all(AI_POOL.map(async function(p){
     const ok = await testProvider(p);
-    if (ok && !activeProvider){
-      activeProvider = p.name;
-      pushLog('success','ai', p.name + ': OK ' + providerReport[p.name].ms + 'ms — ACTIVE');
+    if (ok){
+      if (!activeProvider) activeProvider = p.name;
+      pushLog('success','ai', p.name + ': OK ' + providerReport[p.name].ms + 'ms — IN POOL');
     } else {
-      pushLog('warn','ai', p.name + ': ' + (providerReport[p.name]?.error || 'unavailable'));
+      markAiFail(p, { status: providerReport[p.name]?.status, message: providerReport[p.name]?.error });
+      pushLog('warn','ai', p.name + ': ' + (providerReport[p.name]?.error || 'unavailable') + ' — cooling down, auto-retry every 5 min');
     }
-  }
-  if (!activeProvider) pushLog('error','ai','No AI provider available — check keys in .env');
+  }));
+  if (!activeProvider) pushLog('error','ai','No AI provider available right now — the pool keeps re-checking every 5 min');
   return activeProvider;
 }
 
 async function askAI(prompt, system){
   if (LOADTEST) return 'loadtest canned reply ' + Math.floor(Math.random()*100000); // no network in perf tests
-  if (!AI_PROVIDERS.length) return null;
-  const order = [];
-  if (activeProvider) order.push(activeProvider);
-  for (const p of AI_PROVIDERS){ if (!order.includes(p.name)) order.push(p.name); }
-  for (const name of order){
-    const p = AI_PROVIDERS.find(function(x){ return x.name === name; });
+  if (!AI_POOL.length) return null;
+  const list = healthyAiProviders();
+  const start = aiPoolIdx % list.length;
+  let answer = null;
+  for (let i = 0; i < list.length && !answer; i++){
+    const p = list[(start + i) % list.length];
     try {
       const { reply } = await askProvider(p, system, prompt);
       if (!reply || !String(reply).trim()) throw new Error('empty response');
       const c = humanize(reply);
       if (c && !containsForbidden(c)){
-        activeProvider = name;
-        aiFailStreak[name] = 0;
-        return c;
-      }
-      throw new Error('filtered/empty');
-    } catch(e){
-      aiFailStreak[name] = (aiFailStreak[name] || 0) + 1;
-      if (order.indexOf(name) < order.length - 1){
-        pushLog('warn','ai', name + ': ' + e.message + ' — failing over to next provider');
+        markAiOk(p, 0);
+        answer = c;                               /* work done */
       } else {
-        pushLog('error','ai', name + ': ' + e.message + ' — all providers exhausted');
+        throw new Error('filtered/empty');
       }
+    } catch(e){
+      markAiFail(p, e);
+      pushLog('warn','ai', p.name + ': ' + e.message + ' — next provider in pool');
       continue;
     }
   }
-  resetDailyStats(); dailyStats.aiErrors++;
-  return null;
+  /* v69 ROUND-ROBIN: the NEXT task starts on the NEXT provider —
+   * with N healthy APIs the tasks split N ways automatically. */
+  aiPoolIdx = (aiPoolIdx + 1) % Math.max(1, AI_POOL.length);
+  if (!answer){ resetDailyStats(); dailyStats.aiErrors++; }
+  return answer;
 }
 
 async function testAllProviders(){
-  for (const p of AI_PROVIDERS){ await testProvider(p); }
+  await Promise.all(AI_POOL.map(function(p){ return testProvider(p); }));
   return providerReport;
 }
+
+/* v69: auto-revive — every 5 min, quietly re-test providers that are
+ * cooling down or failing; a key that got topped up comes back on its
+ * own without a restart. */
+setInterval(function(){
+  if (LOADTEST || !AI_POOL.length) return;
+  const due = AI_POOL.filter(p => p.failStreak > 0 || Date.now() < (p.cooldownUntil || 0));
+  if (!due.length) return;
+  Promise.all(due.map(async function(p){
+    const ok = await testProvider(p);
+    if (ok) pushLog('success','ai', p.name + ' recovered — back in the rotation');
+  })).catch(function(){});
+}, 5 * 60 * 1000).unref();
 
 /* ══════════════════════════════════════════════════════════════
  *  PER-JID SEND LOCK
@@ -1547,6 +1665,48 @@ async function flushGroupUpdates(account){
   return ups.length;
 }
 
+/* ══════════════════════════════════════════════════════════════
+ *  v69 SCHOOL OBSERVE MODE — watch the groups like a person does
+ *  The admin asked: "make the school ai realistic — it waits for
+ *  all the messages from the groups, acts once it receives a
+ *  message that needs action, then tells the admin — not just
+ *  hallucinate." So: buffer every school-group text for a 2-min
+ *  window, run ONE AI triage over the whole batch, and send the
+ *  admin ONLY the items that need action (or nothing at all).
+ *  The AI is forbidden from inventing facts; what it can't verify
+ *  from the messages, it must not say. ═══════════════════════ */
+const schoolObserveBuffer = [];
+const SCHOOL_OBSERVE_WINDOW_MS = Math.max(30, parseInt(process.env.SCHOOL_OBSERVE_WINDOW_SEC || '120', 10)) * 1000;
+let schoolObserveTimer = null;
+const SCHOOL_OBSERVE_SYS = 'You triage WhatsApp group messages for a busy student. ' +
+  'From the batch below, list ONLY items that need the student to ACT: deadlines, tests/exams, cancelled or moved lectures, venue changes, assignments, direct questions addressed to them, requests from lecturers/admins. ' +
+  'Drop greetings, memes, chatter and replies to other people. If NOTHING needs action reply exactly: NONE. ' +
+  'Max 6 bullets, one line each, keep the original wording and details. NEVER invent, complete or assume facts — if a message is unclear, quote it as unclear. No commentary.';
+function schoolObservePush(groupName, text){
+  schoolObserveBuffer.push({ ts: Date.now(), group: String(groupName || '?'), text: String(text || '').replace(/\s+/g, ' ').slice(0, 300) });
+  if (schoolObserveBuffer.length > 80) schoolObserveBuffer.shift();
+  if (!schoolObserveTimer){
+    schoolObserveTimer = setTimeout(function(){ flushSchoolObserve().catch(function(){}); }, SCHOOL_OBSERVE_WINDOW_MS);
+  }
+}
+async function flushSchoolObserve(){
+  schoolObserveTimer = null;
+  if (!schoolObserveBuffer.length) return;
+  if (LOADTEST) { schoolObserveBuffer.length = 0; return; }
+  if (!schoolSock || schoolStatus !== 'connected'){ schoolObserveBuffer.length = 0; return; }
+  const batch = schoolObserveBuffer.splice(0, 30);
+  const lines = batch.map(b => '[' + b.group + '] ' + b.text);
+  const r = await askAI('Group messages (oldest first):\n' + lines.join('\n'), SCHOOL_OBSERVE_SYS);
+  if (!r){ pushLog('warn','observe', batch.length + ' group msgs buffered but AI is down — dropped (panel still has them)'); return; }
+  const clean = informalize(r).trim();
+  if (!clean || /^none\b/i.test(clean)){
+    pushLog('info','observe', batch.length + ' group msgs triaged — nothing needs action');
+    return;
+  }
+  await schoolReply(ADMIN_JID, '👁️ From your groups (' + batch.length + ' msgs scanned):\n' + clean.slice(0, 1200));
+  pushLog('success','observe','Actionable group items sent to admin (' + batch.length + ' msgs scanned)');
+}
+
 /* ── Document reading: PDF / DOCX / TXT / CSV / MD ── */
 const DOC_OK_EXTS = ['pdf','docx','txt','csv','md'];
 async function readDocumentBuffer(buffer, name){
@@ -1689,7 +1849,12 @@ async function deliverDocDigestToAdmin(name, groupName, found, account){
 /* ── STUDY BUDDY ── */
 const STUDY_BUDDY_SYS = 'You are the admin\u2019s study buddy for Bindura University of Science Education (BUSE), Zimbabwe. ' +
   'You give SPECIFIC, ordered, doable study guidance: what to study first and why, where to start (chapter/topic/source), how long to spend, and a quick self-check task. ' +
-  'Use the timetable, deadlines and documents provided as context. Keep it tight (max ~12 short lines), warm, practical. No AI disclaimers, no role-play fluff.';
+  'Use the timetable, deadlines and documents provided as context. Keep it tight (max ~12 short lines), warm, practical. No AI disclaimers, no role-play fluff. ' +
+  /* v69 ANTI-HALLUCINATION GROUNDING — the boss caught the AI inventing a
+   * whole CS201 exam plan out of the word "menu". Hard rule now: */
+  'STRICT GROUNDING: never invent or guess exam names, module codes, dates, deadlines, chapter numbers, venues or marks. ' +
+  'Use ONLY the timetable, deadline list and documents provided in the context; if the information is not there, say exactly what is missing and ask for it (e.g. send the module outline or add the deadline with !addassignment). ' +
+  'Generic study advice (order, technique, time-boxing) is fine; fabricated specifics are NOT.';
 function buildStudyContext(){
   const d = localNow();
   const dayIdx = d.getUTCDay();
@@ -1918,10 +2083,12 @@ async function scrapperFetch(pathname, body, timeoutMs = 30000){
 }
 
 async function scraperSearch(query, nsfw=false){
-  const site = nsfw ? SCRAPER_NSFW_SITE : SCRAPER_SFW_SITE;
+  /* v69: site 'auto' — the scraper picks the right engines (Bing/DDG/
+   * Wikimedia + PNG sites) and only touches the NSFW index when asked. */
+  const site = nsfw ? (SCRAPER_NSFW_SITE || 'nsfw') : 'auto';
   resetDailyStats(); dailyStats.scraperSearches++;
   try {
-    const r = await axios.post(`${SCRAPER_URL}/search`, { query, site }, { timeout: 30000 });
+    const r = await axios.post(`${SCRAPER_URL}/search`, { query, site, nsfw: !!nsfw }, { timeout: 45000 });
     return { ok:true, images: r.data?.images || [], site };
   } catch(e){
     pushLog('error','scraper',`${nsfw?'NSFW':'SFW'} "${query}": ${e.message}`);
@@ -2244,6 +2411,37 @@ async function autoSetMainGroup(){
     }
     setMainGroup(jid);
     pushLog('success','main',`Main group auto-set: ${subject} (${jid}, ${size} members)`);
+    /* v69 FIX: the invite info can report "1 members" before WhatsApp
+     * syncs the group after a join — re-fetch metadata until the real
+     * member list lands (and cache the LIDs/phones while at it). */
+    (async function(){
+      for (let i = 0; i < 5; i++){
+        await new Promise(r => setTimeout(r, 4000 + i * 3000));
+        try {
+          if (!sock || connectionStatus !== 'connected') return;
+          const meta = await sock.groupMetadata(jid);
+          const n = (meta.participants || []).length;
+          if (n > 1){
+            pushLog('success','main',`Main group metadata synced: ${meta.subject || subject} (${n} members)`);
+            for (const p of meta.participants || []){
+              if (p.id && p.id.includes('@lid')) recentGroupLids.set(p.id.split('@')[0], Date.now());
+              if (p.id && p.id.includes('@s.whatsapp.net')) recentGroupPhones.set(p.id.split('@')[0], Date.now());
+              if (p.phoneNumber) recentGroupPhones.set(String(p.phoneNumber).split('@')[0], Date.now());
+              if (p.lid) recentGroupLids.set(String(p.lid).split('@')[0], Date.now());
+            }
+            const prev = groupRegistry.get(jid) || {};
+            groupRegistry.set(jid, Object.assign(prev, {
+              subject: meta.subject || prev.subject || subject,
+              size: n,
+              participants: (meta.participants || []).map(pp => ({ id: pp.id, lid: pp.lid || null, pn: (pp.phoneNumber || pp.id || '').split('@')[0] })),
+              updatedAt: Date.now()
+            }));
+            saveGroupRegistry();
+            return;
+          }
+        } catch(e){ /* metadata races during joins are normal — retry */ }
+      }
+    })();
   } catch(e){
     pushLog('error','main',`Auto-set failed: ${e.message}`);
   }
@@ -3390,8 +3588,11 @@ async function buildDmContactInfo(jid, phone, lid, pushName){
   try {
     if (phone && sock){
       const st = await sock.fetchStatus(phone + '@s.whatsapp.net');
-      const s = Array.isArray(st) ? (st[0]?.status ?? st[0]?.about) : (st?.status ?? st?.about);
-      if (s) info.status = String(s).slice(0,80);
+      let s = Array.isArray(st) ? (st[0]?.status ?? st[0]?.about) : (st?.status ?? st?.about);
+      /* v69 FIX: newer Baileys returns { status: { status: '…', setAt } } —
+       * String() of that printed "[object Object]" on the panel. */
+      if (s && typeof s === 'object') s = s.status ?? s.about ?? '';
+      if (s && typeof s === 'string') info.status = s.slice(0,80);
     }
   } catch(e){}
   dmInfoCache.set('dm:'+jid, info);
@@ -3442,7 +3643,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v68.7 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v69 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -3596,7 +3797,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const up = Math.floor((Date.now() - botStartTime) / 1000);
       const mem = (process.memoryUsage().rss / 1048576).toFixed(0);
       const L = [];
-      L.push('🧪 BreadBot v68.7 SELF-TEST');
+      L.push('🧪 BreadBot v69 SELF-TEST');
       L.push('Uptime: ' + Math.floor(up/3600) + 'h ' + Math.floor((up%3600)/60) + 'm | RAM: ' + mem + 'MB');
       L.push('');
       L.push('— ACCOUNTS —');
@@ -4103,6 +4304,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
        * search AND download AND deliver. Full end-to-end proof. ═══ */
       const name = args.slice(1).join(' ').trim();
       if (!name){ await reply('❌ Give me a name: `!st <anything>` — e.g. `!st chess board`'); break; }
+      /* v69: honest feedback when the NSFW gate is involved — a silent
+       * block looks exactly like "not responding". */
+      if (detectNsfw(name) && !isNsfwWindow()){
+        await reply('🔒 "' + name + '" looks NSFW and it is only ' + describeWindow() + ' — NSFW is allowed 21:00–08:00. Searching the SFW index meanwhile.');
+      }
       const t0 = Date.now();
       await reply('🔎 Scraper test "' + name + '"\n1/3 Searching...');
       const s = await scraperSearch(name, false);
@@ -4470,7 +4676,12 @@ async function handleMessage(msg){
                 || m?.contactMessage || m?.locationMessage);
   if (!hasText) return;
 
-  if (msg.key.fromMe) return;
+  /* v69 FIX: on the GROUPS account, fromMe = typed on the BOT's own
+   * phone (Linked Devices or the handset itself) — only the boss has
+   * that phone. botSentIds above already filtered the bot's own sends,
+   * so anything left here is the admin speaking. It used to be dropped
+   * silently — one of the "bot ignores me on all the whatsaps" holes. */
+  const fromBotPhone = !!msg.key.fromMe;
 
   const text = m?.conversation || m?.extendedTextMessage?.text
             || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
@@ -4492,9 +4703,10 @@ async function handleMessage(msg){
 
   /* v68.6: human-style read — the admin gets a fast 2-8s read,
    * everyone else waits a random 5-90s (or till morning at night) */
-  const isAdmin = isAdminSender(msg, senderJid);
+  /* v69: fromMe (typed on the bot's own phone) = the boss */
+  const isAdmin = fromBotPhone || isAdminSender(msg, senderJid);
   scheduleHumanRead(msg, { admin: isAdmin });
-  if (isBotSender(msg, senderJid)) return;
+  if (!fromBotPhone && isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
 
   /* v66: live panel enrichment — group name for groups; phone / name /
@@ -4524,16 +4736,14 @@ async function handleMessage(msg){
   }
 
   /* ═══ ADMIN COMMANDS (v67: "!" OR casual natural phrasing — no prefix
-   * needed in DM; the main group also accepts them) ═══ */
+   * needed in DM. v69: accepted in ANY chat — DM, main group or any other
+   * group. The old "main group only" gate silently ate !menu / !test / !st
+   * whenever the main group was still auto-resolving — the exact NOT-SET
+   * window in the logs. Non-admins can never reach this branch, so the
+   * group lock bought nothing but silence. ═══ */
   if (isAdmin){
     const mapped = parseCasualAdmin(text);
     if (mapped){
-      const inDM = !isGroup;
-      const inMainGroup = mainGroupJid && chatJid === mainGroupJid;
-      if (!inDM && !inMainGroup){
-        pushLog('warn','admin',`Cmd ignored in non-main group ${chatJid}`);
-        return;
-      }
       const hit = contentBlocked(mapped);
       if (hit){
         pushLog('error','admin',`Command blocked (${hit})`);
@@ -4799,7 +5009,7 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v68.7 ONLINE\n' +
+            'BreadBot v69 ONLINE\n' +
             'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
@@ -4808,7 +5018,7 @@ async function connectBot(){
             'Groups: ' + joinedGroups.size + '\n' +
             'Account age: ' + getAccountAgeDays() + 'd\n' +
             'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n\n' +
-            'Admin commands accepted in DM and main group only.\n' +
+            'Admin commands accepted in ANY chat (DM or group) — v69.\n' +
             'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
@@ -4906,7 +5116,16 @@ async function connectBot(){
       }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', function(c){
+      saveCreds(c);
+      /* v69 FIX: me.lid often arrives AFTER the 'open' event — the panel
+       * used to show "Bot LID unknown" forever. Learn it the moment the
+       * creds carry it. */
+      if (!botLid){
+        const fresh = getSelfLid();
+        if (fresh){ botLid = fresh; pushLog('success','bot','Bot LID learned (creds): ' + botLid); }
+      }
+    });
     sock.ev.on('group-participants.update', async (u)=>{ try { await handleParticipants(u); } catch(e){ pushLog('error','group',e.message); } });
     sock.ev.on('messages.upsert', async function(data){
       const messages = data.messages || [];
@@ -5034,7 +5253,15 @@ async function handleSchoolMessage(msg){
      * people stay non-admin (remoteJid = the other person). */
     const fromMe = !!msg.key?.fromMe;
     const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
-    const isAdmin = isAdminSender(msg, senderJid);
+    /* ═══ v69 CRITICAL FIX — admin recognition on the SCHOOL account ═══
+     * The school login IS the admin's own number (263777627210). Group
+     * messages the admin sends from their own phone arrive here with
+     * participant = the school account's OWN LID — which was never in
+     * adminLids (that only held the groups-side LID 115110005706891),
+     * so every admin group message showed up WITHOUT the admin tag and
+     * the read-only monitor ignored its own boss. fromMe ⇒ admin, and
+     * the school's own LID is learned + persisted at connect. */
+    const isAdmin = fromMe || isAdminSender(msg, senderJid);
 
     /* self-detection on the school account — INBOUND only. The admin's
      * own fromMe traffic IS the admin, never an echo. */
@@ -5072,7 +5299,14 @@ async function handleSchoolMessage(msg){
      * School remains a silent witness: the panel push above already
      * happened, so you still SEE the chat in the monitor. */
     const groupsBase = groupsNumberBase();
-    if (!isGroup && groupsBase && chatBase === groupsBase){
+    /* v69 FIX: WhatsApp increasingly hands out @lid JIDs for DM chats —
+     * the admin→bot chat can be "<botLid>@lid" instead of the bot's
+     * phone JID. The old guard only compared the phone base, so those
+     * chats slipped past bot territory and their sender displayed as
+     * the bot's LID with no admin tag (exactly what the logs showed).
+     * Now the guard matches the bot's phone OR the bot's LID. */
+    const groupsLidBase = (typeof botLid !== 'undefined' && botLid) ? String(botLid).split('@')[0].split(':')[0] : '';
+    if (!isGroup && groupsBase && (chatBase === groupsBase || (groupsLidBase && chatBase === groupsLidBase))){
       /* v68.7: the bot's chat is bot territory — but if the groups
        * account is DOWN, the admin's texts vanish into a dead socket
        * and the panel shows nothing. Warn in the self-chat (once per
@@ -5125,13 +5359,14 @@ async function handleSchoolMessage(msg){
     const text = m?.conversation || m?.extendedTextMessage?.text
               || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
 
-    /* school group message: monitor ONLY. Queue the few updates the
-     * admin actually needs. NEVER reply into the group. */
+    /* school group message: monitor ONLY. v69 OBSERVE MODE — no instant
+     * keyword forwarding. Every group text is buffered for a 2-minute
+     * window; ONE AI triage pass then tells the admin only what actually
+     * needs action (deadlines, cancelled lectures, direct questions…).
+     * No noise, no 147-item floods, no hallucinated deadlines. NEVER
+     * reply into the group. */
     if (isGroup){
-      if (text && isNeededUpdate(text)){
-        queueNeededUpdate(getSchoolGroupName(chatJid) || chatJid, text);
-        pushLog('info','updates','[school] Needed update from ' + (getSchoolGroupName(chatJid) || chatJid));
-      }
+      if (text && !fromMe) schoolObservePush(getSchoolGroupName(chatJid) || chatJid, text);
       return;                            // strictly read-only in groups
     }
 
@@ -5228,7 +5463,20 @@ async function connectSchoolBot(){
         schoolQrCount = 0; schoolCloseTimes = [];   /* v68.3: fresh cycle */
         const jid = schoolSock.user?.id || null;
         schoolNumber = jid?.split(':')[0]?.split('@')[0] || 'unknown';
-        pushLog('success','school','School account connected as ' + schoolNumber);
+        /* v69: learn the school account's own LID immediately and file it
+         * as an admin LID — group messages from the admin's phone carry
+         * this LID as participant, and adminLids is what isAdminSender
+         * checks. Also logged so "which LID is mine" is answerable. */
+        const sLid = getSelfLid(schoolSock);
+        if (sLid){
+          schoolLid = sLid;
+          if (!adminLids.has(sLid)){
+            adminLids.add(sLid);
+            saveAdminLids();
+            pushLog('success','school','School LID learned + saved as admin LID: ' + sLid);
+          }
+        }
+        pushLog('success','school','School account connected as ' + schoolNumber + (schoolLid ? ' · LID ' + schoolLid : ''));
 
         try { await schoolSock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
         try { await schoolSock.sendPresenceUpdate('available'); } catch(e){}
@@ -5244,7 +5492,7 @@ async function connectSchoolBot(){
         });
         try {
           await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v68.7 SCHOOL account online\n' +
+            '🏫 BreadBot v69 SCHOOL account online\n' +
             'Bot: ' + schoolNumber + '\n' +
             'Role: your study buddy (replies to YOU only — ignores everyone else)\n' +
             'Send "menu" for buttons · "today" · "weather" · send me PDFs/DOCX to read',
@@ -5280,7 +5528,18 @@ async function connectSchoolBot(){
       }
     });
 
-    schoolSock.ev.on('creds.update', saveCreds);
+    schoolSock.ev.on('creds.update', function(c){
+      saveCreds(c);
+      /* v69: me.lid can land after 'open' — learn it the moment it does */
+      if (!schoolLid){
+        const fresh = getSelfLid(schoolSock);
+        if (fresh){
+          schoolLid = fresh;
+          if (!adminLids.has(fresh)){ adminLids.add(fresh); saveAdminLids(); }
+          pushLog('success','school','School LID learned (creds): ' + fresh);
+        }
+      }
+    });
     schoolSock.ev.on('messages.upsert', async function(data){
       const messages = data.messages || [];
       for (const msg of messages){
@@ -5315,42 +5574,52 @@ function refreshSchoolQR(){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  ADMIN LOG DIGEST (v67) — all logs flow to the admin chat
- *  warn/error/success events are batched and sent every
- *  ADMIN_LOG_DIGEST_MIN minutes by whichever account is connected.
- * ══════════════════════════════════════════════════════════════ */
+ *  ADMIN LOG DIGEST (v69) — ERRORS ONLY, CAPPED, ADMIN-ONLY
+ *  The old digest batched every warn+success line (25 per send,
+ *  147+ queued — the boss's DM became a log firehose). Now:
+ *    · only error/warn lines reach the bus (see pushLog)
+ *    · max 10 lines per digest, the rest suppressed (they repeat)
+ *    · at most ONE digest per 10 minutes
+ *    · sent ONLY to ADMIN_JID — never to users or groups
+ *  Group updates get their own 5-min flush (they are content,
+ *  not error spam). ═══════════════════════════════════════════ */
+function adminAccountSock(){
+  if (schoolSock && schoolStatus === 'connected') return { S: schoolSock, account:'school' };
+  if (sock && connectionStatus === 'connected') return { S: sock, account:'groups' };
+  return { S: null, account: null };
+}
 function startAdminLogDigest(){
+  let lastDigestSentAt = 0;
   setInterval(async function(){
     if (!LOG_TO_ADMIN || digestInFlight) return;
     if (!adminLogBus.length) return;
-    const useS = schoolSock && schoolStatus === 'connected';
-    const S = useS ? schoolSock : sock;
-    if (!S || (useS ? schoolStatus : connectionStatus) !== 'connected') return;
+    if (Date.now() - lastDigestSentAt < 10 * 60 * 1000) return;   /* v69: max 1 / 10 min */
+    const { S, account } = adminAccountSock();
+    if (!S) return;
     digestInFlight = true;
-    const batch = adminLogBus.splice(0, 25);
+    /* v69: newest errors matter; anything beyond 10 is suppressed —
+     * repeated errors add nothing (they stay visible in the panel). */
+    const overflow = Math.max(0, adminLogBus.length - 10);
+    const batch = adminLogBus.splice(0, 10);
+    if (overflow) adminLogBus.length = 0;
+    lastDigestSentAt = Date.now();
     try {
       const lines = batch.map(e => '• [' + e.level + '][' + e.source + '] ' + e.message);
-      const extra = adminLogBus.length;
-      const text = '📋 Log digest (' + batch.length + (extra ? ', +' + extra + ' more queued' : '') + '):\n' + lines.join('\n');
-      await S.sendMessage(ADMIN_JID, { text: text.slice(0, 3500) });
-      pushLog('info','logdigest','Sent ' + batch.length + ' log entries to admin');
-      /* v68: flush the group updates the admin needs with the digest */
-      if (schoolUpdatesBus.length){
-        try {
-          const ups = schoolUpdatesBus.splice(0, 10);
-          const utext = '📌 Group updates you need (' + ups.length + (schoolUpdatesBus.length ? ', +' + schoolUpdatesBus.length + ' more queued' : '') + '):\n' +
-            ups.map(u => '• [' + u.group + '] ' + u.text.slice(0, 160)).join('\n');
-          await S.sendMessage(ADMIN_JID, { text: utext.slice(0, 3000) });
-          pushLog('info','logdigest','Flushed ' + ups.length + ' group updates to admin');
-        } catch(e){ pushLog('warn','logdigest','updates flush: ' + e.message); }
-      }
+      const text = '🚨 Errors (' + batch.length + (overflow ? ', ' + overflow + ' similar suppressed' : '') + '):\n' + lines.join('\n');
+      await S.sendMessage(ADMIN_JID, { text: text.slice(0, 2500) });
+      pushLog('info','logdigest','Sent ' + batch.length + ' error lines to admin' + (overflow ? ' (' + overflow + ' suppressed)' : ''));
     } catch(e){
-      adminLogBus.unshift(...batch);
-      if (adminLogBus.length > ADMIN_LOG_BUS_MAX) adminLogBus.length = ADMIN_LOG_BUS_MAX;
       pushLog('warn','logdigest','Digest send failed: ' + e.message);
     } finally { digestInFlight = false; lastDigestAt = Date.now(); }
   }, ADMIN_LOG_DIGEST_MIN * 60 * 1000);
-  pushLog('info','system','Admin log digest started (every ' + ADMIN_LOG_DIGEST_MIN + 'min)');
+  /* v69: group updates flush on their own rhythm — every 5 min */
+  setInterval(async function(){
+    if (!schoolUpdatesBus.length) return;
+    const { S, account } = adminAccountSock();
+    if (!S) return;
+    try { await flushGroupUpdates(account); } catch(e){ pushLog('warn','logdigest','updates flush: ' + e.message); }
+  }, 5 * 60 * 1000).unref();
+  pushLog('info','system','Admin log digest started (errors only, max 1 per ' + Math.max(10, ADMIN_LOG_DIGEST_MIN) + 'min, cap 10 lines)');
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -5424,7 +5693,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v68.7</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v69</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -5445,7 +5714,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v68.7 — dual account</h1>
+<h1>BreadBot v69 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">
@@ -5482,8 +5751,8 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="row"><span>JID</span><span class="val" id="mgJid" style="font-size:11px">-</span></div>
 <div class="row"><span>LIDs cached</span><span class="val" id="mainLids">-</span></div>
 </div>
-<div class="card"><h2>AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
-<div style="margin-top:8px"><button onclick="testAI()">Test Rewind</button></div></div>
+<div class="card"><h2>AI Pool</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
+<div style="margin-top:8px"><button onclick="testAI()">Test AI Pool</button><span style="font-size:10px;color:#8b949e;margin-left:8px">tasks round-robin across every healthy API</span></div></div>
 <div class="card"><h2>🧪 Scraper Test</h2>
 <div style="display:flex;gap:6px;margin-bottom:8px">
 <input id="scQuery" placeholder="type a name, e.g. chess board" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:inherit;font-size:12px" onkeydown="if(event.key==='Enter')runScraperTest()">
@@ -5526,9 +5795,11 @@ var $ = function(id){ return document.getElementById(id); };
 async function api(p,m,body){var o={method:m||'GET'};if(body){o.headers={'Content-Type':'application/json'};o.body=JSON.stringify(body);}var r=await fetch('/admin/'+p,o);return r.json();}
 function esc(s){return String(s||'').replace(/[&<>"']/g,function(c){var m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};return m[c];});}
 function setS(s){$('dot').className='dot s-'+s;$('st').textContent=s;}
-async function testAI(){var b=$('aiList');b.innerHTML='Testing...';var r=await api('aitest');
-  var x=r.rewind;if(x&&x.ok)b.innerHTML='<div>OK rewind: '+x.ms+'ms ACTIVE</div>';
-  else b.innerHTML='<div style="color:#f85149">FAIL rewind: '+(x?.status||'')+' '+esc(x?.error||'')+'</div>';}
+async function testAI(){var b=$('aiList');b.innerHTML='Testing the whole pool...';var r=await api('aitest');
+  var html='';for(var k in r){var x=r[k];
+    html+=x&&x.ok?'<div><span style="color:#3fb950">OK</span> '+esc(k)+': '+x.ms+'ms</div>'
+                 :'<div style="color:#f85149">FAIL '+esc(k)+': '+esc((x&&x.status?x.status+' ':'')+(x&&x.error||''))+'</div>';}
+  b.innerHTML=html||'<div style="opacity:0.5">No providers configured — add API_1=… in env</div>';}
 async function runScraperTest(){var q=$('scQuery').value.trim();var b=$('scResult');
   if(!q){b.innerHTML='<span style="color:#d29922">Type a name first — e.g. chess board.</span>';return;}
   $('scBtn').disabled=true;b.innerHTML='<span style="color:#d29922">⏳ 1/2 Searching "'+esc(q)+'"…</span>';
@@ -5562,7 +5833,7 @@ $('mainLids').textContent=(d.mainGroupLids||0);
 var p=d.policy||{};$('age').textContent=(p.ageDays||0)+'d';
 $('recip').textContent=(p.recipientsToday||0)+' / '+(p.recipientLimit||0);
 $('joins').textContent=(p.joinsToday||0)+' / '+(p.joinLimit||0);
-$('reply').textContent=((p.replyRate||0)*100).toFixed(0)+'%';
+$('reply').textContent=(p.replyRate==null)?'—':((p.replyRate||0)*100).toFixed(0)+'%';
 var L=d.lanes||{fast:{},slow:{}};
 $('fq').textContent=L.fast.queued||0;$('fd').textContent=L.fast.done||0;
 $('sq').textContent=L.slow.queued||0;$('sd').textContent=L.slow.done||0;
@@ -5572,10 +5843,10 @@ $('jq').textContent=d.queueSize||0;$('pd').textContent=d.pendingCount||0;
 var t=d.dailyStats||{};$('dms').textContent=t.dmsReplied||0;
 $('reads').textContent=t.readsSent||0;$('typs').textContent=t.typingsSent||0;
 $('del').textContent=t.deletesDone||0;
-var pr=(d.ai&&d.ai.providers)||{};var x=pr.rewind;
-if(x){if(x.ok)$('aiList').innerHTML='<div>OK rewind: '+x.ms+'ms <span class="ai-badge">ACTIVE</span></div>';
-else $('aiList').innerHTML='<div style="color:#f85149">FAIL rewind: '+(x.status||'')+' '+esc(x.error||'')+'</div>';}
-else $('aiList').innerHTML='<div style="opacity:0.5">Not tested</div>';
+var pr=(d.ai&&d.ai.providers)||{};var act=d.ai&&d.ai.active;var h='';
+for(var k in pr){var x=pr[k];
+  h+='<div>'+(x&&x.ok?'<span style="color:#3fb950">OK</span>':'<span style="color:#f85149">FAIL</span>')+' '+esc(k)+(act===k?' <span class="ai-badge">ACTIVE</span>':'')+(x&&x.ok?' '+x.ms+'ms':' '+esc((x&&x.status?x.status+' ':'')+(x&&x.error||'')))+'</div>';}
+$('aiList').innerHTML=h||'<div style="opacity:0.5">Not tested</div>';
 var q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
 else $('qrImg').style.display='none';
 var qs=await api('qr-school-data');
@@ -5831,7 +6102,7 @@ app.get('/admin/flow', function(req,res){
     recipientLimit: dailyRecipientLimit(age),
     joinsToday: policyState.dailyJoins,
     joinLimit: dailyJoinLimit(age),
-    replyRate: replyRate(),
+    replyRate: replyTracker.sends.length >= 5 ? replyRate() : null,   /* v69: honest — no data, no fake 100% */
     broadcastsAllowed: broadcastsAllowed(),
     mainGroup: mainGroupJid,
     adminActive: isAdminActive(),
@@ -5877,7 +6148,7 @@ app.get('/admin/stats', function(req,res){
       recipientLimit: dailyRecipientLimit(age),
       joinsToday: policyState.dailyJoins,
       joinLimit: dailyJoinLimit(age),
-      replyRate: replyRate(),
+      replyRate: replyTracker.sends.length >= 5 ? replyRate() : null,   /* v69: — until there is data */
       broadcastsAllowed: broadcastsAllowed()
     }
   });
@@ -5924,10 +6195,10 @@ app.listen(PORT, async function(){
   console.log('Mode: '+BOT_MODE.toUpperCase()+(SCHOOL_MODE ? ' (read-only monitor + reports)' : ' (group management)'));
   console.log('Admin: '+ADMIN_PHONE);
   console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
-  console.log('AI: failover chain (' + (AI_PROVIDERS.map(function(p){ return p.name; }).join(' → ') || 'no keys') + ')');
+  console.log('AI: dynamic pool — ' + (AI_POOL.length ? AI_POOL.map(function(p){ return p.name; }).join(', ') : 'no keys') + ' (tasks round-robin across healthy APIs)');
   console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?(HUMAN_READ?('ON (human '+ (READ_DELAY_MIN_MS/1000) + '-' + (READ_DELAY_MAX_MS/1000) + 's delay)'):'ON (instant)'):'OFF'));
   console.log('Admin active window: '+ADMIN_ACTIVE_MS/1000+'s');
-  console.log('ENV keys: ' + (AI_PROVIDERS.length ? AI_PROVIDERS.map(function(p){ return p.name; }).join(',') : 'NONE'));
+  console.log('ENV keys: ' + (AI_POOL.length ? AI_POOL.map(function(p){ return p.name; }).join(',') : 'NONE (add API_1=<key> in env)'));
   console.log('LID-aware admin detection: ENABLED');
   console.log('DM AI: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' DMs every '+Math.round((DM_CYCLE_MS*(1-DM_CYCLE_JITTER_PCT))/1000)+'-'+Math.round((DM_CYCLE_MS*(1+DM_CYCLE_JITTER_PCT))/1000)+'s (jittered, oldest-first)'
     +(AI_QUIET_HOURS ? ' · AI quiet '+AI_QUIET_START_HOUR+':00-'+AI_QUIET_END_HOUR+':00' : ''));
@@ -5938,7 +6209,7 @@ app.listen(PORT, async function(){
   pushLog('info','system','Main: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
   pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
   pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
-  pushLog('info','env','AI keys: ' + (AI_PROVIDERS.length ? AI_PROVIDERS.map(function(p){ return p.name; }).join(',') : 'NONE'));
+  pushLog('info','env','AI pool: ' + (AI_POOL.length ? AI_POOL.map(function(p){ return p.name; }).join(',') : 'NONE — add API_1=<key> in env'));
   pushLog('info','env','SCRAPER='+SCRAPER_URL);
   pushLog('info','admin','LID-aware detection enabled');
   pushLog('info','ai','DM batch: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' per '+(DM_CYCLE_MS/1000)+'s');

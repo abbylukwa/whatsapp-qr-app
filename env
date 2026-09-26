@@ -1,9 +1,69 @@
+# ══════════════════════════════════════════════════════════════
+#  BreadBot v69 — ENVIRONMENT
+#
+#  ── THE AI POOL (v69) — add as many APIs as you want ──
+#  Put a key in a numbered slot. The provider behind each key is
+#  AUTO-DETECTED from the key shape:
+#
+#      AIza…        → Google Gemini
+#      sk-or-v1-…   → OpenRouter
+#      gsk_…        → Groq
+#      sk-…         → OpenAI
+#      anything else → Rewind (your current working endpoint)
+#
+#  Per-slot overrides (optional):
+#      API_1_NAME=venice
+#      API_1_URL=https://api.venice.ai/api/v1/chat/completions
+#      API_1_MODEL=venice-uncensored
+#
+#  HOW IT SPLITS THE WORK: every task goes to the NEXT healthy
+#  provider (round-robin). 1 working API = it does everything.
+#  5 working APIs = the tasks split 5 ways. A provider that fails
+#  twice goes on cooldown (5 min, doubling to 30 min) and a
+#  background check every 5 min revives it automatically when it
+#  answers again — top up a key, no restart needed.
+# ══════════════════════════════════════════════════════════════
+
 PORT=10000
+
+# You = the one admin of BOTH bots (your own number)
 ADMIN_PHONE=263777627210
+
+# Web panel login (change before any public demo!)
 ADMIN_USER=admin
 ADMIN_PASS=CHANGE_THIS_TO_A_STRONG_PASSWORD
 
-VENICE_KEY=VENICE_INFERENCE_KEY_Jf3qRN_btIp0Z-hocTep0NddIJlN-OcptbUZd9_jxT
-REWIND_KEY=sk-rewind-31c3a65acc981512de959195485deec0
-OPENAI_KEY=sk-proj-N89kAWkpf_IKN3s12S4SkKegf1RYb0uACOJ8t6C868ge1PI14XoGd5j0AjxmmuZ09NICRjU6zNT3BblkFJxLHZxc1Mv6UOqznR4bTffCJgV9vWOkDvkghG0ytPj82UeF1oV4kpvwtF8Y1Vr72LATS0e2xWoA
-GEMINI_KEY=AQ.Ab8RN6LRJI9216qL7wV-x38fBNj8QOVqFqyCxxYJ851ClPwYGw
+# Your scraper deployment
+SCRAPER=https://intelligent-scraper.onrender.com
+
+# ── AI POOL SLOTS — paste keys below, leave empty = unused ──
+API_1=
+API_2=
+API_3=
+API_4=
+API_5=
+API_6=
+API_7=
+API_8=
+
+# Optional per-slot overrides (only if auto-detect needs help):
+#API_1_NAME=
+#API_1_URL=
+#API_1_MODEL=
+
+# Legacy named keys still work too (they join the same pool):
+REWIND_KEY=
+REWIND_MODEL=rewind-uncensored
+VENICE_KEY=
+VENICE_MODEL=venice-uncensored
+GEMINI_KEY=
+GEMINI_MODEL=gemini-2.0-flash
+OPENAI_KEY=
+OPENAI_MODEL=gpt-4o-mini
+
+# ── School account strictness (leave true) ──
+SCHOOL_STRICT_ADMIN=true
+
+# ── v69 School observe mode (group messages → AI triage → admin) ──
+# How long school groups are watched before ONE triage pass runs:
+SCHOOL_OBSERVE_WINDOW_SEC=120

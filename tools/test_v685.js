@@ -221,10 +221,10 @@ function versionsSection(){
 section('VERSIONS — v68.5 core banners');
 {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  ok('package.json is 68.7.0', pkg.version === '68.7.0', pkg.version);
+  ok('package.json is 69.0.0', pkg.version === '69.0.0', pkg.version);
   ok('menu/self-test/boot/panel all say v68.7',
-     /BreadBot v68.7 — Admin/.test(src) && /BreadBot v68.7 SELF-TEST/.test(src) &&
-     /BreadBot v68.7 ONLINE/.test(src) && /<title>BreadBot v68.7<\/title>/.test(src));
+     /BreadBot v69 — Admin/.test(src) && /BreadBot v69 SELF-TEST/.test(src) &&
+     /BreadBot v69 ONLINE/.test(src) && /<title>BreadBot v69<\/title>/.test(src));
 }
 }
 

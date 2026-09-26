@@ -1,3 +1,64 @@
+# BreadBot v69 — whatsapp-qr-app
+
+## v69 — THE AUDIT BUILD (every logged failure traced to a line)
+
+### Errors found in the live log (v68.7) and fixed
+1. **Admin commands silently dropped in groups** — `handleMessage` gated admin
+   commands to "DM + main group only"; during the NOT-SET window every
+   `!menu / !test / !st` in Movies, Music died ("Cmd ignored in non-main
+   group") and the bot sent nothing (panel proved it: DM 0, Typings 0,
+   Recipients 0/20, Reads 8).
+2. **School admin recognition broken in groups** — the school login IS the
+   admin's number, so admin group messages arrive fromMe=true with
+   participant = the school account's OWN LID, which was never in
+   `adminLids`; the ADMIN tag vanished exactly there (log: same message
+   showed `Howard ADMIN | 115110005706891` on groups, `Howard | 9325129007257`
+   without the tag on school).
+3. **Bot-territory guard missed the bot's @lid chat** — `chatBase ===
+   groupsBase` compared only the phone; DM chats carried as
+   `<botLid>@lid` slipped past the guard.
+4. **Scraper downloaded the site logo** — `searchImages()` ignored the
+   `site` argument, ran a fixed darknaija→pornpics chain for every query and
+   grabbed the first `<img>` on the page (usually the logo — 5KB in 97ms).
+   my_links bare domains got `?s=` appended, which turned category pages
+   back into the homepage.
+5. **Log digest flooded the admin** — success+info lines batched 25-per-send
+   with 147+ queued ("Discovered group" ×12, "rewind OK"…).
+6. **AI providers: 3 of 4 dead, no recovery** — venice 402 / gemini 401 /
+   openai 401 stayed dead until restart; sticky failover wasted 25s on the
+   dead "active" provider every call; no load sharing between healthy keys.
+7. **School AI hallucinated** — "menu" produced an invented CS201 study plan
+   (chapters, hours, self-checks) with no grounding.
+8. **Dashboard lies** — "Connection: disconnected / Bot LID unknown" while
+   connected (me.lid lands after `open`), "[object Object]" from
+   `fetchStatus`'s nested status object, "Reply rate 100%" with zero sends.
+9. **Main group auto-set reported "1 members"** — invite-info size read
+   before WhatsApp synced the group after `groupAcceptInvite`.
+
+### The fixes
+| Error | Fix in v69 |
+|---|---|
+| 1 | Admin commands accepted in ANY chat on the groups account (LID-gated anyway); fromMe on the bot's own phone processed as the boss (`botSentIds` still filters its own sends) |
+| 2 | `fromMe ⇒ admin` on the school account; school's own LID learned at connect and persisted into admin_lids.json |
+| 3 | Guard matches the bot's phone OR the bot's LID |
+| 4 | Scraper v2.4: multi-engine search (Bing Images HTML murl parse, Flickr public feed, Wikimedia Commons API, Wikipedia pageimages, Openclipart) merged, relevance-ranked, junk-filtered (logo/sprite/avatar/icon/banner/placeholder/extension-less rejected); my_links category URLs used as-is, bare domains boosted via Bing `site:domain`; UA fallback chain fixes Wikimedia 403s |
+| 5 | Digest = errors only, max 10 lines (overflow suppressed), max 1 per 10 min, admin-only; group updates get their own 5-min flush |
+| 6 | Dynamic AI POOL: `API_1..API_12` env slots with key-shape auto-detect (AIza→gemini, sk-or-v1→openrouter, gsk→groq, sk→openai, else rewind; per-slot NAME/URL/MODEL overrides; legacy keys still honoured). Round-robin load split across healthy providers, fail-streak ≥2 → cooldown 5→30 min, 5-min auto-revive re-check |
+| 7 | School OBSERVE MODE: group texts buffered 2 min → ONE AI triage → only actionable items to admin (bundled); study prompts carry strict no-invention grounding |
+| 8 | LID learned on `creds.update`; fetchStatus unwraps nested objects; reply-rate renders "—" until ≥5 tracked sends |
+| 9 | auto-set re-fetches metadata up to 5× until members > 1 and caches LIDs |
+
+### Test evidence (ALL GREEN)
+- boot_test 17/17 · test_full 164/164 · test_v68 65/65 · test_casual 17/17
+- test_v683 53/53 · test_v684 42/42 · test_v685 43/43 · test_v686 43/43
+- test_v687 55/55 · **test_v69 (NEW) 17/17** — AI pool shape, auto-detect,
+  5-task round-robin across 5 providers, cooldown failover
+- check_panel_js clean · LOADTEST 300 msgs @100/s: 0 failures, p95 1.2ms
+- Scraper live round-trip: search "peas" → 23 real images → download
+  302KB JPEG (was: 1 result → 5KB logo)
+
+## v68.7 — MESSAGE DELIVERY + SCRAPER TEST (panel + !st)
+
 # BreadBot v68 — whatsapp-qr-app
 
 ## v68.7 — MESSAGE DELIVERY + SCRAPER TEST (panel + !st)

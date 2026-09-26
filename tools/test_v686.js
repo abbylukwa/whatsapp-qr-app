@@ -228,11 +228,11 @@ section('!test — human mode line');
 section('VERSIONS — v68.7 everywhere');
 {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  ok('package.json is 68.7.0', pkg.version === '68.7.0', pkg.version);
-  ok('COMMAND_LIST says v68.7', /BreadBot v68.7 — Admin/.test(src));
-  ok('self-test says v68.7', /BreadBot v68.7 SELF-TEST/.test(src));
-  ok('boot banners say v68.7', /BreadBot v68.7 ONLINE/.test(src) && /SCHOOL account online/.test(src));
-  ok('panel says v68.7', /<title>BreadBot v68.7<\/title>/.test(src) && /<h1>BreadBot v68.7 — dual account<\/h1>/.test(src));
+  ok('package.json is 69.0.0', pkg.version === '69.0.0', pkg.version);
+  ok('COMMAND_LIST says v68.7', /BreadBot v69 — Admin/.test(src));
+  ok('self-test says v68.7', /BreadBot v69 SELF-TEST/.test(src));
+  ok('boot banners say v68.7', /BreadBot v69 ONLINE/.test(src) && /SCHOOL account online/.test(src));
+  ok('panel says v68.7', /<title>BreadBot v69<\/title>/.test(src) && /<h1>BreadBot v69 — dual account<\/h1>/.test(src));
   ok('zero user-facing v68.5 strings left', !/BreadBot v68\.5/.test(src));
   ok('v68.6 markers present', /v68\.6 HUMAN MODE/.test(src));
 }

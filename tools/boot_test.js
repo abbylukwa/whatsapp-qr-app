@@ -49,7 +49,7 @@ function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
   ok('stats: policy block present', !!stats.policy);
 
   const html = await (await fetch(BASE + '/admin')).text();
-  ok('panel: title BreadBot v68.7', html.includes('<title>BreadBot v68.7</title>'));
+  ok('panel: title BreadBot v69', html.includes('<title>BreadBot v69</title>'));
   ok('panel: four split streams present',
      ['msgsG','msgsS','logsG','logsS'].every(id => html.includes('id="' + id + '"')));
   ok('panel: old single streams gone', !html.includes('id="msgs"') && !html.includes('id="logs"'));

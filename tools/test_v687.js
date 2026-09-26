@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
- *  BreadBot v68.7 TEST SUITE — MESSAGE DELIVERY + SCRAPER TEST
+ *  BreadBot v69 TEST SUITE — MESSAGE DELIVERY + SCRAPER TEST
  *  Verifies every v68.7 guarantee at source level:
  *   1. Admin plain-text DMs → adminDmChat (instant AI, 24/7)
  *   2. Bot-offline warning (self-chat, rate-limited, bot-territory only)
  *   3. !st / !scrapertest — search → download → deliver
  *   4. Boot-time AI backend detection
  *   5. Panel QR hints + alert rewrite
- *   6. Version strings (v68.7 everywhere) + package.json 68.7.0
+ *   6. Version strings (v68.7 everywhere) + package.json 69.0.0
  * ═══════════════════════════════════════════════════════════════ */
 'use strict';
 const fs = require('fs');
@@ -129,14 +129,14 @@ ok('noMain alert now tells the truth (auto-set after QR 1)',
 
 /* ─── 6. VERSIONS ──────────────────────────────────────────── */
 section('6. Versions');
-ok('package.json 68.7.0', PKG.version === '68.7.0', PKG.version);
+ok('package.json 69.0.0', PKG.version === '69.0.0', PKG.version);
 for (const [name, re] of [
-  ['COMMAND_LIST header', /const COMMAND_LIST = `BreadBot v68\.7 — Admin/],
-  ['!test banner',        /BreadBot v68\.7 SELF-TEST/],
-  ['bot ONLINE message',  /BreadBot v68\.7 ONLINE/],
-  ['school ONLINE msg',   /BreadBot v68\.7 SCHOOL account online/],
-  ['panel <title>',       /<title>BreadBot v68\.7<\/title>/],
-  ['panel <h1>',          /<h1>BreadBot v68\.7 — dual account<\/h1>/],
+  ['COMMAND_LIST header', /const COMMAND_LIST = `BreadBot v69 — Admin/],
+  ['!test banner',        /BreadBot v69 SELF-TEST/],
+  ['bot ONLINE message',  /BreadBot v69 ONLINE/],
+  ['school ONLINE msg',   /BreadBot v69 SCHOOL account online/],
+  ['panel <title>',       /<title>BreadBot v69<\/title>/],
+  ['panel <h1>',          /<h1>BreadBot v69 — dual account<\/h1>/],
 ]) ok(name, re.test(SRC));
 ok('no stale v68.6 banner strings left',
    !/BreadBot v68\.6/.test(SRC));

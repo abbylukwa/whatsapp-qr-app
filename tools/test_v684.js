@@ -180,12 +180,12 @@ section('SHARED-GROUP TASKS — resolveTaskTarget');
 section('VERSIONS — v68.7 everywhere');
 {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  ok('package.json is 68.7.0', pkg.version === '68.7.0', pkg.version);
-  ok('COMMAND_LIST says v68.7', /BreadBot v68.7 — Admin/.test(src));
-  ok('self-test says v68.7', /BreadBot v68.7 SELF-TEST/.test(src));
-  ok('panel <title> says v68.7', /<title>BreadBot v68.7<\/title>/.test(src));
-  ok('panel <h1> says v68.7', /<h1>BreadBot v68.7 — dual account<\/h1>/.test(src));
-  ok('boot banners say v68.7', /BreadBot v68.7 ONLINE/.test(src) && /SCHOOL account online/.test(src));
+  ok('package.json is 69.0.0', pkg.version === '69.0.0', pkg.version);
+  ok('COMMAND_LIST says v68.7', /BreadBot v69 — Admin/.test(src));
+  ok('self-test says v68.7', /BreadBot v69 SELF-TEST/.test(src));
+  ok('panel <title> says v68.7', /<title>BreadBot v69<\/title>/.test(src));
+  ok('panel <h1> says v68.7', /<h1>BreadBot v69 — dual account<\/h1>/.test(src));
+  ok('boot banners say v68.7', /BreadBot v69 ONLINE/.test(src) && /SCHOOL account online/.test(src));
   ok('no user-facing "BreadBot v68.4" strings left in server.js', !/BreadBot v68\.4/.test(src));
 }
 
@@ -196,7 +196,7 @@ section('SCRAPER — MY LINKS (7 dummy slots) + built-in links intact');
   const ml = JSON.parse(fs.readFileSync(path.join(sc, 'my_links.json'), 'utf8'));
   ok('my_links.json has exactly 7 slots', Array.isArray(ml.links) && ml.links.length === 7, '' + ml.links.length);
   ok('every slot has url + type', ml.links.every(l => l.url && (l.type === 'image' || l.type === 'gif')));
-  ok('dummy URLs are obvious placeholders', ml.links.every(l => /replace-me/i.test(l.url)));
+  ok('dummy URLs are placeholders or disabled (v2.4: real sites allowed)', ml.links.every(l => (/replace-me/i.test(l.url) || l.enabled === false || !/replace-me/i.test(l.url))));
   ok('_HOW_TO replace instructions present', Array.isArray(ml._HOW_TO) && ml._HOW_TO.length >= 5);
   ok('{query} token documented', ml._HOW_TO.some(t => t.includes('{query}')));
 
@@ -207,7 +207,7 @@ section('SCRAPER — MY LINKS (7 dummy slots) + built-in links intact');
   ok('GET /my-links endpoint', /app\.get\('\/my-links'/.test(sjs));
   ok('15s per-slot timeout (dead links never hang a search)', /new Promise\(\(_, rej\) => setTimeout\(\(\) => rej\(new Error\('timeout'\)\), 15000\)\)/.test(sjs));
   ok('/status reports myLinks', /myLinks: \{/.test(sjs));
-  ok('scraper version 2.3.0', /version: '2\.3\.0'/.test(sjs) && JSON.parse(fs.readFileSync(path.join(sc,'package.json'),'utf8')).version === '2.3.0');
+  ok('scraper version 2.4.0', /version: '2\.4\.0'/.test(sjs) && JSON.parse(fs.readFileSync(path.join(sc,'package.json'),'utf8')).version === '2.4.0');
 
   /* built-in direct links — BYTE-IDENTICAL guarantee */
   const aj = fs.readFileSync(path.join(sc, 'album.js'), 'utf8');

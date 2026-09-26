@@ -1,6 +1,12 @@
-whatsapp-qr-app v68.7 — file list
-server.js          BreadBot v68.7 (dual-account, doc brain, study buddy, buttons,
-                   load-tested) + v68.7 MESSAGE DELIVERY: admin fromMe processed
+whatsapp-qr-app v69 — file list
+server.js          BreadBot v69 (dual-account, doc brain, study buddy, buttons,
+                   load-tested) + v69 THE AUDIT BUILD: admin commands accepted in ANY
+                   chat (both accounts), school fromMe=admin + school LID persisted,
+                   bot-LID chat guard, dynamic AI POOL (API_1..N env slots,
+                   auto-detect, round-robin load split, cooldown + auto-revive),
+                   errors-only capped admin digest, school OBSERVE MODE (AI triage,
+                   anti-hallucination grounding), creds.update LID learning, main
+                   group metadata re-sync, honest reply-rate + v68.7 MESSAGE DELIVERY: admin fromMe processed
                    on both accounts, adminDmChat instant AI replies, bot-offline
                    self-chat warning, !st scraper test, PANEL 🧪 Scraper Test
                    card + /admin/scraper-test, boot AI detection + v68.6 HUMAN
@@ -10,15 +16,16 @@ server.js          BreadBot v68.7 (dual-account, doc brain, study buddy, buttons
                    AI DM-ONLY (AI chats ONLY in DMs on the groups account,
                    greeting = fresh conversation, 5-message memory) + v68.4
                    one-admin conflict routing
-package.json       68.7.0 (pdf-parse + mammoth added, pdfkit removed)
+package.json       69.0.0 (pdf-parse + mammoth added, pdfkit removed)
 package-lock.json  regenerated (ytdl-free)
 render.yaml        Render deploy config
 build.sh           Render build script
-env                legacy env file (keys REMOVED — rotate yours!)
+env                demo env file — v69 AI POOL slots API_1..API_8 (+ legacy keys;
+                   values empty — paste yours, values never ship in zips)
 .gitignore         covers env, auth_info*, state JSONs
-.env.example       all config vars documented (incl. v68)
+.env.example       all config vars documented (incl. v69 AI pool + observe mode)
 school_data.json   your timetable + assignments (editable)
-CHANGES.md         v68.7 + v68.6 + v68.5 + v68.4 + v68.3 + v68.2 + v68.1 + v67 → v68 change log (with test evidence)
+CHANGES.md         v69 + v68.7 + v68.6 + v68.5 + v68.4 + v68.3 + v68.2 + v68.1 + v67 → v68 change log (with test evidence)
 FILES.txt          this file
 tools/test_full.js    164 component tests (DM cmds, admin cmds, scraper trigger
                       words, duplicate suppression, 5-msg history, school gate,

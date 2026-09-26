@@ -232,7 +232,7 @@ section('5. PANEL — separate GROUPS / SCHOOL streams');
   ok('logs route by source ([school] tag / school sources)',
      /function isSchoolLog\(en\)\{return en\.source==='school'\|\|en\.source==='school-handler'/.test(panel));
   ok('GROUPS badge for groups-account entries', /background:#1f6feb">GROUPS<\/span>/.test(panel));
-  ok('titles say v68.7 (no more v67 header)', /<title>BreadBot v68.7<\/title>/.test(panel) && /BreadBot v68.7 — dual account/.test(panel));
+  ok('titles say v68.7 (no more v67 header)', /<title>BreadBot v69<\/title>/.test(panel) && /BreadBot v69 — dual account/.test(panel));
   ok('logged-out dot style exists (blinking red)', /\.s-logged-out\{background:#f85149;animation:blink/.test(panel));
   ok('panel h2 headers label both accounts', /GROUPS ACCOUNT — Live Messages/.test(panel) && /SCHOOL ACCOUNT \(QR2\) — Live Messages/.test(panel));
 }

@@ -1,7 +1,12 @@
-whatsapp-qr-app v68.1 — file list
-server.js          BreadBot v68 (dual-account, doc brain, study buddy, buttons,
-                   load-tested) + v68.1 trigger-word query cleaning fix
-package.json       68.0.0 (pdf-parse + mammoth added, pdfkit removed)
+whatsapp-qr-app v68.6 — file list
+server.js          BreadBot v68.6 (dual-account, doc brain, study buddy, buttons,
+                   load-tested) + v68.6 HUMAN MODE: reads wait a random 5-90s
+                   (admin 2-8s), 70% of night messages stay unread until
+                   morning, DM cycle 75s ±35% jitter, oldest-first DM picking,
+                   AI quiet hours 23:00-06:00 + v68.5 AI DM-ONLY (AI chats ONLY
+                   in DMs on the groups account, greeting = fresh conversation,
+                   5-message memory) + v68.4 one-admin conflict routing
+package.json       68.6.0 (pdf-parse + mammoth added, pdfkit removed)
 package-lock.json  regenerated (ytdl-free)
 render.yaml        Render deploy config
 build.sh           Render build script
@@ -9,13 +14,22 @@ env                legacy env file (keys REMOVED — rotate yours!)
 .gitignore         covers env, auth_info*, state JSONs
 .env.example       all config vars documented (incl. v68)
 school_data.json   your timetable + assignments (editable)
-CHANGES.md         v68.1 + v67 → v68 change log (with test evidence)
+CHANGES.md         v68.6 + v68.5 + v68.4 + v68.3 + v68.2 + v68.1 + v67 → v68 change log (with test evidence)
 FILES.txt          this file
-tools/test_full.js    140 component tests (DM cmds, admin cmds, scraper trigger
+tools/test_full.js    164 component tests (DM cmds, admin cmds, scraper trigger
                       words, duplicate suppression, 5-msg history, school gate,
                       updates filter) — ALL PASSING
+tools/test_v684.js    42 one-admin-two-bots routing tests (ownership, claims,
+                      doc ownership, my_links) — ALL PASSING
+tools/test_v685.js    43 AI-DM-only tests (group chat gone, greeting restart,
+                      5-message memory, single-text prompt fix) — ALL PASSING
+tools/test_v686.js    43 HUMAN MODE tests (read delays, night hold, quiet hours,
+                      oldest-first picking, cycle jitter, flood valve) — ALL PASSING
 tools/test_v68.js     65 unit tests (parser, buttons, filters, PDF/DOCX roundtrip)
 tools/test_casual.js  v67 casual-parser tests (still passing)
+tools/test_v683.js    53 v68.3 tests (fromMe fix, !test, reconnect state,
+                      panel split, scraper direct-links guarantee)
+tools/boot_test.js    17 boot checks (real server boot + pipeline inject)
 tools/loadtest.js     load-test driver
 tools/results/     load-test JSON results
 tools/fixtures/sample_assignment.docx  test fixture for the docx reader

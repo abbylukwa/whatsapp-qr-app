@@ -24,9 +24,9 @@ async function jpost(p, body){
 }
 
 async function main(){
-  console.log(`\n=== BreadBot v67 load test: ${RATE} msg/s x ${SECS}s, FLOOD_THRESHOLD=${FLOOD} ===\n`);
+  console.log(`\n=== BreadBot v68.3 load test: ${RATE} msg/s x ${SECS}s, FLOOD_THRESHOLD=${FLOOD} ===\n`);
   const child = spawn('node', ['server.js'], {
-    cwd: path.join(__dirname, '..', 'repo-whatsapp-qr-app'),
+    cwd: path.join(__dirname, '..'),
     env: { ...process.env, LOADTEST:'1', PORT:String(PORT), FLOOD_THRESHOLD:String(FLOOD),
            JOIN_QUEUE_MAX:'60', ADMIN_LOG_DIGEST_MIN:'1' },
     stdio: ['ignore','pipe','pipe']

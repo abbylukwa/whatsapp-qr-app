@@ -190,7 +190,7 @@ section('4. DUPLICATE MESSAGES (quiet inbox)');
 {
   const hours = (src.match(/const OUT_DEDUP_HOURS\s*=\s*[^;]+;/) || ['const OUT_DEDUP_HOURS = 6;'])[0];
   eval(hours + '\nconst OUT_DEDUP_MS = OUT_DEDUP_HOURS * 3600000;\nconst recentOutTexts = new Map();\n' +
-       grab('function outTextSeen', '/* v67: MAIN-GROUP FOCUS') +
+       grab('function outTextSeen', 'function noteEngagement') +
        '\n;__g.outTextSeen = outTextSeen; __g.OUT_DEDUP_MS = OUT_DEDUP_MS; __g.recentOutTexts = recentOutTexts;');
   const S = global.__g.outTextSeen;
   const JID = '263777000001@s.whatsapp.net';
@@ -274,9 +274,9 @@ section('5. 5-LAST-MESSAGE REPLY CONTEXT');
   ok('rapid-fire pool: last 6 messages included, latest last', pl.length === 6 && /eighth msg/.test(pl[5]),
      'lines=' + pl.length);
   ok('prompt ends with explicit NEW-reply instruction', /Reply to the LATEST message as Abby\. This is a NEW reply\.$/.test(r.fullPrompt));
-  ok('no history → plain text prompt (no crash)', (function(){
+  ok('no history → text still reaches the AI (v68.5 pooled fallback)', (function(){
     const x = buildCtx(new Map(), 'unknown', 5, { messages: [] }, 'just text');
-    return x.fullPrompt === 'just text' && !x.transcript && !x.pooled;
+    return /just text/.test(x.fullPrompt) && !x.transcript;
   })());
   /* history cap after reply */
   const trimLine = (src.match(/while \(hist\.length > USER_HISTORY_SIZE \* 2\) hist\.shift\(\);/) || [])[0];
@@ -290,15 +290,18 @@ section('5. 5-LAST-MESSAGE REPLY CONTEXT');
 section('6. SCHOOL ACCOUNT = ADMIN DM ONLY');
 {
   const hsm = grab('async function handleSchoolMessage', 'async function connectSchoolBot');
+  /* v68.4: the tap gate is two lines now — tapAllowed + the strict check */
+  const tapLine  = (hsm.match(/const tapAllowed = [^\n]*/) || [])[0];
   const gateLine = (hsm.match(/if \(SCHOOL_STRICT_ADMIN[^\n]*/) || [])[0];
-  /* real line ends with "return;" = message ignored. Translate to a sentinel. */
-  const gate = eval('(function(SCHOOL_STRICT_ADMIN, isGroup, isAdmin){ ' +
+  const gate = eval('(function(SCHOOL_STRICT_ADMIN, isGroup, isAdmin, fromMe, isSelfChat){ ' +
+    (tapLine||'').trim() + '; ' +
     (gateLine||'').trim().replace(/return\s*;\s*$/, "return 'IGNORED';") + " return 'HANDLED'; })");
-  ok('strict gate is the real shipped line', !!gateLine, (gateLine||'').trim());
-  ok('school GROUP message → ignored (read-only monitor)', gate(true, true, false) === 'IGNORED');
-  ok('school DM from NON-admin → ignored completely', gate(true, false, false) === 'IGNORED');
-  ok('school DM from ADMIN → handled', gate(true, false, true) !== 'IGNORED');
-  ok('gate can be disabled by env (SCHOOL_STRICT_ADMIN=false)', gate(false, false, false) !== 'IGNORED');
+  ok('v68.4 tap gate is the real shipped lines', !!tapLine && !!gateLine, (tapLine||'').trim());
+  ok('school GROUP tap → ignored (read-only monitor)', gate(true, true, true, true, false) === 'IGNORED');
+  ok('school DM tap from NON-admin → ignored', gate(true, false, false, false, false) === 'IGNORED');
+  ok('school self-chat tap from ADMIN → handled', gate(true, false, true, true, true) !== 'IGNORED');
+  ok('school tap in the BOT chat → ignored (v68.4 ownership)', gate(true, false, false, true, false) === 'IGNORED');
+  ok('gate can be disabled by env (SCHOOL_STRICT_ADMIN=false)', gate(false, false, false, false, false) !== 'IGNORED');
   /* order of the pipeline — docs → groups read-only → admin DM → ignore */
   const iBtn   = hsm.indexOf('extractButtonCommand(m)');
   const iDoc   = hsm.indexOf('handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, \'school\')');

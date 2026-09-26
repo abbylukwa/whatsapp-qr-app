@@ -106,7 +106,8 @@
  *  - NEW: BOT_MODE=manager (default, group management) |
  *         BOT_MODE=school (admin account: read-only monitor + morning
  *         report with Open-Meteo weather, lectures, assignments, due dates)
- *  - NEW: bot only replies to DMs by default (REPLY_IN_GROUPS=false)
+ *  - NEW: bot only replies to DMs (v68.5: AI chats in DMs ONLY —
+ *         never in groups, never on school; no toggle)
  *  - NEW: self-monitor (memory, stuck-connect, AI failure streaks)
  *  - Media cap unchanged: 34MB (MEDIA_MAX_BYTES)
  * ============================================================ */
@@ -144,6 +145,27 @@ try { mammoth   = require('mammoth');   } catch(e){ console.error('doc-brain: ma
 const ENABLE_CONTENT_BLOCK = false;
 const ENABLE_TYPING = true;
 const ENABLE_READ_RECEIPTS = true;
+
+/* ─── v68.6 HUMAN MODE — kill the four bot tells ─────────────
+ *  1. Instant blue ticks   → reads now wait a RANDOM 5-90s (admin
+ *     chats read fast, 2-8s — attentive to the boss), and ~70% of
+ *     messages arriving 23:00-07:00 stay unread until morning
+ *     (phone face-down on the bedside table).
+ *  2. Metronome DM replies → the DM cycle runs 75s ±35% jitter.
+ *  3. Lottery DM picking   → the OLDEST waiting DM is answered
+ *     first (deliberate, like a person scrolling their chats).
+ *  4. Replying at 2am      → AI QUIET HOURS 23:00-06:00 local:
+ *     the AI holds DM replies overnight (pool keeps them; morning
+ *     cycles send them). The admin is never kept waiting.        */
+const HUMAN_READ              = process.env.HUMAN_READ !== '0';
+const READ_DELAY_MIN_MS       = 5_000;
+const READ_DELAY_MAX_MS       = 90_000;
+const ADMIN_READ_DELAY_MIN_MS = 2_000;
+const ADMIN_READ_DELAY_MAX_MS = 8_000;
+const READ_NIGHT_HOLD_PCT     = 0.7;   /* share of night msgs held till morning */
+const READ_NIGHT_START_HOUR   = 23;
+const READ_MORNING_HOUR       = 7;
+const READ_PENDING_CAP        = 1500;  /* flood valve — never pile up read timers */
 
 /* ══════════════════════════════════════════════════════════════
  *  CONFIG
@@ -187,7 +209,10 @@ const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;
  * BOT_MODE=school: admin account is a READ-ONLY monitor — no DM AI,
  *   no auto-join, no broadcasts, no greetings. Sends a morning report
  *   (weather + today's lectures + assignments/presentations due).
- * REPLY_IN_GROUPS: bot conversation replies are DM-only by default.
+ * AI_SURFACE (v68.5): conversational AI replies to DMs on the groups
+ *   account ONLY — group chat is never answered (people greet each other
+ *   all day; the AI can't follow), and the school account never chats.
+ *   The old REPLY_IN_GROUPS env is ignored.
  * BROADCAST_MAX: hard cap of recipients per broadcast run (rotation
  *   picks the least-recently-sent groups on later runs).
  * MORNING_REPORT_HOUR: local hour (TZ_OFFSET_HOURS-aware) for the
@@ -195,7 +220,9 @@ const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;
 const BOT_MODE            = (process.env.BOT_MODE || process.env.MODE || 'manager').toLowerCase() === 'school' ? 'school' : 'manager';
 const SCHOOL_MODE         = BOT_MODE === 'school';
 const MORNING_REPORT_HOUR = Math.min(23, Math.max(0, parseInt(process.env.MORNING_REPORT_HOUR || '6', 10)));
-const REPLY_IN_GROUPS     = (process.env.REPLY_IN_GROUPS || 'false') === 'true';
+/* v68.5: REPLY_IN_GROUPS is retired — kept only so old .env files don't
+ * crash anything. Group AI chat no longer exists at any setting. */
+const REPLY_IN_GROUPS     = false;
 const BROADCAST_BATCH_MAX = Math.max(1, parseInt(process.env.BROADCAST_MAX || '30', 10));
 const WEATHER_LOCATIONS   = [
   { key:'harare',  label:'Harare (home)',  lat:-17.8252, lon:31.0335 },
@@ -268,6 +295,14 @@ const DM_GAP_MIN_MS    = 20_000;                /* pause between chats */
 const DM_GAP_MAX_MS    = 45_000;
 const DM_FRESH_MS      = 15 * 60 * 1000;        /* single-text DMs: only while fresh */
 const DM_POOL_TTL_MS   = 6 * 60 * 60 * 1000;
+/* v68.6: no metronomes. The DM cycle is rescheduled every run at
+ * 75s ±35% (49-101s), and picks are wait-weighted (oldest first). */
+const DM_CYCLE_JITTER_PCT = 0.35;
+/* v68.6: QUIET HOURS — the AI sleeps 23:00-06:00 local (env-tunable;
+ * AI_QUIET_HOURS=0 turns the whole feature off). Admin DMs bypass. */
+const AI_QUIET_HOURS      = process.env.AI_QUIET_HOURS !== '0';
+const AI_QUIET_START_HOUR = Math.min(23, Math.max(0, parseInt(process.env.AI_QUIET_START_HOUR || '23', 10)));
+const AI_QUIET_END_HOUR   = Math.min(23, Math.max(0, parseInt(process.env.AI_QUIET_END_HOUR   || '6',  10)));
 
 const ADMIN_ACTIVE_MS = 45000;
 let adminActiveUntil = 0;
@@ -364,9 +399,58 @@ const RESTART_515_BASE_DELAY_MS=1500, RESTART_515_MAX_DELAY_MS=30000;
 const MIN_RECONNECT_INTERVAL_MS=10000, SPAM_WINDOW_MS=60000;
 const SPAM_THRESHOLD=3, SPAM_COOLDOWN_MS=60000;
 
+/* ═══ v68.3 RECONNECT HARDENING ═══
+ * WhatsApp flags reconnect spam. The old behavior (fixed 3-15s retries,
+ * a fresh QR every 90s forever, auth wiped after 3 conflicts) reads as
+ * an attack to WA servers and ends in 428 conflict loops and 401
+ * logouts. Rules for BOTH accounts now:
+ *   · exponential backoff with ±20% jitter, capped at 10 min
+ *   · QR renewal capped per connect cycle → cooldown instead of spam
+ *   · reconnect-storm detector (8 drops/10min) → 10 min cooldown
+ *   · 401 = HARD STOP — rescan required (auto-retrying dead
+ *     credentials is what got the school account logged out)
+ *   · auth wipe only as a LAST resort (5+ conflicts), then a long
+ *     wait — a fresh login while the old session is still live is
+ *     itself a conflict trigger */
+const RC = {
+  BASE_MS: 5000, MAX_MS: 10 * 60000,
+  QR_MAX: 5, QR_COOLDOWN_MS: 5 * 60000,
+  STORM_WINDOW_MS: 10 * 60000, STORM_THRESHOLD: 8, STORM_COOLDOWN_MS: 10 * 60000,
+  WIPE_ATTEMPTS: 5, WIPE_WAIT_MS: 60000
+};
+function backoffMs(attempts){
+  /* v68.3: jitter BEFORE the cap — the wait must never exceed MAX_MS
+   * (jitter after Math.min pushed the cap up to 10.5 min) */
+  const raw = RC.BASE_MS * Math.pow(2, Math.max(0, attempts - 1)) * (0.8 + Math.random() * 0.4);
+  return Math.round(Math.min(raw, RC.MAX_MS));
+}
+let botQrCount = 0, botCloseTimes = [];
+let schoolQrCount = 0, schoolCloseTimes = [];
+function noteClose(times){
+  const now = Date.now();
+  times.push(now);
+  while (times.length && now - times[0] > RC.STORM_WINDOW_MS) times.shift();
+  return times.length >= RC.STORM_THRESHOLD;
+}
+
 let mainGroupJid = null;
 
 const botSentIds = new Set();
+/* v68.4: school-side one-claim memory — WhatsApp sometimes re-delivers
+ * the same message id on the same connection. Commands, button taps and
+ * documents must execute EXACTLY ONCE even then. Cross-account conflicts
+ * are prevented by deterministic ownership rules, not by this set. */
+const schoolClaimed = new Set();
+function claimSchool(id){
+  if (!id) return true;
+  if (schoolClaimed.has(id)) return false;
+  schoolClaimed.add(id);
+  if (schoolClaimed.size > 5000){
+    const a = [...schoolClaimed]; schoolClaimed.clear();
+    for (const i of a.slice(-2500)) schoolClaimed.add(i);
+  }
+  return true;
+}
 const processedMessages = new Set();
 const activeChats = new Set();
 const activeDMs = new Set();
@@ -406,8 +490,19 @@ const lt = {
   enabled: LOADTEST, injected: 0, handled: 0, droppedFlood: 0, droppedDup: 0,
   droppedOther: 0, sendsQueued: 0, sendsDone: 0, sendsFailed: 0,
   queueFastMax: 0, queueSlowMax: 0, lagMs: 0, lagMax: 0, startedAt: null,
-  lagSamples: []
+  lagSamples: [],
+  /* v68.5: realistic-sim recordings — everything the stub sockets did */
+  rec: { sends: [], typings: [], reads: [], invites: [] }
 };
+/* record one stub-socket action (capped) — the realistic sim asserts on it */
+function ltRec(account, kind, jid, content){
+  if (!LOADTEST) return;
+  const bucket = lt.rec[kind] || (lt.rec[kind] = []);
+  bucket.push({ account, jid, ts: Date.now(),
+    text: content && content.text ? String(content.text).slice(0, 140) : '',
+    media: content ? Object.keys(content).filter(k => ['image','video','audio','document','sticker'].includes(k)).join('/') : '' });
+  if (bucket.length > 600) bucket.splice(0, bucket.length - 600);
+}
 if (LOADTEST){
   setInterval(function(){
     const t0 = process.hrtime.bigint();
@@ -427,7 +522,10 @@ const lastBotSendAt = new Map();      // jid -> ts of last bot message in that g
 const broadcastLastAt = new Map();    // jid -> ts of last broadcast received
 let lastProbeDate = null;             // main-group probe: once per day
 let morningReportSentDate = null;     // morning report: once per day
-let groupRepliesEnabled = REPLY_IN_GROUPS; // runtime toggle via !groupchat
+/* v68.5: AI conversation is DM-ONLY — permanently, no toggle.
+ * In groups people greet each other and talk all day; an AI jumping in
+ * has no idea what the conversation is about. Group media requests
+ * ("send pics of X") are explicit commands and keep working. */
 let lastStatusChangeAt = Date.now();  // stuck-connect detection
 const aiFailStreak = {};              // provider name -> consecutive failures
 
@@ -1070,14 +1168,57 @@ async function getGroupAdmins(jid){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  READ
- * ══════════════════════════════════════════════════════════════ */
+ *  READ — v68.6 HUMAN MODE
+ *  A person does not blue-tick a message the millisecond it lands.
+ *  Reads are SCHEDULED: 5-90s random for normal people, 2-8s for
+ *  the admin, and ~70% of messages that arrive 23:00-07:00 stay
+ *  unread until morning (with a random 0-90 min wake tail). A cap
+ *  on pending timers means a flood just reads without waiting.    ════════════════════════════════════════════════════════════ */
 async function markRead(msg){
   if (!ENABLE_READ_RECEIPTS || !sock || !msg?.key) return;
   try {
     await sock.readMessages([msg.key]);
     resetDailyStats(); dailyStats.readsSent++;
   } catch(e){}
+}
+
+const pendingHumanReads = new Map();
+let humanReadSeq = 0;
+function isReadNightHour(h){ return h >= READ_NIGHT_START_HOUR || h < READ_MORNING_HOUR; }
+
+/* ms from now until "morning" (READ_MORNING_HOUR local) + 0-90min
+ * random wake tail — the bedside-table delay. */
+function msUntilMorning(){
+  const now = Date.now();
+  const n = new Date(now);
+  const wakeHourUtc = ((READ_MORNING_HOUR - TZ_OFFSET_HOURS) % 24 + 24) % 24;
+  let wake = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), wakeHourUtc, 0, 0)
+           + Math.floor(Math.random() * 90 * 60 * 1000);
+  if (wake <= now) wake += 24 * 3600 * 1000;
+  return wake - now;
+}
+
+function scheduleHumanRead(msg, opts){
+  if (!ENABLE_READ_RECEIPTS || !sock || !msg?.key) return;
+  const admin = !!(opts && opts.admin);
+  /* flood safety valve — if too many reads are already pending,
+   * read immediately instead of growing the timer map forever */
+  if (pendingHumanReads.size >= READ_PENDING_CAP){ markRead(msg).catch(()=>{}); return; }
+  let ms;
+  if (admin){
+    ms = ADMIN_READ_DELAY_MIN_MS + Math.random() * (ADMIN_READ_DELAY_MAX_MS - ADMIN_READ_DELAY_MIN_MS);
+  } else if (isReadNightHour(localHour()) && Math.random() < READ_NIGHT_HOLD_PCT){
+    ms = msUntilMorning();                    /* sleep till morning */
+  } else {
+    ms = READ_DELAY_MIN_MS + Math.random() * (READ_DELAY_MAX_MS - READ_DELAY_MIN_MS);
+  }
+  const id = ++humanReadSeq;
+  const t = setTimeout(function(){
+    pendingHumanReads.delete(id);
+    markRead(msg).catch(function(){});
+  }, Math.max(1000, ms));
+  if (t.unref) t.unref();
+  pendingHumanReads.set(id, t);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1119,6 +1260,32 @@ async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'i
   const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
   return { buffer: buf, mimetype, sizeBytes: buf.length };
 }
+/* ═══ v68.5 NO-REPEAT DOWNLOADS — per-chat memory of recently sent media.
+ * Before, the DM auto-reply lane always picked result[0] — the same query
+ * returned the SAME picture/GIF every time. pickFresh() picks the first
+ * result this chat hasn't received recently; if everything is already
+ * seen it ROTATES (never the just-sent one). Tasks already dedup via
+ * sentUrls; admin previews rotate via previewCache; this closes the
+ * auto-reply + pending-resolver gap. ═══ */
+const recentMedia = new Map();          /* jid -> [urls] (last 12 sent) */
+function rememberMedia(jid, url){
+  if (!jid || !url) return;
+  const a = recentMedia.get(jid) || [];
+  a.push(url); if (a.length > 12) a.shift();
+  recentMedia.set(jid, a);
+}
+function pickFresh(list, jid){
+  if (!Array.isArray(list) || !list.length) return null;
+  const seen = recentMedia.get(jid) || [];
+  const fresh = list.find(u => !seen.includes(u));
+  if (fresh){ rememberMedia(jid, fresh); return fresh; }
+  const last = seen[seen.length - 1];
+  const i = Math.max(0, list.indexOf(last));
+  const url = list[(i + 1) % list.length];   /* rotate — never the last one */
+  rememberMedia(jid, url);
+  return url;
+}
+
 async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
@@ -1190,22 +1357,14 @@ function outTextSeen(jid, text){
   recentOutTexts.set(jid, arr.slice(-25));
   return seen;
 }
-/* v67: MAIN-GROUP FOCUS — conversational group traffic records which
- * groups the bot is engaging; if it catches itself chatting in 2+
- * non-main groups it disables group replies and alerts the admin. */
+/* v68.5: engagement is still recorded for stats, but the confusion guard
+ * is RETIRED — group AI replies no longer exist, so the bot can never
+ * catch itself chatting in random groups. AI chats in DMs only. */
 function noteEngagement(jid){
   if (!jid || !jid.endsWith('@g.us')) return;
   const now = Date.now();
   for (const [g, t] of engagedGroups){ if (now - t > CONFUSION_WINDOW_MS) engagedGroups.delete(g); }
   engagedGroups.set(jid, now);
-  const others = [...engagedGroups.keys()].filter(g => g !== mainGroupJid);
-  if (others.length >= 2 && now - confusionAlertedAt > 30*60*1000){
-    confusionAlertedAt = now;
-    groupRepliesEnabled = false;
-    pushLog('error','guard','CONFUSION GUARD: engaging ' + others.length + ' non-main groups — group replies disabled');
-    const names = others.slice(0,2).map(g => getGroupName(g) || g).join(' + ');
-    adminReply(ADMIN_JID, '🛑 Confusion guard: bot was engaging 2+ non-main groups (' + names + ').\nGroup replies AUTO-DISABLED to protect the main group.\nUse !groupchat on to re-enable.');
-  }
 }
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false, opts={}){
   const useSchool = opts && opts.account === 'school';
@@ -2327,7 +2486,14 @@ function resolveTaskTarget(spec, fromJid){
       if (!jid){
         for (const [g, name] of schoolRegistry){
           const n = norm(name);
-          if (n && (n.includes(want) || want.includes(n))){ jid = g; account = 'school'; label = name; break; }
+          if (n && (n.includes(want) || want.includes(n))){
+            jid = g; label = name;
+            /* v68.4 CONFLICT FIX: a group BOTH accounts are in is always
+             * worked by the groups account — school only sends into
+             * groups it alone is a member of (read-only monitor). */
+            account = joinedGroups.has(g) ? 'groups' : 'school';
+            break;
+          }
         }
       }
     }
@@ -2619,12 +2785,25 @@ function pruneDmPool(){
 }
 
 let dmCycleRunning = false;
+/* v68.6: the cycle is a self-rescheduling timeout — every sweep runs
+ * the batch, then re-arms at 75s ±35% (49-101s). No fixed tick, no
+ * metronome pattern for anyone to spot. */
+function runDmCycleSweep(){
+  Promise.resolve(runDmAiBatch()).catch(function(e){ pushLog('error','ai','DM cycle: ' + e.message); });
+  const jitter = DM_CYCLE_MS * DM_CYCLE_JITTER_PCT;
+  const t = setTimeout(runDmCycleSweep, DM_CYCLE_MS - jitter + Math.random() * jitter * 2);
+  if (t.unref) t.unref();
+}
 function startDmAiCycle(){
   if (dmCycleRunning) return;
   dmCycleRunning = true;
-  setInterval(runDmAiBatch, DM_CYCLE_MS).unref?.();
+  const t = setTimeout(runDmCycleSweep, DM_CYCLE_MS * (0.5 + Math.random() * 0.5));
+  if (t.unref) t.unref();
   setInterval(pruneDmPool, 10 * 60 * 1000).unref?.();
-  pushLog('info','ai',`DM AI cycle: ${DM_BATCH_MIN}-${DM_BATCH_MAX} random DMs per ${DM_CYCLE_MS/1000}s`);
+  const lo = Math.round((DM_CYCLE_MS * (1 - DM_CYCLE_JITTER_PCT)) / 1000);
+  const hi = Math.round((DM_CYCLE_MS * (1 + DM_CYCLE_JITTER_PCT)) / 1000);
+  pushLog('info','ai',`DM AI cycle: ${DM_BATCH_MIN}-${DM_BATCH_MAX} DMs every ${lo}-${hi}s (jittered, oldest-first)` +
+    (AI_QUIET_HOURS ? ` · quiet ${AI_QUIET_START_HOUR}:00-${AI_QUIET_END_HOUR}:00` : ''));
 }
 
 /* v68.2: INTERACTIVITY GATE — reply to people who are actually talking
@@ -2633,6 +2812,23 @@ function startDmAiCycle(){
  *   • replied within 45 min of the bot's last reply = active convo
  *   • brand-new DM while clearly online (≤15 min)   = reply now
  *   • everything else            = wait (a second text promotes it) */
+/* ═══ v68.5: GREETING DETECTION + CONVERSATION RESTART ═══
+ * Any greeting word (English or Shona) in a SHORT message means
+ * "start over". Long messages that merely BEGIN with "hey" but carry a
+ * real request ("hey send me pics of cars") are media intents and are
+ * handled before this ever matters. */
+const GREETING_RE = /^\s*(hey+|hi+|hie+|hello+|hallo+|yo+|eo+|mhoro+|mhoroi+|mangwanani|masikati|madekwana|howfar|how\s+far|wassup|wasup|whats\s*up|what'?s\s*up|whats\s+good|what'?s\s+good|sup|good\s*(morning|afternoon|evening|day)|greetings|blessed\s*(day|afternoon|evening))\b/i;
+function isGreetingRestart(text){
+  const t = String(text || '').trim();
+  return !!t && t.length <= 40 && GREETING_RE.test(t);
+}
+function resetConversation(jid, reason){
+  if (userHistories.has(jid)){
+    userHistories.delete(jid);
+    persistDmHistories();
+    pushLog('info','ai','Conversation reset (' + reason + '): ' + String(jid).split('@')[0]);
+  }
+}
 function dmIsInteractive(jid, e){
   if (!e || !e.text) return false;
   if (e.messages && e.messages.length >= 2) return true;
@@ -2647,6 +2843,20 @@ async function runDmAiBatch(){
   if (focus.busy) return;
   if (isAdminActive()) return;
 
+  /* v68.6: QUIET HOURS — even the friendliest person sleeps. Between
+   * 23:00 and 06:00 local the AI holds DM replies; they stay in the
+   * pool and go out on the first morning cycle. (The admin never
+   * goes through this batch at all — admin messages route straight
+   * to the command router, and while the boss is talking the whole
+   * AI batch pauses via the isAdminActive() guard above.) */
+  if (AI_QUIET_HOURS){
+    const h = localHour();
+    const quietNow = AI_QUIET_START_HOUR > AI_QUIET_END_HOUR
+      ? (h >= AI_QUIET_START_HOUR || h < AI_QUIET_END_HOUR)
+      : (h >= AI_QUIET_START_HOUR && h < AI_QUIET_END_HOUR);
+    if (quietNow) return;
+  }
+
   /* v68.2: focused — only interactive people, one chat at a time */
   const all = [...dmPool.entries()].filter(([jid, e]) => e && e.text && e.lastMsg && !e.replied);
   const candidates = all.filter(([jid, e]) => dmIsInteractive(jid, e));
@@ -2658,8 +2868,14 @@ async function runDmAiBatch(){
     candidates.length,
     DM_BATCH_MIN + Math.floor(Math.random() * (DM_BATCH_MAX - DM_BATCH_MIN + 1))
   );
-  const picked = shuffleArr(candidates).slice(0, n);
-  pushLog('info','ai',`DM batch: replying to ${picked.length}/${candidates.length}`);
+  /* v68.6: pick like a person, not a lottery — the message that has
+   * been waiting longest is answered first. Take the oldest ~2n then
+   * shuffle, so which ones make the cut is biased to age but the
+   * order inside the batch still varies. */
+  const byAge = candidates.slice().sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+  const oldest = byAge.slice(0, Math.min(byAge.length, Math.max(n * 2, n)));
+  const picked = shuffleArr(oldest).slice(0, n);
+  pushLog('info','ai',`DM batch: replying to ${picked.length}/${candidates.length} (oldest waited ${Math.round((Date.now() - (byAge[0][1].ts || Date.now())) / 60000)}min)`);
 
   for (const [jid, entry] of picked){
     if (focus.busy) break;
@@ -2729,7 +2945,7 @@ async function processDM(item){
       if (intent.type === 'video' || intent.type === 'gif'){
         const r = await scraperGif(intent.query, false);
         if (r.ok && r.gifs.length){
-          await sendGifSafe(chatJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
+          await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
           resetDailyStats();
           if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
           return;
@@ -2737,7 +2953,7 @@ async function processDM(item){
       } else {
         const r = await scraperSearch(intent.query, false);
         if (r.ok && r.images.length){
-          await sendImageSafe(chatJid, r.images[0], '', 2, 'slow', 'dmreply', true);
+          await sendImageSafe(chatJid, pickFresh(r.images, chatJid), '', 2, 'slow', 'dmreply', true);
           resetDailyStats(); dailyStats.picsSent++;
           return;
         }
@@ -2749,16 +2965,27 @@ async function processDM(item){
     return;
   }
 
-  /* ═══ v66: smarter conversational reply ═══
-   * Context = 5-turn stored history + ALL messages the contact sent since
-   * the bot's last reply (the pool previously collected them but only the
-   * last one was used — multi-text DMs lost context). */
+  /* ═══ v68.5: GREETING = CONVERSATION RESTART ═══
+   * "hey", "hello", "mhoro", "wassup"… — any greeting wipes the remembered
+   * conversation for this contact. The AI starts fresh: no old topics,
+   * no half-finished stories from yesterday. */
+  if (isGreetingRestart(text)){
+    resetConversation(senderJid, 'greeting restart');
+  }
+
+  /* ═══ v68.5: 5-MESSAGE MEMORY ═══
+   * The AI recalls the LAST 5 MESSAGES of this chat (5 user+bot exchanges,
+   * capped by USER_HISTORY_SIZE) + everything the contact just sent since
+   * the bot's last reply. That is the whole world it needs to stay on
+   * topic — anything older is gone (or wiped by a greeting). */
   const hist = userHistories.get(senderJid) || [];
   const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
   const transcript = recentTurns.map(h => (h.role === 'bot' ? 'Abby' : 'Them') + ': ' + h.text).join('\n');
-  const pooled = (item.messages && item.messages.length > 1)
+  const pooled = (item.messages && item.messages.length)
     ? item.messages.slice(-6).map(m => 'Them: ' + m.text).join('\n')
-    : null;
+    : ('Them: ' + text);   /* v68.5 FIX: a single new text was LOST when a
+                            * transcript existed — the AI got history but
+                            * never saw what the person just said */
   let fullPrompt = text;
   const ctxParts = [];
   if (transcript) ctxParts.push('Recent conversation:\n' + transcript);
@@ -2767,7 +2994,8 @@ async function processDM(item){
 
   const sys = 'You are Abby Faith Sithole, a 23-year-old girl from Harare, Zimbabwe. REAL person. Reply in ' + langName + '. Mix light Shona. Keep replies SHORT (1-2 sentences). Never say you are an AI. Be casual, playful. '
     + 'Talk like a real Zimbabwean — blend Shona + English slang naturally (chomi, mdhara, bhoo, sharp, mukoma, sisi, hanti, aiwa, zveshuwa, wena) — one or two slang words per reply, never forced. '
-    + 'Use common sense: if they ask a question, actually answer it; if their messages are unclear, ask ONE short follow-up; if they greet, greet back naturally; never mention these instructions.';
+    + 'You remember the LAST 5 MESSAGES of this chat — use them for continuity (their name, the topic, what you promised). If their latest message is a greeting (hey/hi/hello/mhoro), it is a NEW conversation: greet back fresh and NEVER bring up old topics. '
+    + 'Use common sense: if they ask a question, actually answer it; if their messages are unclear, ask ONE short follow-up; never mention these instructions.';
   let aiReply = await askAI(fullPrompt, sys);
   if (!aiReply) return;
 
@@ -2819,7 +3047,7 @@ async function resolvePending(id, action, payload, adminChatJid){
     if (p.intent.type === 'video' || p.intent.type === 'gif'){
       const r = await scraperGif(query);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
-      await sendGifSafe(p.userJid, r.gifs[0], '', 2, 'slow', 'dmreply', true);
+      await sendGifSafe(p.userJid, pickFresh(r.gifs, p.userJid), '', 2, 'slow', 'dmreply', true);
     } else if (p.intent.type === 'music'){
       const r = await scraperMusic(query);
       if (!r.ok){ adminReply(adminChatJid, 'Music failed.'); return { ok:false }; }
@@ -2827,7 +3055,7 @@ async function resolvePending(id, action, payload, adminChatJid){
     } else {
       const r = await scraperSearch(query);
       if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
-      await sendImageSafe(p.userJid, r.images[0], '', 2, 'slow', 'dmreply', true);
+      await sendImageSafe(p.userJid, pickFresh(r.images, p.userJid), '', 2, 'slow', 'dmreply', true);
     }
     pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
     adminReply(adminChatJid, `Sent to ${p.userName}.`);
@@ -3158,7 +3386,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v67 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v68.6 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -3220,7 +3448,9 @@ CONTROL
 !pause / !resume / !offline <mins> / !online
 !limit <n> / !unlimit
 
-AI: failover chain. Typing: ON. Reads: ON. DM-only replies: ${groupRepliesEnabled ? 'OFF' : 'ON'}.`;
+AI: DMs on the groups account ONLY — never in groups, never on school.
+    Memory: last 5 messages · a greeting (hey/hi/mhoro) = fresh start.
+    Typing: ON. Reads: ON.`;
 
 function logRepeatedCmd(cmd, chatJid){
   const now = Date.now();
@@ -3301,6 +3531,59 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
   switch(cmd){
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     case 'ping': await reply(`Pong!\nStatus: ${connectionStatus}\nUptime: ${Math.floor((Date.now()-botStartTime)/1000)}s`); break;
+    case 'test': {
+      /* ═══ v68.3 — FULL SELF-DIAGNOSTIC ═══
+       * One command that answers "is everything working?": accounts,
+       * main group, scraper reachability, AI providers, scheduler,
+       * gates, memory. Works from BOTH accounts. ═══ */
+      const up = Math.floor((Date.now() - botStartTime) / 1000);
+      const mem = (process.memoryUsage().rss / 1048576).toFixed(0);
+      const L = [];
+      L.push('🧪 BreadBot v68.6 SELF-TEST');
+      L.push('Uptime: ' + Math.floor(up/3600) + 'h ' + Math.floor((up%3600)/60) + 'm | RAM: ' + mem + 'MB');
+      L.push('');
+      L.push('— ACCOUNTS —');
+      L.push('Groups : ' + connectionStatus + (botNumber && botNumber !== 'unknown' ? ' (' + botNumber + ')' : '') + (botLid ? ' · LID ' + botLid : ' · LID unknown'));
+      L.push('School : ' + schoolStatus + (schoolNumber ? ' (' + schoolNumber + ')' : ' (not scanned)'));
+      L.push('Main   : ' + (mainGroupJid ? 'SET ✓' : 'NOT SET ✗ — auto-retrying from ADMIN_GROUP_LINK every 3 min'));
+      L.push('Groups seen: ' + joinedGroups.size + ' · school registry: ' + schoolRegistry.size);
+      L.push('');
+      L.push('— SCRAPER —');
+      try {
+        const t0 = Date.now();
+        const r = await axios.get(SCRAPER_URL + '/health', { timeout: 6000, validateStatus: () => true });
+        L.push((r.status >= 200 && r.status < 300 ? 'UP ✓ (' : 'HTTP ' + r.status + ' (') + (Date.now() - t0) + 'ms) ' + SCRAPER_URL.replace(/^https?:\/\//,''));
+      } catch(e){
+        L.push('DOWN ✗ — ' + (e.response?.status ? 'HTTP ' + e.response.status : e.message));
+      }
+      L.push('');
+      L.push('— AI —');
+      if (AI_PROVIDERS.length){
+        L.push('Active: ' + (activeProvider || 'none (all failed)'));
+        for (const p of AI_PROVIDERS){
+          const rep = providerReport[p.name];
+          L.push('  ' + p.name + ': ' + (rep ? (rep.ok ? 'OK ' + rep.ms + 'ms' : 'FAIL' + (rep.status ? ' HTTP ' + rep.status : '') + (rep.error ? ' — ' + String(rep.error).slice(0,60) : '')) : 'untested'));
+        }
+      } else L.push('No API keys configured');
+      L.push('');
+      L.push('— SCHEDULER —');
+      const act = [...scheduledTasks.values()].filter(t => t.status === 'active');
+      if (act.length){
+        for (const t of act.slice(0,5)){
+          const nxt = t.nextSendAt ? new Date(t.nextSendAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '?';
+          L.push('  #' + t.id + ' ' + t.sent + '/' + t.count + ' ' + t.kind + ' → ' + t.targetLabel + ' · next ' + nxt);
+        }
+        if (act.length > 5) L.push('  …+' + (act.length - 5) + ' more');
+      } else L.push('No active tasks');
+      L.push('');
+      L.push('— GATES —');
+      L.push('NSFW: ' + describeNsfw() + ' | DM AI: ' + describeDm());
+      L.push('Paused: ' + (botPaused ? 'YES' : 'no') + ' | Flood gate: ' + MESSAGE_FLOOD_THRESHOLD + '/s');
+      L.push('Human mode: ' + (HUMAN_READ ? 'reads ' + (READ_DELAY_MIN_MS/1000) + '-' + (READ_DELAY_MAX_MS/1000) + 's delay · night hold ' + Math.round(READ_NIGHT_HOLD_PCT*100) + '% after ' + READ_NIGHT_START_HOUR + ':00' : 'reads instant') + ' · AI quiet ' + (AI_QUIET_HOURS ? AI_QUIET_START_HOUR + ':00-' + AI_QUIET_END_HOUR + ':00' : 'off'));
+      L.push('DM pool: ' + dmPool.size + ' · join queue: ' + joinQueue.length + ' · recipients today: ' + Object.keys(policyState.dailyRecipients).length);
+      await reply(L.join('\n'));
+      break;
+    }
     case 'pause': botPaused = true; await reply('Paused.'); break;
     case 'resume': botPaused = false; await reply('Resumed.'); break;
     case 'offline': { const m = parseInt(args[1],10) || 30; botOfflineUntil = Date.now()+m*60000; await reply(`Offline ${m}min.`); break; }
@@ -3796,7 +4079,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply([
         'Mode: ' + BOT_MODE.toUpperCase(),
         SCHOOL_MODE ? 'School: read-only monitor + morning report' : 'Manager: full group management',
-        'Group AI replies: ' + (groupRepliesEnabled ? 'ON' : 'OFF (DM only)'),
+        'AI surface: DMs only (groups account) · memory: last 5 msgs · greeting = restart',
         'Broadcast cap: ' + BROADCAST_BATCH_MAX + '/run',
         'Join queue: ' + joinQueue.length + '/' + JOIN_QUEUE_MAX,
         'AI chain: ' + (AI_PROVIDERS.map(function(p){ return p.name; }).join(' → ') || 'none') + ' (active: ' + (activeProvider||'NONE') + ')',
@@ -3805,10 +4088,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'groupchat': {
-      if (SCHOOL_MODE){ await reply('School mode: group replies are always OFF.'); break; }
-      if (args[1] === 'on'){ groupRepliesEnabled = true; await reply('Group AI replies ON.'); }
-      else if (args[1] === 'off'){ groupRepliesEnabled = false; await reply('Group AI replies OFF (DM only).'); }
-      else await reply('Usage: !groupchat on|off (currently ' + (groupRepliesEnabled?'ON':'OFF') + ')');
+      await reply('v68.5: AI chats in DMs ONLY (groups account). Group AI chat is permanently off — no toggle. Group media requests (send pics/music) still work.');
       break;
     }
     case 'registry': {
@@ -4088,7 +4368,7 @@ async function handleMessage(msg){
     if (msg.key.fromMe) return;
     const bSender = chatJid.endsWith('@g.us') ? (msg.key.participant || chatJid) : chatJid;
     if (!isAdminSender(msg, bSender)){ pushLog('warn','buttons','tap from non-admin ignored'); return; }
-    markRead(msg).catch(()=>{});
+    scheduleHumanRead(msg, { admin: true });
     await routeButton(chatJid, btnTap.id, 'groups', msg);
     return;
   }
@@ -4118,9 +4398,11 @@ async function handleMessage(msg){
   else if (activeDMs.size < ACTIVE_SET_CAP) activeDMs.add(chatJid);
 
   recordReply(chatJid);
-  markRead(msg).catch(()=>{});
 
+  /* v68.6: human-style read — the admin gets a fast 2-8s read,
+   * everyone else waits a random 5-90s (or till morning at night) */
   const isAdmin = isAdminSender(msg, senderJid);
+  scheduleHumanRead(msg, { admin: isAdmin });
   if (isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
 
@@ -4204,8 +4486,13 @@ async function handleMessage(msg){
    * account. Group docs: silent cache (AI context only). Admin DM docs:
    * read + confirm. Nothing is ever sent back to a group. ═══ */
   if (mediaType === 'document'){
+    /* v68.4 DOC OWNERSHIP — school-registry groups (except main) belong
+     * to the SCHOOL account, which digests their docs to you. The bot
+     * skips those to guarantee exactly-one reply; everywhere else the
+     * bot reads docs (main group → digest, others → silent cache). */
+    const schoolOwnedDoc = isGroup && chatJid !== mainGroupJid && schoolRegistry.has(chatJid);
+    if (schoolOwnedDoc) return;      // school handles this one — no double digest
     const doc = await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'groups');
-    if (doc && isAdmin && !isGroup){ /* confirmation already sent inside */ }
     if (doc) return;                 // docs are not chat text — stop here
   }
 
@@ -4254,10 +4541,11 @@ async function handleMessage(msg){
   if (isGroup){
     await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
 
-    /* v66: "the bot only replies to the dms" — group conversation replies
-     * are OFF by default (REPLY_IN_GROUPS=false, toggle !groupchat).
-     * Management features (antilink above, welcome/goodbye) stay active. */
-    if (!groupRepliesEnabled) return;
+    /* v68.5: AI NEVER CHATS IN GROUPS — people greet and talk all day in
+     * groups and the AI has no idea what the conversation is about, so
+     * conversational replies are removed entirely (no !groupchat toggle).
+     * Management (antilink above, welcome/goodbye) and EXPLICIT media
+     * requests below still work. */
 
     if (text){
       if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
@@ -4297,11 +4585,8 @@ async function handleMessage(msg){
           }
         }
       }
-      const analysis = analyzeGroup(chatJid);
-      const lang = detectLanguage(text);
-      const sys = 'You are Abby Faith Sithole, 23, Harare Zimbabwe. In YOUR OWN WhatsApp group. Reply casually, SHORT (1 sentence), warm, in ' + LANG_NAMES[lang] + '. Blend Zim slang (bhoo, mdhara, chomi, sharp, hanti). Never say you are AI. ' + (analysis?'Members often use: '+analysis.topWords.slice(0,6).join(', '):'');
-      const aiReply = await askAI(text, sys);
-      if (aiReply){ await sendBuffer(chatJid, { text: informalize(aiReply) }, 3, 'slow', 'group', true); resetDailyStats(); dailyStats.greetingsSent++; }
+      /* ═══ v68.5: DMs ONLY — anything that reaches here (chat, greetings,
+       * small talk in the group) is ignored on purpose. ═══ */
       return;
     }
     return;
@@ -4353,14 +4638,26 @@ async function connectBot(){
     sock.ev.on('connection.update', async (update)=>{
       const { connection, lastDisconnect, qr } = update;
       if (qr){
+        /* v68.3: cap QR renewals per connect cycle — a fresh QR every
+         * 90s forever is exactly the spam WhatsApp punishes. */
+        botQrCount++;
+        if (botQrCount > RC.QR_MAX){
+          connectionStatus = 'reconnecting';
+          manualDisconnect = true;          /* close handler must not double-fire */
+          pushLog('warn','bot','QR renewed ' + RC.QR_MAX + 'x with no scan — cooling down ' + (RC.QR_COOLDOWN_MS/60000) + ' min, then a fresh QR. You can also press Refresh QR and scan now.');
+          try { sock.end(undefined); } catch(e){}
+          setTimeout(function(){ botQrCount = 0; manualDisconnect = false; connectBot(); }, RC.QR_COOLDOWN_MS);
+          return;
+        }
         qrDataUri = await QRCode.toDataURL(qr);
         connectionStatus = 'qr';
-        pushLog('info','bot','QR generated');
+        pushLog('info','bot','QR generated (' + botQrCount + '/' + RC.QR_MAX + ' renewals) — scan the QR card');
       }
       if (connection === 'open'){
         isConnecting = false; connectionStatus = 'connected';
         lastStatusChangeAt = Date.now();
         reconnectAttempts = 0; botStartTime = Date.now();
+        botQrCount = 0; botCloseTimes = [];   /* v68.3: fresh cycle */
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
         botLid = getSelfLid();
@@ -4400,7 +4697,7 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v68 ONLINE\n' +
+            'BreadBot v68.6 ONLINE\n' +
             'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
@@ -4422,25 +4719,45 @@ async function connectBot(){
         pushLog('warn','bot',`Disconnected (${code ?? '?'}) — ${msg}`);
 
         if (manualDisconnect){ connectionStatus = 'disconnected'; return; }
-        if (code === DisconnectReason.loggedOut){ connectionStatus = 'disconnected'; pushLog('error','bot','Logged out'); return; }
+        /* v68.3: 401 = HARD STOP. Retrying with dead credentials is what
+         * got the school account logged out. A rescan is required. */
+        if (code === DisconnectReason.loggedOut){
+          connectionStatus = 'logged-out';
+          pushLog('error','bot','401 Logged out — credentials invalid. Press Refresh QR to scan again (auto-retry disabled in v68.3).');
+          return;
+        }
         if (code === 403){ connectionStatus = 'disconnected'; pushLog('error','bot','403 Forbidden — likely banned'); return; }
-        if (code === 408 && connectionStatus === 'qr' && !botNumber){ connectionStatus = 'disconnected'; pushLog('warn','bot','QR expired'); return; }
+        if (code === 408 && connectionStatus === 'qr' && !botNumber){
+          /* v68.3: soft retry instead of a dead stop — the QR cap above
+           * already bounds how often a new QR can appear. */
+          connectionStatus = 'reconnecting';
+          const d = backoffMs(reconnectAttempts + 1);
+          pushLog('warn','bot','QR expired — new QR in ' + Math.round(d/1000) + 's');
+          setTimeout(() => connectBot(), d);
+          return;
+        }
 
         if (code === 428 || code === 440){
+          /* v68.3: exponential backoff + storm detector. Auth wipe is a
+           * LAST resort (5+ conflicts) followed by a long wait. */
+          const storm = noteClose(botCloseTimes);
           connectionStatus = 'reconnecting';
           reconnectAttempts++;
-          if (reconnectAttempts > 3){
-            pushLog('error','bot',`Conflict ${code} — wiping auth_info for fresh session`);
+          let delay = storm ? RC.STORM_COOLDOWN_MS : backoffMs(reconnectAttempts);
+          if (storm){
+            pushLog('error','bot','Reconnect storm (' + RC.STORM_THRESHOLD + '+ drops/10min) — cooling down ' + (RC.STORM_COOLDOWN_MS/60000) + ' min. If another device/instance is logged in with this number, log it out.');
+          } else if (reconnectAttempts > RC.WIPE_ATTEMPTS){
+            pushLog('error','bot',`Conflict ${code} x${reconnectAttempts} — wiping auth as LAST RESORT (fresh QR needed after this)`);
             try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch(e){}
             reconnectAttempts = 0;
+            delay = RC.WIPE_WAIT_MS;
           } else {
-            pushLog('warn','bot',`Conflict ${code} — reconnect ${reconnectAttempts}/3`);
+            pushLog('warn','bot',`Conflict ${code} — backing off ${Math.round(delay/1000)}s (attempt ${reconnectAttempts})`);
           }
           try { sock.ev.removeAllListeners('connection.update'); } catch(e){}
           try { sock.ev.removeAllListeners('creds.update'); } catch(e){}
           try { sock.end(undefined); } catch(e){}
           sock = null;
-          const delay = Math.min(3000 * reconnectAttempts, 15000);
           setTimeout(() => connectBot(), delay);
           return;
         }
@@ -4472,15 +4789,17 @@ async function connectBot(){
           return connectBot();
         }
 
+        /* v68.3: generic retry — exponential backoff + storm cooldown */
+        const stormGeneric = noteClose(botCloseTimes);
         if (reconnectAttempts < MAX_RECONNECT){
           reconnectAttempts++;
-          const delay = Math.min(3000 * reconnectAttempts, 20000);
+          const delay = stormGeneric ? RC.STORM_COOLDOWN_MS : backoffMs(reconnectAttempts);
           connectionStatus = 'reconnecting';
-          pushLog('warn','bot','Retry '+delay/1000+'s ['+reconnectAttempts+'/'+MAX_RECONNECT+']');
-          setTimeout(function(){ try { sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
+          pushLog('warn','bot','Retry in '+Math.round(delay/1000)+'s ['+reconnectAttempts+'/'+MAX_RECONNECT+']'+(stormGeneric ? ' (storm cooldown)' : ''));
+          setTimeout(function(){ try { if (sock) sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
         } else {
           connectionStatus = 'disconnected';
-          pushLog('error','bot','Max retries');
+          pushLog('error','bot','Max retries — press Start to try again');
         }
       }
     });
@@ -4511,6 +4830,7 @@ function refreshQR(){
   if (sock){ try { sock.end(undefined); } catch(e){} sock = null; }
   isConnecting = false; botNumber = null; botLid = null;
   consecutive515 = 0; recent515Timestamps = []; spamCooldownUntil = 0; lastReconnectAt = 0; restart515InFlight = false;
+  botQrCount = 0; botCloseTimes = [];   /* v68.3: manual action resets the cycle */
   pushLog('info','bot','Manual QR refresh');
   setTimeout(function(){ manualDisconnect = false; connectBot(); }, 1000);
 }
@@ -4548,7 +4868,7 @@ function getSchoolGroupName(jid){ return schoolRegistry.get(jid) || null; }
  *    them is (a) "needed" updates and (b) assignments extracted from
  *    documents — both go to the ADMIN, never back to a group.
  * ══════════════════════════════════════════════════════════════ */
-const SCHOOL_COMMANDS = ['help','commands','menu','ping','status','stats','today','week',
+const SCHOOL_COMMANDS = ['help','commands','menu','ping','test','status','stats','today','week',
   'timetable','weather','addlecture','dellecture','addassignment','delassignment',
   'study','deadlines','pdf','docs','forgetdocs','updates','tasks','canceltask',
   'whoami','summary','jobs','flow','registry','logs','errors'];
@@ -4587,20 +4907,40 @@ async function handleSchoolMessage(msg){
   try {
     const chatJid = msg.key?.remoteJid;
     if (!chatJid) return;
-    if (msg.key?.fromMe) return;
+    /* v68.3: never re-process messages the school bot itself sent */
+    if (msg.key?.id && botSentIds.has(msg.key.id)) return;
     const raw = msg.message;
     if (!raw || raw.protocolMessage || raw.reactionMessage || raw.pollUpdateMessage || msg.messageStubType) return;
     const m = raw.ephemeralMessage?.message || raw.viewOnceMessage?.message
            || raw.viewOnceMessageV2?.message || raw.deviceSentMessage?.message || raw;
     accountStats.school.in++;          /* v68: per-account counter */
     const isGroup = chatJid.endsWith('@g.us');
+    /* ═══ v68.3 CRITICAL FIX — "does not recognise admin" ═══
+     * The school login IS the admin's own number (ADMIN_PHONE), so every
+     * message the admin types on their phone/WhatsApp Web arrives with
+     * fromMe=true. The old blanket `if (fromMe) return;` threw the
+     * admin's messages away BEFORE any admin check could run — the bot
+     * looked deaf. fromMe traffic is now PROCESSED; the bot's own sends
+     * are filtered by botSentIds above, and self-echoes by the guarded
+     * self-detection below. The admin's command channel is the
+     * self-chat (Message Yourself): remoteJid === ADMIN_JID, which
+     * isAdminSender already matches. DMs the admin sends to OTHER
+     * people stay non-admin (remoteJid = the other person). */
+    const fromMe = !!msg.key?.fromMe;
     const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
     const isAdmin = isAdminSender(msg, senderJid);
 
-    /* self-detection on the school account */
+    /* self-detection on the school account — INBOUND only. The admin's
+     * own fromMe traffic IS the admin, never an echo. */
     const cand = extractAllPhoneCandidates(msg, senderJid);
     const selfBase = (schoolNumber || '').split('@')[0];
-    if (selfBase && cand.includes(selfBase)) return;
+    if (!fromMe && selfBase && cand.includes(selfBase)) return;
+    /* v68.4 CONFLICT FIX — ONE ADMIN, TWO BOTS: identify the two special
+     * chats up front. isSelfChat = the admin's "Message Yourself" chat
+     * (the school account's command channel). chatBase is also used by
+     * the bot-chat guard below. */
+    const chatBase = String(chatJid).split('@')[0].split(':')[0];
+    const isSelfChat = !isGroup && !!selfBase && chatBase === selfBase;
 
     if (LOADTEST) lt.handled++;
     if (isAdmin && !isGroup) touchAdminActive();
@@ -4617,22 +4957,44 @@ async function handleSchoolMessage(msg){
       account: 'school',
       groupName: isGroup ? (getSchoolGroupName(chatJid) || '-') : undefined
     });
-    resetDailyStats(); dailyStats.readsSent++;
+    if (!fromMe){ resetDailyStats(); dailyStats.readsSent++; }   /* v68.3: the admin's own texts are not "reads" */
+
+    /* ═══ v68.4 CONFLICT FIX — THE BOT'S CHAT IS BOT TERRITORY ═══
+     * The admin ↔ groups-account chat is served by the BOT. The school
+     * account must NEVER act there (no commands, no taps, no docs, no
+     * replies) — otherwise both bots would answer the same message.
+     * School remains a silent witness: the panel push above already
+     * happened, so you still SEE the chat in the monitor. */
+    const groupsBase = (typeof sock !== 'undefined' && sock?.user?.id)
+      ? String(sock.user.id).split('@')[0].split(':')[0] : '';
+    if (!isGroup && groupsBase && chatBase === groupsBase) return;
 
     /* v68: BUTTON TAPS from the admin DM — handled before any text gate */
     const btnTap = extractButtonCommand(m);
     if (btnTap){
-      if (SCHOOL_STRICT_ADMIN && (!(!isGroup && isAdmin))) return;
+      /* v68.4: taps are ACTIONS — admin DM only, and when fromMe only in
+       * the self-chat (never the bot's chat, never other people's chats),
+       * claimed once so a WhatsApp re-delivery cannot double-fire. */
+      const tapAllowed = !isGroup && isAdmin && (!fromMe || isSelfChat);
+      if (SCHOOL_STRICT_ADMIN && !tapAllowed) return;
+      if (!claimSchool(msg.key?.id)) return;
       markRead(msg).catch(()=>{});
       await routeButton(chatJid, btnTap.id, 'school', msg);
       return;
     }
 
-    /* v68: DOCUMENTS — the school account reads PDFs/Word docs from
-     * school groups AND from the admin's DM. Group docs are silent in
-     * the group; whatever is found goes to the ADMIN only. */
+    /* v68: DOCUMENTS — v68.4 DOC OWNERSHIP: exactly ONE account reads
+     * any document, so you never get the same assignment digest twice:
+     *   · school-registry group (not main) → SCHOOL digests it to you
+     *   · main group / every other group   → the groups account handles
+     *   · your DMs: only the self-chat (or an incoming admin DM) — a
+     *     PDF you send to the BOT is the bot's; school ignores it. */
     if (m?.documentMessage || m?.documentWithCaptionMessage){
-      await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'school');
+      const schoolGroupOwned = isGroup && chatJid !== mainGroupJid && schoolRegistry.has(chatJid);
+      const dmAllowed = !isGroup && isAdmin && (!fromMe || isSelfChat);
+      if ((schoolGroupOwned || dmAllowed) && claimSchool(msg.key?.id)){
+        await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'school');
+      }
       return;                            // docs never fall through to chat
     }
 
@@ -4651,12 +5013,22 @@ async function handleSchoolMessage(msg){
 
     /* ── DM path ── */
     if (isAdmin){
-      await handleSchoolAdminCommand(text, chatJid, msg);
+      /* ═══ v68.4 CONFLICT FIX — YOUR COMMAND CHANNELS ═══
+       * · "Message Yourself" (self-chat)  → SCHOOL answers here.
+       * · DM to the BOT's number          → BOT answers (guard above;
+       *   this branch can no longer reach it anyway).
+       * · DMs you send to other people    → nobody's business.
+       * Incoming admin DMs (a different ADMIN_PHONE) still work. */
+      if (!fromMe || isSelfChat){
+        if (claimSchool(msg.key?.id)) await handleSchoolAdminCommand(text, chatJid, msg);
+      }
       return;
     }
     /* v68 STRICT GATE: not the admin's DM → ignore completely.
-     * No reply, no AI, nothing — just a quiet note in the logs. */
-    pushLog('info','school','Non-admin DM ignored (school answers admin only): ' + (msg.pushName || cand[0] || senderJid));
+     * No reply, no AI, nothing — just a quiet note in the logs.
+     * v68.3: fromMe = the admin's own outgoing chats with other people
+     * — silently skipped, no log spam about the admin themself. */
+    if (!fromMe) pushLog('info','school','Non-admin DM ignored (school answers admin only): ' + (msg.pushName || cand[0] || senderJid));
   } catch(e){ pushLog('error','school', e.message); }
 }
 
@@ -4688,13 +5060,24 @@ async function connectSchoolBot(){
     schoolSock.ev.on('connection.update', async (update)=>{
       const { connection, lastDisconnect, qr } = update;
       if (qr){
+        /* v68.3: same QR cap as the groups account */
+        schoolQrCount++;
+        if (schoolQrCount > RC.QR_MAX){
+          schoolStatus = 'reconnecting';
+          schoolManualDisconnect = true;    /* close handler must not double-fire */
+          pushLog('warn','school','School QR renewed ' + RC.QR_MAX + 'x with no scan — cooling down ' + (RC.QR_COOLDOWN_MS/60000) + ' min, then a fresh QR.');
+          try { schoolSock.end(undefined); } catch(e){}
+          setTimeout(function(){ schoolQrCount = 0; schoolManualDisconnect = false; connectSchoolBot(); }, RC.QR_COOLDOWN_MS);
+          return;
+        }
         schoolQrDataUri = await QRCode.toDataURL(qr);
         schoolStatus = 'qr';
-        pushLog('info','school','School QR generated — scan the SCHOOL card on the panel');
+        pushLog('info','school','School QR generated (' + schoolQrCount + '/' + RC.QR_MAX + ' renewals) — scan the SCHOOL card on the panel');
       }
       if (connection === 'open'){
         schoolIsConnecting = false; schoolStatus = 'connected';
         schoolReconnectAttempts = 0;
+        schoolQrCount = 0; schoolCloseTimes = [];   /* v68.3: fresh cycle */
         const jid = schoolSock.user?.id || null;
         schoolNumber = jid?.split(':')[0]?.split('@')[0] || 'unknown';
         pushLog('success','school','School account connected as ' + schoolNumber);
@@ -4713,7 +5096,7 @@ async function connectSchoolBot(){
         });
         try {
           await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v68 SCHOOL account online\n' +
+            '🏫 BreadBot v68.6 SCHOOL account online\n' +
             'Bot: ' + schoolNumber + '\n' +
             'Role: your study buddy (replies to YOU only — ignores everyone else)\n' +
             'Send "menu" for buttons · "today" · "weather" · send me PDFs/DOCX to read',
@@ -4725,19 +5108,26 @@ async function connectSchoolBot(){
         const { code, msg } = describeDisconnect(lastDisconnect);
         pushLog('warn','school',`Disconnected (${code ?? '?'}) — ${msg}`);
         if (schoolManualDisconnect){ schoolStatus = 'disconnected'; return; }
-        if (code === DisconnectReason.loggedOut){ schoolStatus = 'disconnected'; pushLog('error','school','Logged out'); return; }
+        /* v68.3: 401 = HARD STOP + clear rescan instruction */
+        if (code === DisconnectReason.loggedOut){
+          schoolStatus = 'logged-out';
+          pushLog('error','school','401 Logged out — credentials invalid. Press "Refresh QR" on the SCHOOL card to scan again (auto-retry disabled in v68.3).');
+          return;
+        }
+        /* v68.3: exponential backoff + storm detector (was 3s*n up to 20s) */
+        const stormS = noteClose(schoolCloseTimes);
         if (schoolReconnectAttempts < MAX_RECONNECT){
           schoolReconnectAttempts++;
-          const delay = Math.min(3000 * schoolReconnectAttempts, 20000);
+          const delay = stormS ? RC.STORM_COOLDOWN_MS : backoffMs(schoolReconnectAttempts);
           schoolStatus = 'reconnecting';
-          pushLog('warn','school','Retry '+delay/1000+'s ['+schoolReconnectAttempts+'/'+MAX_RECONNECT+']');
+          pushLog('warn','school','Retry in '+Math.round(delay/1000)+'s ['+schoolReconnectAttempts+'/'+MAX_RECONNECT+']'+(stormS ? ' (storm cooldown)' : ''));
           setTimeout(function(){
             try { schoolSock.end(undefined); } catch(e){}
             schoolSock = null; connectSchoolBot();
           }, delay);
         } else {
           schoolStatus = 'disconnected';
-          pushLog('error','school','Max retries');
+          pushLog('error','school','Max retries — press Start on the SCHOOL card');
         }
       }
     });
@@ -4771,6 +5161,7 @@ function refreshSchoolQR(){
   schoolQrDataUri = null; schoolStatus = 'disconnected'; schoolManualDisconnect = true;
   if (schoolSock){ try { schoolSock.end(undefined); } catch(e){} schoolSock = null; }
   schoolIsConnecting = false; schoolNumber = null; schoolReconnectAttempts = 0;
+  schoolQrCount = 0; schoolCloseTimes = [];   /* v68.3: manual action resets the cycle */
   pushLog('info','school','Manual school QR refresh');
   setTimeout(function(){ schoolManualDisconnect = false; connectSchoolBot(); }, 1000);
 }
@@ -4826,12 +5217,13 @@ function makeLoadtestStub(){
   pushLog('info','loadtest','STUB MODE — full pipeline, zero WhatsApp network');
   sock = {
     user: { id: '263777000001:1@s.whatsapp.net' },
-    sendPresenceUpdate: async ()=>{}, readMessages: async ()=>{},
+    sendPresenceUpdate: async (state, jid)=>{ if (state === 'composing') ltRec('groups','typings', jid); },
+    readMessages: async (keys)=>{ ltRec('groups','reads', (keys && keys[0] && keys[0].remoteJid) || ''); },
     updateOnlinePrivacy: async ()=>{}, updateLastSeenPrivacy: async ()=>{},
     groupMetadata: async (jid)=>({ id:jid, subject:'Group ' + String(jid).slice(0,6), participants: [] }),
     groupFetchAllParticipating: async ()=>({}),
-    sendMessage: async (jid)=>({ key:{ id:'stub-'+Date.now()+'-'+Math.random().toString(36).slice(2,8), remoteJid:jid, fromMe:true } }),
-    groupAcceptInvite: async ()=>null,
+    sendMessage: async (jid, content)=>{ ltRec('groups','sends', jid, content); return { key:{ id:'stub-'+Date.now()+'-'+Math.random().toString(36).slice(2,8), remoteJid:jid, fromMe:true } }; },
+    groupAcceptInvite: async (code)=>{ ltRec('groups','invites', code); return null; },
     fetchStatus: async ()=>({ status:'loadtest' }),
     end: ()=>{}
   };
@@ -4848,6 +5240,35 @@ function makeLoadtestStub(){
   pushLog('success','loadtest','Stub connected as ' + botNumber + ' — main group set');
 }
 
+/* v68.5: SCHOOL stub — the dual-account realistic sim needs BOTH accounts
+ * live. The school login IS the admin's number (that's the real setup). */
+function makeSchoolLoadtestStub(){
+  if (schoolSock) return;
+  schoolSock = {
+    user: { id: ADMIN_PHONE + ':1@s.whatsapp.net' },
+    sendPresenceUpdate: async (state, jid)=>{ if (state === 'composing') ltRec('school','typings', jid); },
+    readMessages: async (keys)=>{ ltRec('school','reads', (keys && keys[0] && keys[0].remoteJid) || ''); },
+    updateOnlinePrivacy: async ()=>{}, updateLastSeenPrivacy: async ()=>{},
+    groupMetadata: async (jid)=>({ id:jid, subject:'School Group ' + String(jid).slice(-3), participants: [] }),
+    groupFetchAllParticipating: async ()=>({}),
+    sendMessage: async (jid, content)=>{ ltRec('school','sends', jid, content); return { key:{ id:'stub-s-'+Date.now()+'-'+Math.random().toString(36).slice(2,8), remoteJid:jid, fromMe:true } }; },
+    groupAcceptInvite: async (code)=>{ ltRec('school','invites', code); return null; },
+    fetchStatus: async ()=>({ status:'loadtest' }),
+    end: ()=>{}, ev: { on: ()=>{} }
+  };
+  schoolNumber = ADMIN_PHONE;
+  schoolStatus = 'connected'; schoolIsConnecting = false;
+  schoolRegistry.set('120000000000901@g.us', 'BSC 2.1 Botany');
+  schoolRegistry.set('120000000000902@g.us', 'Staff Announcements');
+  pushLiveMessage({
+    id: 'school-boot-' + Date.now(), ts: new Date().toISOString(),
+    chatJid: ADMIN_JID, chatType: 'system', senderJid: schoolSock.user.id,
+    senderName: 'SCHOOL ACCOUNT ONLINE', phone: schoolNumber,
+    text: 'School stub ONLINE as ' + schoolNumber, mediaType: 'text', isAdmin: true, account: 'school'
+  });
+  pushLog('success','loadtest','School stub connected as ' + schoolNumber + ' (2 school groups registered)');
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  EXPRESS APP
  * ══════════════════════════════════════════════════════════════ */
@@ -4855,7 +5276,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v67</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v68.6</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -4866,8 +5287,9 @@ button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 14p
 button:hover{background:#30363d}button.primary{background:#238636;color:#fff}button.danger{background:#da3633;color:#fff}
 .row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #21262d}
 .val{color:#58a6ff;font-weight:600}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
-.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}
-#logs,#msgs{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}
+.s-connected{background:#3fb950}.s-qr{background:#d29922}.s-disconnected,.s-error{background:#f85149}.s-reconnecting{background:#d29922}.s-logged-out{background:#f85149;animation:blink 1.2s infinite}
+@keyframes blink{50%{opacity:0.35}}
+#msgsG,#msgsS,#logsG,#logsS{height:300px;overflow-y:auto;font-size:12px;background:#0d1117;border-radius:6px;padding:8px}
 #qrImg{max-width:220px;background:#fff;padding:8px;border-radius:8px;display:block;margin:auto}
 .full{grid-column:1/-1}.admin-badge{background:#da3633;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
 .sys-badge{background:#6e40c9;color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:700}
@@ -4875,7 +5297,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v67 — dual account</h1>
+<h1>BreadBot v68.6 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — bot ignores all group messages. Send <b>!setmain &lt;link&gt;</b> from DM.</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">
@@ -4910,7 +5332,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="row"><span>JID</span><span class="val" id="mgJid" style="font-size:11px">-</span></div>
 <div class="row"><span>LIDs cached</span><span class="val" id="mainLids">-</span></div>
 </div>
-<div class="card"><h2>AI — Rewind only</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
+<div class="card"><h2>AI Providers</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
 <div style="margin-top:8px"><button onclick="testAI()">Test Rewind</button></div></div>
 <div class="card"><h2>Policy</h2>
 <div class="row"><span>Account age</span><span class="val" id="age">-</span></div>
@@ -4937,8 +5359,10 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="row"><span>Typings</span><span class="val" id="typs">-</span></div>
 <div class="row"><span>Deletes</span><span class="val" id="del">-</span></div>
 </div>
-<div class="card full"><h2>Live Messages</h2><div id="msgs"></div></div>
-<div class="card full"><h2>Logs</h2><div id="logs"></div></div>
+<div class="card full"><h2>🌐 GROUPS ACCOUNT — Live Messages</h2><div id="msgsG"></div></div>
+<div class="card full"><h2>🏫 SCHOOL ACCOUNT (QR2) — Live Messages</h2><div id="msgsS"></div></div>
+<div class="card full"><h2>🌐 GROUPS ACCOUNT — Logs</h2><div id="logsG"></div></div>
+<div class="card full"><h2>🏫 SCHOOL ACCOUNT (QR2) — Logs</h2><div id="logsS"></div></div>
 </div>
 <script>
 var $ = function(id){ return document.getElementById(id); };
@@ -4991,22 +5415,25 @@ $('ss').textContent=qs.status||'-';
 if(qs.qr&&qs.status==='qr'){$('qrImg2').src='/admin/qr-school?t='+Date.now();$('qrImg2').style.display='block';}
 else $('qrImg2').style.display='none';}catch(e){}}
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
-function logs(){var es=new EventSource('/admin/logs');es.onmessage=function(e){try{var en=JSON.parse(e.data);var div=document.createElement('div');var t=new Date(en.ts).toLocaleTimeString();
-div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);
-var b=$('logs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};
+function logRow(en){var div=document.createElement('div');var t=new Date(en.ts).toLocaleTimeString();
+div.innerHTML='<span style="color:#484f58">'+t+'</span> <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+esc(en.source)+'</span> '+esc(en.message);return div;}
+function isSchoolLog(en){return en.source==='school'||en.source==='school-handler'||/\[school\]/i.test(en.message||'')||/^school /i.test(en.message||'');}
+function logs(){var es=new EventSource('/admin/logs');es.onmessage=function(e){try{var en=JSON.parse(e.data);
+var b=$(isSchoolLog(en)?'logsS':'logsG');b.appendChild(logRow(en));b.scrollTop=b.scrollHeight;while(b.children.length>300)b.removeChild(b.firstChild);}catch(e){}};
 es.onerror=function(){es.close();setTimeout(logs,5000);};}
-function msgs(){var es=new EventSource('/admin/messages-stream');es.onmessage=function(e){try{var m=JSON.parse(e.data);var div=document.createElement('div');
+function msgRow(m){var div=document.createElement('div');
 div.style.padding='6px 10px';div.style.margin='4px 0';div.style.borderRadius='4px';
 div.style.borderLeft='3px solid '+(m.chatType==='group'?'#a371f7':(m.isAdmin?'#da3633':'#3fb950'));
 div.style.background=m.mediaType==='system'?'#1a1d3a':(m.isAdmin?'#2d1517':'transparent');
 var badge=m.mediaType==='system'?'<span class="sys-badge">SYSTEM</span>':(m.isAdmin?'<span class="admin-badge">ADMIN</span>':'');
-if(m.account==='school')badge+='<span class="sys-badge">SCHOOL</span>';
+if(m.account==='school')badge+='<span class="sys-badge">SCHOOL</span>';else badge+='<span class="sys-badge" style="background:#1f6feb">GROUPS</span>';
 var extra='';
 if(m.groupName&&m.groupName!=='-')extra+=' | 👥 '+esc(m.groupName);
 if(m.commonGroups&&m.commonGroups.length)extra+=' | 🤝 '+esc(m.commonGroups.join(', '));
 if(m.contactStatus)extra+=' | ℹ️ '+esc(m.contactStatus);
-div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' | <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' | '+esc(m.phone)+extra+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';
-var b=$('msgs');b.appendChild(div);b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);}catch(e){}};
+div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLocaleTimeString()+' | <span style="color:#58a6ff">'+esc(m.senderName)+'</span>'+badge+' | '+esc(m.phone)+extra+'</div><div style="white-space:pre-wrap">'+esc(m.text)+'</div>';return div;}
+function msgs(){var es=new EventSource('/admin/messages-stream');es.onmessage=function(e){try{var m=JSON.parse(e.data);
+var b=(m.account==='school')?$('msgsS'):$('msgsG');b.appendChild(msgRow(m));b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);}catch(e){}};
 es.onerror=function(){es.close();setTimeout(msgs,5000);};}
 refresh();logs();msgs();setInterval(refresh,5000);
 </script></body></html>`;
@@ -5067,6 +5494,50 @@ app.get('/loadtest/stats', function(req,res){
     memory: { rssMB: +(mem.rss/1048576).toFixed(1), heapUsedMB: +(mem.heapUsed/1048576).toFixed(1) },
     uptimeSec: Math.floor((Date.now()-(lt.startedAt||botStartTime))/1000),
     floodThreshold: MESSAGE_FLOOD_THRESHOLD
+  });
+});
+
+/* v68.5 REALISTIC SIM — inject ONE exact message into ONE account.
+ * This is how the sim feeds vague / misspelt / incomplete human texts
+ * through the REAL handlers at human pace (400 ms). LOADTEST only. */
+app.post('/loadtest/message', async function(req,res){
+  if (!LOADTEST) return res.status(400).json({ error:'Start the server with LOADTEST=1' });
+  const { account, msg } = req.body || {};
+  if (!msg || !msg.key) return res.status(400).json({ error:'msg.key required' });
+  try {
+    if (account === 'school'){
+      if (!schoolSock) return res.status(409).json({ error:'school stub not connected' });
+      await handleSchoolMessage(msg);
+    } else {
+      if (!sock) return res.status(409).json({ error:'bot stub not connected' });
+      await handleMessage(msg);
+    }
+    res.json({ ok:true, account: account === 'school' ? 'school' : 'groups' });
+  } catch(e){ res.json({ ok:false, error: e.message }); }
+});
+
+/* v68.5 REALISTIC SIM — full observability: counters, per-account stats,
+ * everything the stub sockets did (sends / typings / reads / invites),
+ * tasks, pending, preview rotation, state sizes and recent logs. */
+app.get('/loadtest/observe', function(req,res){
+  if (!LOADTEST) return res.status(400).json({ error:'LOADTEST only' });
+  res.json({
+    counters: { injected: lt.injected, handled: lt.handled,
+      droppedFlood: lt.droppedFlood, droppedDup: lt.droppedDup, droppedOther: lt.droppedOther,
+      sendsQueued: lt.sendsQueued, sendsDone: lt.sendsDone, sendsFailed: lt.sendsFailed },
+    accountStats,
+    dailyStats,
+    sends: lt.rec.sends, typings: lt.rec.typings, reads: lt.rec.reads, invites: lt.rec.invites,
+    tasks: [...scheduledTasks.values()].map(t => ({ id:t.id, kind:t.kind, query:t.query, count:t.count,
+      sent:t.sent, status:t.status, account:t.account, targetLabel:t.targetLabel, sentUrls:t.sentUrls.length })),
+    pending: [...pendingRequests.values()].map(p => ({ id:p.id, userJid:p.userJid, intent:(p.intent && p.intent.type) || null })),
+    preview: { type: previewCache.currentType, imageIndex: previewCache.imageIndex, gifIndex: previewCache.gifIndex,
+      imageUrls: (previewCache.imageUrls||[]).length, gifUrls: (previewCache.gifUrls||[]).length },
+    state: { dmPool: dmPool.size, activeDMs: activeDMs.size, joinedGroups: joinedGroups.size,
+      groupRegistry: groupRegistry.size, schoolRegistry: schoolRegistry.size,
+      broadcastsTracked: broadcastLastAt.size, mainGroupJid,
+      botNumber, schoolNumber, groupsStatus: connectionStatus, schoolStatus },
+    logs: logBuffer.slice(-140).map(e => ({ ts:e.ts, level:e.level, source:e.source, message:String(e.message).slice(0,200) }))
   });
 });
 
@@ -5173,7 +5644,7 @@ app.get('/admin/stats', function(req,res){
     pendingCount: pendingRequests.size,
     lanes: jobs.stats(), focus: focus.stats(),
     engagement: {
-      groupRepliesEnabled, greetingsToday, welcomesToday,
+      aiDmOnly: true, greetingsToday, welcomesToday,
       engagedGroups: [...engagedGroups.keys()].map(g => getGroupName(g) || g),
       dedupHours: OUT_DEDUP_HOURS
     },
@@ -5211,6 +5682,18 @@ setInterval(function(){
 setInterval(prunePolicyMaps, 60 * 60 * 1000);
 setInterval(checkReplyRatio, 5 * 60 * 1000);
 
+/* ═══ v68.3: MAIN-GROUP AUTO-RETRY ═══
+ * autoSetMainGroup() used to run ONCE on connect — one failed invite
+ * resolution during a 428 storm and the bot stayed "Main Group NOT SET"
+ * forever (ignoring every group message). Now it retries every 3 min
+ * while the main group is unset and the groups account is connected. */
+setInterval(function(){
+  if (mainGroupJid || !ADMIN_GROUP_LINK) return;
+  if (!sock || connectionStatus !== 'connected') return;
+  pushLog('info','main','Main group still NOT SET — auto-set retry...');
+  autoSetMainGroup().catch(function(){});
+}, 3 * 60 * 1000).unref();
+
 /* ══════════════════════════════════════════════════════════════
  *  BOOT
  * ══════════════════════════════════════════════════════════════ */
@@ -5228,11 +5711,12 @@ app.listen(PORT, async function(){
   console.log('Admin: '+ADMIN_PHONE);
   console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
   console.log('AI: failover chain (' + (AI_PROVIDERS.map(function(p){ return p.name; }).join(' → ') || 'no keys') + ')');
-  console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?'ON':'OFF'));
+  console.log('Typing: '+(ENABLE_TYPING?'ON':'OFF')+' · Reads: '+(ENABLE_READ_RECEIPTS?(HUMAN_READ?('ON (human '+ (READ_DELAY_MIN_MS/1000) + '-' + (READ_DELAY_MAX_MS/1000) + 's delay)'):'ON (instant)'):'OFF'));
   console.log('Admin active window: '+ADMIN_ACTIVE_MS/1000+'s');
   console.log('ENV keys: ' + (AI_PROVIDERS.length ? AI_PROVIDERS.map(function(p){ return p.name; }).join(',') : 'NONE'));
   console.log('LID-aware admin detection: ENABLED');
-  console.log('DM AI: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' random DMs every '+(DM_CYCLE_MS/1000)+'s');
+  console.log('DM AI: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' DMs every '+Math.round((DM_CYCLE_MS*(1-DM_CYCLE_JITTER_PCT))/1000)+'-'+Math.round((DM_CYCLE_MS*(1+DM_CYCLE_JITTER_PCT))/1000)+'s (jittered, oldest-first)'
+    +(AI_QUIET_HOURS ? ' · AI quiet '+AI_QUIET_START_HOUR+':00-'+AI_QUIET_END_HOUR+':00' : ''));
   console.log('Scrapper: '+SCRAPER_URL);
 
   pushLog('info','system','Boot port '+PORT);
@@ -5263,6 +5747,7 @@ app.listen(PORT, async function(){
    * each with its own QR on the same panel, sharing the same AI. */
   if (LOADTEST){
     makeLoadtestStub();
+    makeSchoolLoadtestStub();   /* v68.5: BOTH accounts live in sim mode */
   } else {
     connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
     if (!SCHOOL_MODE){

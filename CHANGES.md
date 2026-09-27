@@ -1,5 +1,52 @@
 # BreadBot v71 — whatsapp-qr-app
 
+## v71.1 — ADMIN SELF-CHAT + SCHEDULER + ACTIVE WINDOW + AUTO-CLEANUP
+
+WHAT CHANGED (all on top of the v71 test-free build):
+
+1. SELF-CHAT DECRYPT FIX — "Waiting for this message" killed at the root.
+   sendBuffer() now remaps any send addressed to the bot's OWN phone jid
+   to the account's LID jid (selfLidRemap, both accounts). PN-addressed
+   self sends were what the admin's phone could not decrypt when the bot
+   replied in the "Message yourself" chat. Admin now talks to the bot
+   from the hosting number and the replies DECRYPT.
+
+2. RECURRING POST SCHEDULES (new schedules.json — separate file).
+   !schedule 6 videos of horse racing daily at 20:00 for 30 days
+   - any search query, any kind: videos / images / gifs / music
+   - fires into the MAIN group; each run = burst task dropping N items
+     one by one at random human-paced gaps (4-8 min)
+   - repeat: daily / weekdays / weekly / once; runs until end date
+     (default 30 days), then auto-disables; 3h-late fires are skipped
+   - videos are DEDUPED: the scraper now takes an exclude list, so 6
+     posts = 6 DIFFERENT clips (scraper /video exclude + videoId)
+   - chat: !schedule / !schedules / !unschedule <id> / !cleantemp
+
+3. ACTIVE WINDOW — bot responds in the main group ONLY inside hours.
+   !window 20-24 (or panel). Outside the window group traffic is
+   ignored (admins unaffected; DM cycles untouched); crosses midnight
+   (e.g. 20-4). Persisted in schedules.json.
+
+4. ADMIN PANEL — new Post Scheduler card: create schedules (query,
+   kind, count, time, repeat, days), cancel, active-window set/off,
+   clean-scraper-temp button. APIs: GET /admin/schedules,
+   POST /admin/schedule-add|schedule-del|window|cleantemp.
+
+5. BOOT CALLS THE SCRAPER — keep-alive health ping every 5 min
+   (boot instant ping + transition logging). Wakes the free-tier
+   service before you need it and proves the pipeline is ready.
+
+6. AUTO-CLEANUP — bot pings scraper /cleanup 90 s after every video/
+   music send; scraper also sweeps its temp every 15 min (1 h max
+   file age). Space is freed the moment a download is done.
+
+7. SEARCH SENDS TOP 3 — !pic/!search and !gif now deliver the 3 most
+   relevant results (1 immediately + 2 at 1.5 s), not just one.
+
+VERSION: package 71.1.0. Files touched: server.js, package.json,
+.gitignore (+schedules.json). Panel: Post Scheduler card.
+
+
 ## v71 — TEST-FREE COMPLETE BUILD
 
 WHAT: the complete bot, exactly v70 inside — with ONE change: the

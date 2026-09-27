@@ -1620,8 +1620,40 @@ function noteEngagement(jid){
   for (const [g, t] of engagedGroups){ if (now - t > CONFUSION_WINDOW_MS) engagedGroups.delete(g); }
   engagedGroups.set(jid, now);
 }
+/* ═══ v71.1 SELF-CHAT DECRYPT FIX ═══
+ * A send addressed to the bot's OWN phone jid (the admin's
+ * "Message Yourself" chat) is remapped to the account's LID jid.
+ * PN-addressed self sends are what produce
+ * "Waiting for this message. This may take a while." on the
+ * admin's phone for every admin self-chat reply. */
+let lastSelfRemapLog = 0;
+function selfLidRemap(jid, account){
+  try{
+    if (typeof jid !== 'string' || !jid.includes('@')) return jid;
+    if (jid.endsWith('@g.us') || jid.endsWith('@lid.whatsapp.net') || jid.endsWith('@broadcast')) return jid;
+    const S = account === 'school' ? schoolSock : sock;
+    if (!S) return jid;
+    const pnBase = String(jid).split('@')[0].split(':')[0];
+    const selfPn = String((S.user && S.user.id) || '').split('@')[0].split(':')[0];
+    if (!selfPn || pnBase !== selfPn) return jid;
+    const lidRaw = (S.user && S.user.lid)
+      || (S.authState && S.authState.creds && S.authState.creds.me && S.authState.creds.me.lid)
+      || '';
+    const lidBase = String(lidRaw).split('@')[0];
+    if (lidBase && lidBase !== pnBase){
+      if (Date.now() - lastSelfRemapLog > 600000){
+        lastSelfRemapLog = Date.now();
+        pushLog('info','self','Admin self-chat send remapped PN→LID (v71.1 decrypt fix)');
+      }
+      return lidBase + '@lid.whatsapp.net';
+    }
+  }catch(e){}
+  return jid;
+}
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false, opts={}){
   const useSchool = opts && opts.account === 'school';
+  /* v71.1: remap self-addressed sends to the LID jid (decrypt fix) */
+  jid = selfLidRemap(jid, useSchool ? 'school' : 'groups');
   /* v67: main-group lock for conversational group sends. Broadcasts,
    * admin !send and media pushes to other groups stay allowed. */
   if (taskType === 'group' && typeof jid === 'string' && jid.endsWith('@g.us')
@@ -2283,13 +2315,16 @@ async function scraperMusic(query){
     return { ok:false, error:e.message };
   }
 }
-async function scraperVideo(query){
+async function scraperVideo(query, exclude){
   resetDailyStats(); dailyStats.scraperVideos++;
   try {
-    const r = await scrapperFetch('/video', { query }, 90000);
+    const body = { query };
+    /* v71.1: pass already-sent ids/titles so multi-video runs never repeat */
+    if (Array.isArray(exclude) && exclude.length) body.exclude = exclude.slice(-10);
+    const r = await scrapperFetch('/video', body, 90000);
     if (!r || !r.mediaUrl) throw new Error('scrapper: no videoUrl');
     return { ok:true, mediaUrl:r.mediaUrl, title:r.title||query,
-             mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0 };
+             videoId:r.videoId||'', mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0 };
   } catch(e){
     pushLog('error','scraper',`video "${query}": ${e.message}`);
     return { ok:false, error:e.message };
@@ -2838,6 +2873,46 @@ function parseTaskRequest(text){
   return { count, query, kind, targetSpec: targetSpec.trim(), deadline };
 }
 
+/* "!schedule 6 videos of horse racing daily at 20:00 for 30 days" → spec */
+function parseScheduleRequest(text){
+  const spec = { query:'', kind:'video', count:6, time:'20:00', repeat:'daily', days:30 };
+  const t = String(text||'').toLowerCase().trim();
+  let m = t.match(/(\d{1,2})\s*(videos?|clips?|songs?|music|tracks?|mixtapes?|pics?|photos?|images?|gifs?)/);
+  if (m) spec.count = Math.min(12, Math.max(1, parseInt(m[1],10) || 6));
+  if (/\bgifs?\b/.test(t)) spec.kind = 'gif';
+  else if (/\b(videos?|clips?)\b/.test(t)) spec.kind = 'video';
+  else if (/\b(songs?|music|tracks?|mixtapes?)\b/.test(t)) spec.kind = 'music';
+  else if (/\b(pics?|photos?|images?)\b/.test(t)) spec.kind = 'image';
+  m = t.match(/at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (m){
+    let h = parseInt(m[1],10); const min = parseInt(m[2]||'0',10);
+    if (m[3]==='pm' && h < 12) h += 12;
+    if (m[3]==='am' && h === 12) h = 0;
+    if (h > 23) h = 20;
+    spec.time = String(h).padStart(2,'0') + ':' + String(min).padStart(2,'0');
+  }
+  if (/\bweek ?days?\b/.test(t)) spec.repeat = 'weekdays';
+  else if (/\bweekly\b|\bevery week\b/.test(t)) spec.repeat = 'weekly';
+  else if (/\bonce\b|\btonight\b|\btomorrow\b/.test(t)) spec.repeat = 'once';
+  m = t.match(/(?:for|during)\s+(\d{1,3})\s*days?/);
+  if (m) spec.days = Math.min(365, Math.max(1, parseInt(m[1],10)));
+  m = t.match(/until\s+(\d{4}-\d{2}-\d{2})/);
+  if (m) spec.endDate = m[1];
+  /* query = the sentence minus every scheduling word, keeping the topic */
+  spec.query = t
+    .replace(/^(post|send|drop|schedule)\s+/,'')
+    .replace(/\b\d{1,2}\s*(videos?|clips?|songs?|music|tracks?|mixtapes?|pics?|photos?|images?|gifs?)\b/g,' ')
+    .replace(/\b(videos?|clips?|songs?|music|tracks?|mixtapes?|pics?|photos?|images?|gifs?)\b/g,' ')
+    .replace(/\b(of|about|on)\b/g,' ')
+    .replace(/\b(daily|every ?day|everyday|week ?days?|weekly|every week|once|tonight|tomorrow)\b/g,' ')
+    .replace(/\bat\s+\d{1,2}(?::\d{2})?\s*(am|pm)?\b/g,' ')
+    .replace(/\b(for|during)\s+\d{1,3}\s*days?\b/g,' ')
+    .replace(/until\s+\d{4}-\d{2}-\d{2}/g,' ')
+    .replace(/[^a-z0-9 ]/g,' ')
+    .replace(/\s+/g,' ').trim();
+  return { spec };
+}
+
 /* "this group" / "main group" / exact group name / raw @g.us jid —
  * names are fuzzy-matched across BOTH accounts' registries */
 function resolveTaskTarget(spec, fromJid){
@@ -2935,19 +3010,21 @@ async function tickTasks(){
       let r = null;
       for (let tries = 0; tries < 2; tries++){
         r = t.kind === 'music' ? await scraperMusic(t.query)
-          : t.kind === 'video' ? await scraperVideo(t.query)
+          : t.kind === 'video' ? await scraperVideo(t.query, t.sentKeys || [])
           : t.kind === 'gif'   ? await scraperGif(t.query)
           : await scraperSearch(t.query);
         if (r && r.ok) break;
       }
-      let url = null, caption = t.query, mimetype = '';
+      let url = null, caption = t.query, mimetype = '', dedupKey = null;
       if (r && r.ok){
         if (t.kind === 'gif' && r.gifs && r.gifs.length){
           url = r.gifs.find(g => !t.sentUrls.includes(g)) || r.gifs[0];
         } else if (t.kind === 'image' && r.images && r.images.length){
           url = r.images.find(i => !t.sentUrls.includes(i)) || r.images[0];
         } else if (r.mediaUrl){
-          url = t.sentUrls.includes(r.mediaUrl) ? null : r.mediaUrl;
+          /* v71.1: dedup on videoId/title — temp URLs are unique per call */
+          dedupKey = String(r.videoId || r.title || r.mediaUrl);
+          url = (t.sentKeys || []).includes(dedupKey) ? null : r.mediaUrl;
           caption = r.title || t.query; mimetype = r.mimetype || '';
         }
       }
@@ -2969,6 +3046,8 @@ async function tickTasks(){
         });
       }
       t.sent++; t.sentUrls.push(url);
+      if (dedupKey){ t.sentKeys = t.sentKeys || []; t.sentKeys.push(dedupKey); }
+      if (t.kind === 'video' || t.kind === 'music') scraperCleanupSoon();
       const remaining = Math.max(1, t.count - t.sent);
       const remainingMs = t.deadline ? Math.max(0, t.deadline - now) : 0;
       t.nextSendAt = t.deadline
@@ -2985,8 +3064,151 @@ async function tickTasks(){
 }
 function startTaskScheduler(){
   loadTasks();
-  setInterval(tickTasks, 30 * 1000).unref?.();
-  pushLog('info','tasks','Task scheduler started (30s tick, human-paced sends)');
+  loadSchedulerCfg();
+  setInterval(function(){ tickTasks(); tickSchedules(); }, 30 * 1000).unref?.();
+  pushLog('info','tasks','Task scheduler started (30s tick, human-paced sends) — recurring post schedules + active window live in ' + SCHEDULES_FILE);
+  startScraperKeepAlive();
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v71.1 RECURRING POST SCHEDULES + ACTIVE WINDOW (schedules.json)
+ *  - schedule "6 videos of horse racing" to fire daily at 20:00
+ *  - each fire = a burst task: N items at random human-paced gaps
+ *  - ACTIVE WINDOW: bot answers group traffic only inside set hours
+ *  - everything persists in ONE separate file: schedules.json
+ * ══════════════════════════════════════════════════════════════ */
+const SCHEDULES_FILE = 'schedules.json';
+const schedulerCfg  = { window: { enabled:false, start:20, end:24 }, schedules: [] };
+let windowSkipLogAt = 0;
+let schedSaveTimer  = null;
+function loadSchedulerCfg(){
+  try{
+    if (!fs.existsSync(SCHEDULES_FILE)) return;
+    const d = JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8'));
+    if (d && d.window) schedulerCfg.window = d.window;
+    if (Array.isArray(d.schedules)) schedulerCfg.schedules = d.schedules;
+    if (schedulerCfg.schedules.length) pushLog('info','schedule','Loaded ' + schedulerCfg.schedules.length + ' recurring schedule(s) from ' + SCHEDULES_FILE);
+  }catch(e){ pushLog('warn','schedule','load: ' + e.message); }
+}
+function saveSchedulerCfg(){
+  clearTimeout(schedSaveTimer);
+  schedSaveTimer = setTimeout(function(){
+    try { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(schedulerCfg, null, 1)); } catch(e){}
+  }, 600);
+}
+function ymdLocal(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function inActiveWindow(){
+  const w = schedulerCfg.window;
+  if (!w || !w.enabled) return true;
+  const h = localHour(), s = w.start|0, e = w.end|0;
+  if (s === e) return true;                      /* 20-20 = whole day */
+  return s < e ? (h >= s && h < e) : (h >= s || h < e);   /* 20-4 crosses midnight */
+}
+function describeActiveWindow(){
+  const w = schedulerCfg.window;
+  if (!w || !w.enabled) return 'OFF (bot always active)';
+  return String(w.start).padStart(2,'0') + ':00–' + String(w.end % 24).padStart(2,'0') + ':00 (TZ+' + TZ_OFFSET_HOURS + ')';
+}
+function addSchedule(spec){
+  const query = String(spec.query || '').trim();
+  if (!query) return { ok:false, error:'search query required' };
+  const kind = ['video','image','gif','music'].includes(spec.kind) ? spec.kind : 'video';
+  const count = Math.min(12, Math.max(1, parseInt(spec.count,10) || 6));
+  const tm = String(spec.time || '20:00').match(/^(\d{1,2}):(\d{2})$/);
+  if (!tm || parseInt(tm[1],10) > 23 || parseInt(tm[2],10) > 59) return { ok:false, error:'time must be HH:MM (24h)' };
+  const time = String(parseInt(tm[1],10)).padStart(2,'0') + ':' + String(parseInt(tm[2],10)).padStart(2,'0');
+  const repeat = ['daily','weekdays','weekly','once'].includes(spec.repeat) ? spec.repeat : 'daily';
+  const days = Math.min(365, Math.max(1, parseInt(spec.days,10) || 30));
+  const startD = new Date(); startD.setHours(0,0,0,0);
+  const endD = spec.endDate && /^\d{4}-\d{2}-\d{2}$/.test(String(spec.endDate))
+    ? String(spec.endDate)
+    : ymdLocal(new Date(startD.getTime() + days * 86400000));
+  const id = 'S' + Math.random().toString(36).slice(2,5);
+  const schedule = { id, query, kind, count, time, repeat, startDate: ymdLocal(startD), endDate: endD,
+    enabled:true, runs:0, lastRun:'', history:[] };
+  if (repeat === 'weekly') schedule.startDow = new Date().getDay();
+  schedulerCfg.schedules.push(schedule);
+  saveSchedulerCfg();
+  pushLog('info','schedule','Recurring #' + id + ': ' + count + ' ' + kind + '(s) "' + query + '" @ ' + time + ' ' + repeat + ' until ' + endD);
+  const plan = '📅 Schedule #' + id + ' created: ' + count + ' ' + (kind==='music'?'songs':kind+'s') + ' "' + query + '"'
+    + '\nFires ' + repeat + ' at ' + time + ' (TZ+' + TZ_OFFSET_HOURS + ') until ' + endD
+    + '\nEach run drops them into the main group one by one at random human-paced gaps (4-8 min).'
+    + '\nList: "schedules" · Cancel: "unschedule ' + id + '"';
+  return { ok:true, schedule, plan };
+}
+function tickSchedules(){
+  if (botPaused) return;
+  if (!schedulerCfg.schedules.length) return;
+  const now = new Date();
+  const today = ymdLocal(now);
+  const nowMin = now.getHours()*60 + now.getMinutes();
+  let dirty = false;
+  for (const s of schedulerCfg.schedules){
+    try{
+      if (!s.enabled) continue;
+      if (s.endDate && today > s.endDate){ s.enabled = false; dirty = true; adminReply(ADMIN_JID, '📅 Schedule #' + s.id + ' ("' + s.query + '") finished its run window — auto-disabled.'); continue; }
+      if (s.startDate && today < s.startDate) continue;
+      if (s.lastRun === today) continue;
+      const tm = String(s.time || '20:00').split(':');
+      const dueMin = (parseInt(tm[0],10)||0)*60 + (parseInt(tm[1],10)||0);
+      if (nowMin < dueMin) continue;
+      if (nowMin > dueMin + 180){ s.lastRun = today; dirty = true; pushLog('info','schedule','#' + s.id + ' missed by 3h+ — skipped to avoid a late-night burst'); continue; }
+      if (s.repeat === 'weekdays' && (now.getDay()===0 || now.getDay()===6)) continue;
+      if (s.repeat === 'weekly' && s.startDow != null && now.getDay() !== s.startDow) continue;
+      if (!mainGroupJid) continue;               /* no target yet — retry next tick */
+      const gapMs = Math.floor((TASK_DEFAULT_GAP[0] + Math.random() * (TASK_DEFAULT_GAP[1] - TASK_DEFAULT_GAP[0])) * 60000);
+      const tid = 'B' + Math.random().toString(36).slice(2,6);
+      scheduledTasks.set(tid, {
+        id: tid, scheduleId: s.id, kind: s.kind, query: s.query, count: s.count,
+        targetJid: mainGroupJid, account: 'groups',
+        targetLabel: getGroupName(mainGroupJid) || 'main group',
+        deadline: 0, gapMs, sent: 0, sentUrls: [], sentKeys: [], failures: 0,
+        createdAt: Date.now(), nextSendAt: Date.now() + Math.floor(TASK_MIN_GAP_MS / 2), status: 'active'
+      });
+      saveTasks();
+      s.lastRun = today; s.runs++;
+      s.history = s.history || []; s.history.push({ date: today, taskId: tid });
+      if (s.history.length > 60) s.history = s.history.slice(-60);
+      if (s.repeat === 'once') s.enabled = false;
+      dirty = true;
+      adminReply(ADMIN_JID, '📅 Schedule #' + s.id + ' fired: dropping ' + s.count + ' ' + (s.kind==='music'?'songs':s.kind+'s') + ' "' + s.query + '" into ' + (getGroupName(mainGroupJid) || 'main group') + ' at human pace (burst ' + tid + ').');
+      pushLog('info','schedule','#' + s.id + ' fired → burst task ' + tid);
+    }catch(e){ pushLog('error','schedule','tick: ' + e.message); }
+  }
+  if (dirty) saveSchedulerCfg();
+}
+
+/* ═══ v71.1 BOOT → SCRAPER: health ping keeps it awake + verified ═══ */
+let scraperUp = null;
+function startScraperKeepAlive(){
+  const ping = async function(){
+    const t0 = Date.now();
+    try {
+      const r = await axios.get(SCRAPER_URL + '/health', { timeout: 8000, validateStatus: () => true });
+      const up = r.status >= 200 && r.status < 300;
+      if (scraperUp !== up){
+        pushLog(up ? 'info' : 'warn','scraper', up ? 'scraper UP (' + (Date.now()-t0) + 'ms) — search pipeline ready' : 'scraper health HTTP ' + r.status);
+        scraperUp = up;
+      }
+    } catch(e){
+      if (scraperUp !== false){ scraperUp = false; pushLog('warn','scraper','scraper unreachable: ' + e.message); }
+    }
+  };
+  ping();
+  setInterval(ping, 5 * 60 * 1000).unref?.();
+  pushLog('info','scraper','keep-alive started (health ping every 5 min → ' + SCRAPER_URL + ')');
+}
+
+/* ═══ v71.1 SCRAPER TEMP CLEANUP — free disk right after media sends ═══ */
+let cleanupTimer = null;
+function scraperCleanupSoon(){
+  clearTimeout(cleanupTimer);
+  cleanupTimer = setTimeout(async function(){
+    try {
+      await axios.post(SCRAPER_URL + '/cleanup', {}, { timeout: 15000 });
+      pushLog('info','scraper','temp cleanup pinged — scraper storage freed');
+    } catch(e){ /* scraper offline — its own 15-min sweep still covers it */ }
+  }, 90 * 1000);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -4001,6 +4223,49 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply(L.join('\n'));
       break;
     }
+    /* ═══ v71.1: active window + recurring post schedules ═══ */
+    case 'window': {
+      const w = args.slice(1).join(' ').trim();
+      if (!w){ await reply('Active window: ' + describeActiveWindow() + '\nSet: !window 20-24 · Off: !window off'); break; }
+      if (/^off$/i.test(w)){ schedulerCfg.window.enabled = false; saveSchedulerCfg(); await reply('Active window OFF — bot responds all day.'); break; }
+      const wm = w.match(/^(\d{1,2})\s*(?:-|to|–|until)\s*(\d{1,2})$/i);
+      if (!wm){ await reply('Usage: !window 20-24 (or !window off)'); break; }
+      const ws = parseInt(wm[1],10), we = parseInt(wm[2],10);
+      if (ws > 23 || we < 1 || we > 24 || ws === we){ await reply('Hours: start 0-23, end 1-24.'); break; }
+      schedulerCfg.window = { enabled:true, start:ws, end:we };
+      saveSchedulerCfg();
+      await reply('✅ Active window: ' + describeActiveWindow() + '\nGroup replies + downloads only inside it — admins always work.');
+      break;
+    }
+    case 'schedule': {
+      const p = parseScheduleRequest(args.slice(1).join(' '));
+      const out = addSchedule(p.spec);
+      await reply(out.ok ? out.plan : ('⚠️ ' + out.error + '\nUsage: !schedule 6 videos of horse racing daily at 20:00 for 30 days'));
+      break;
+    }
+    case 'schedules': {
+      const list = schedulerCfg.schedules.filter(s => s.enabled);
+      if (!list.length){ await reply('No recurring schedules. Create one:\n!schedule 6 videos of horse racing daily at 20:00'); break; }
+      await reply('📅 Recurring schedules (' + list.length + '):\n' + list.map(s =>
+        '#' + s.id + ' — ' + s.count + ' ' + s.kind + 's "' + s.query + '" @ ' + s.time + ' ' + s.repeat + ' · runs ' + s.runs + ' · until ' + s.endDate
+      ).join('\n') + '\nCancel: !unschedule <id>');
+      break;
+    }
+    case 'unschedule': {
+      const uid = String(args[1]||'').trim().replace(/^#/,'');
+      const s = schedulerCfg.schedules.find(x => x.id === uid);
+      if (!s){ await reply('No schedule #' + uid + '. "!schedules" lists them.'); break; }
+      s.enabled = false;
+      saveSchedulerCfg();
+      for (const [, t] of scheduledTasks){ if (t.scheduleId === uid) t.status = 'cancelled'; }
+      await reply('🛑 Schedule #' + uid + ' cancelled — running bursts stopped too.');
+      break;
+    }
+    case 'cleantemp': {
+      try { await axios.post(SCRAPER_URL + '/cleanup', {}, { timeout: 15000 }); await reply('🧹 Scraper temp cleaned — storage freed.'); }
+      catch(e){ await reply('Cleanup failed: ' + e.message); }
+      break;
+    }
     case 'pause': botPaused = true; await reply('Paused.'); break;
     case 'resume': botPaused = false; await reply('Resumed.'); break;
     case 'offline': { const m = parseInt(args[1],10) || 30; botOfflineUntil = Date.now()+m*60000; await reply(`Offline ${m}min.`); break; }
@@ -4207,7 +4472,12 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      await sendImageSafe(chatJid, r.images[0], 'Preview 1/'+r.images.length, 0, 'fast', 'admin', false);
+      /* v71.1: top 3 most relevant, not just one */
+      const top3 = r.images.slice(0, 3);
+      await sendImageSafe(chatJid, top3[0], 'Result 1/' + top3.length + ' — “' + q + '”', 0, 'fast', 'admin', false);
+      for (let i = 1; i < top3.length; i++){
+        setTimeout(function(j, n){ sendImageSafe(chatJid, top3[j], 'Result ' + (n) + '/' + top3.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
+      }
       break;
     }
     case 'nextpic': {
@@ -4224,7 +4494,12 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      await sendGifSafe(chatJid, r.gifs[0], 'GIF 1/'+r.gifs.length, 0, 'fast', 'admin', false);
+      /* v71.1: top 3 most relevant gifs */
+      const gtop3 = r.gifs.slice(0, 3);
+      await sendGifSafe(chatJid, gtop3[0], 'GIF 1/' + gtop3.length, 0, 'fast', 'admin', false);
+      for (let i = 1; i < gtop3.length; i++){
+        setTimeout(function(j, n){ sendGifSafe(chatJid, gtop3[j], 'GIF ' + (n) + '/' + gtop3.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
+      }
       break;
     }
     case 'nextgif': {
@@ -4965,6 +5240,16 @@ async function handleMessage(msg){
 
   if (botPaused && !isAdmin) return;
   if (Date.now() < botOfflineUntil && !isAdmin) return;
+  /* v71.1 ACTIVE WINDOW: outside the admin's hours the bot goes quiet
+   * in the main group (no replies, no AI, no media downloads) — admin
+   * traffic and DM cycles are untouched. Set: !window 20-24 · off */
+  if (!isAdmin && isGroup && !inActiveWindow()){
+    if (Date.now() - windowSkipLogAt > 600000){
+      windowSkipLogAt = Date.now();
+      pushLog('info','window','Group traffic outside active hours (' + describeActiveWindow() + ') — ignored, admins unaffected');
+    }
+    return;
+  }
 
   /* ═══ ADMIN IMAGE BROADCAST ═══ */
   if (!isGroup && isAdmin && mediaType === 'image' && text.startsWith('!')){
@@ -5985,6 +6270,27 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 </div>
 <div class="card"><h2>AI Pool</h2><div id="aiList" style="font-size:12px;line-height:1.7"></div>
 <div style="margin-top:8px"><button onclick="testAI()">Test AI Pool</button><span style="font-size:10px;color:#8b949e;margin-left:8px">tasks round-robin across every healthy API</span></div></div>
+<div class="card"><h2>📅 Post Scheduler</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Recurring scraper posts (video/image/gif/music). Each fire drops <b>N</b> items into the main group at random human-paced gaps. Stored in <b>schedules.json</b>. Chat: <code>!schedule 6 videos of horse racing daily at 20:00</code></div>
+<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+<span style="font-size:11px;color:#8b949e">Active window</span>
+<input id="wsStart" style="width:46px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px" placeholder="20">
+<span style="color:#8b949e">–</span>
+<input id="wsEnd" style="width:46px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px" placeholder="24">
+<button onclick="setWindowUi(false)">Set</button><button onclick="setWindowUi(true)">Off</button>
+</div>
+<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+<input id="sqQuery" placeholder="search e.g. horse racing" style="flex:1;min-width:110px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px">
+<select id="sqKind" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px"><option>video</option><option>image</option><option>gif</option><option>music</option></select>
+<input id="sqCount" style="width:40px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px" value="6" title="items per run">
+<input id="sqTime" style="width:60px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px" placeholder="20:00">
+<select id="sqRepeat" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px"><option>daily</option><option>weekdays</option><option>weekly</option><option>once</option></select>
+<input id="sqDays" style="width:48px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:inherit;font-size:12px" value="30" title="run for N days">
+<button class="primary" onclick="addScheduleUi()">Schedule</button>
+</div>
+<div id="schedList" style="font-size:11px;line-height:1.7;max-height:150px;overflow-y:auto"></div>
+<div style="margin-top:6px"><button onclick="cleanTempUi()">🧹 Clean Scraper Temp</button><span id="ctOut" style="font-size:10px;color:#8b949e;margin-left:8px">auto-runs 90s after every media send</span></div>
+</div>
 <div class="card"><h2>🧪 Scraper Test</h2>
 <div style="display:flex;gap:6px;margin-bottom:8px">
 <input id="scQuery" placeholder="type a name, e.g. chess board" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:inherit;font-size:12px" onkeydown="if(event.key==='Enter')runScraperTest()">
@@ -6150,6 +6456,14 @@ function msgs(){var es=new EventSource('/admin/messages-stream');es.onmessage=fu
 var b=(m.account==='school')?$('msgsS'):$('msgsG');b.appendChild(msgRow(m));b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);}catch(e){}};
 es.onerror=function(){es.close();setTimeout(msgs,5000);};}
 refresh();logs();msgs();loadSessionBackup();setInterval(refresh,5000);
+/* ═══ v71.1 Post Scheduler UI ═══ */
+async function loadSchedules(){try{var r=await api('schedules');var el=$('schedList');if(!el)return;if(r.window){$('wsStart').value=(r.window.start!=null?r.window.start:'');$('wsEnd').value=(r.window.end!=null?r.window.end:'');}
+var list=r.schedules||[];el.innerHTML=list.length?list.map(function(s){return '<div style="border-top:1px solid #21262d;padding:4px 0"><b>#'+s.id+'</b> '+s.count+' '+s.kind+' "'+s.query+'" @ '+s.time+' '+s.repeat+(s.enabled?'':' <span style=\'color:#d29922\'>(off)</span>')+' · runs '+s.runs+' · until '+s.endDate+' <a href="#" onclick="delSchedule(\''+s.id+'\');return false" style="color:#f85149">cancel</a></div>';}).join(''):'<span style="color:#8b949e">No recurring schedules yet.</span>';}catch(e){}}
+async function addScheduleUi(){var q=$('sqQuery').value.trim();if(!q){$('schedList').innerHTML='<span style="color:#d29922">Type a search query first.</span>';return;}var r=await api('schedule-add','POST',{query:q,kind:$('sqKind').value,count:parseInt($('sqCount').value,10)||6,time:$('sqTime').value.trim()||'20:00',repeat:$('sqRepeat').value,days:parseInt($('sqDays').value,10)||30});if(r.ok){$('sqQuery').value='';loadSchedules();}else{$('schedList').innerHTML='<span style="color:#f85149">Error: '+(r.error||'?')+'</span>';}}
+async function delSchedule(id){await api('schedule-del','POST',{id:id});loadSchedules();}
+async function setWindowUi(off){var r=await api('window','POST',{start:$('wsStart').value,end:$('wsEnd').value,off:off===true});if(!r.ok)$('schedList').innerHTML='<span style="color:#f85149">Window error: '+(r.error||'?')+'</span>';loadSchedules();}
+async function cleanTempUi(){var b=$('ctOut');b.innerHTML='cleaning…';try{var r=await api('cleantemp','POST',{});b.innerHTML=r.ok?('done — '+(r.result&&(r.result.deletedFiles||0))+' file(s) freed'):('failed: '+(r.error||'?'));}catch(e){b.innerHTML='failed';}}
+setInterval(loadSchedules,15000);
 </script></body></html>`;
 
 app.get('/', function(req,res){ res.send(PANEL_HTML); });
@@ -6244,6 +6558,9 @@ app.get('/loadtest/observe', function(req,res){
     sends: lt.rec.sends, typings: lt.rec.typings, reads: lt.rec.reads, invites: lt.rec.invites,
     tasks: [...scheduledTasks.values()].map(t => ({ id:t.id, kind:t.kind, query:t.query, count:t.count,
       sent:t.sent, status:t.status, account:t.account, targetLabel:t.targetLabel, sentUrls:t.sentUrls.length })),
+    recurring: schedulerCfg.schedules.map(s => ({ id:s.id, query:s.query, kind:s.kind, count:s.count,
+      time:s.time, repeat:s.repeat, enabled:s.enabled, runs:s.runs, endDate:s.endDate })),
+    activeWindow: describeActiveWindow(),
     pending: [...pendingRequests.values()].map(p => ({ id:p.id, userJid:p.userJid, intent:(p.intent && p.intent.type) || null })),
     preview: { type: previewCache.currentType, imageIndex: previewCache.imageIndex, gifIndex: previewCache.gifIndex,
       imageUrls: (previewCache.imageUrls||[]).length, gifUrls: (previewCache.gifUrls||[]).length },
@@ -6329,6 +6646,42 @@ app.post('/admin/offline', function(req,res){
   res.json({ ok:true, until: new Date(botOfflineUntil).toISOString() });
 });
 app.post('/admin/online', function(req,res){ botOfflineUntil = 0; res.json({ ok:true }); });
+
+/* ═══ v71.1 SCHEDULER APIs — panel Post Scheduler card ═══ */
+app.get('/admin/schedules', function(req,res){
+  res.json({ window: schedulerCfg.window, describe: describeActiveWindow(), schedules: schedulerCfg.schedules });
+});
+app.post('/admin/schedule-add', function(req,res){
+  const out = addSchedule(req.body || {});
+  res.json(out.ok ? { ok:true, schedule: out.schedule } : { ok:false, error: out.error });
+});
+app.post('/admin/schedule-del', function(req,res){
+  const id = String((req.body||{}).id||'').trim();
+  const before = schedulerCfg.schedules.length;
+  schedulerCfg.schedules = schedulerCfg.schedules.filter(s => s.id !== id);
+  for (const [, t] of scheduledTasks){ if (t.scheduleId === id) t.status = 'cancelled'; }
+  saveSchedulerCfg();
+  pushLog('info','schedule','#' + id + ' deleted from panel');
+  res.json({ ok: schedulerCfg.schedules.length < before });
+});
+app.post('/admin/window', function(req,res){
+  const b = req.body || {};
+  if (b.off){ schedulerCfg.window.enabled = false; }
+  else {
+    const s = parseInt(b.start,10), e = parseInt(b.end,10);
+    if (isNaN(s) || isNaN(e) || s < 0 || s > 23 || e < 1 || e > 24 || s === e){
+      return res.json({ ok:false, error:'start 0-23, end 1-24' });
+    }
+    schedulerCfg.window = { enabled:true, start:s, end:e };
+  }
+  saveSchedulerCfg();
+  pushLog('info','window','Active window set from panel: ' + describeActiveWindow());
+  res.json({ ok:true, window: schedulerCfg.window, describe: describeActiveWindow() });
+});
+app.post('/admin/cleantemp', async function(req,res){
+  try { const r = await axios.post(SCRAPER_URL + '/cleanup', {}, { timeout: 15000 }); res.json({ ok:true, result:r.data }); }
+  catch(e){ res.json({ ok:false, error:e.message }); }
+});
 app.post('/admin/clear-main', function(req,res){ clearMainGroup(); res.json({ ok:true }); });
 
 app.post('/admin/logs-clear', function(req,res){
@@ -6453,7 +6806,7 @@ app.get('/admin/stats', function(req,res){
     },
     accounts: accountStats,
     docs: { cachedChats: docTextCache.size, updatesQueued: schoolUpdatesBus.length },
-    window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
+    window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm(), active: describeActiveWindow(), recurring: schedulerCfg.schedules.filter(s => s.enabled).length },
     paused: botPaused,
     adminActive: isAdminActive(),
     mainGroup: mainGroupJid,

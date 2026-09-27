@@ -392,10 +392,35 @@ const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
  * scraper with EVERY search — the scraper tries YOUR sites FIRST,
  * so downloads come from your websites, not the public engines.
  * Empty/absent = the scraper just runs its built-in engines. */
-const MY_LINKS_ENV = (process.env.MYLINKS || '')
+const MY_LINKS_ENV = (process.env.MYLINKS ||
+  /* v71.2 HARD-CODED DEFAULTS — your real sites, synced with
+   * repo-intelligent-scraper/my_links.json slots 1-7. Used when the
+   * MYLINKS env is NOT set, so YOUR sites are ALWAYS tried FIRST on
+   * every search — zero env config needed on Render. */
+  'https://www.reddit.com/search?q={query}+nsfw' +
+  ',https://www.pornpics.com/search/{query}' +
+  ',https://www.babehub.com/gallery/{query}' +
+  ',https://www.darknaija.com/search/{query}' +
+  ',https://www.pichunter.com/gallery/{query}' +
+  ',https://tenor.com/search/{query}-porn-gifs' +
+  ',https://giphy.com/search/{query}+porn')
   .split(/[\n,]+/).map(function(s){ return s.trim(); })
   .filter(function(s){ return /^https?:\/\//i.test(s); })
   .filter(function(s, i, a){ return a.indexOf(s) === i; });
+
+/* v71.2 HARD-CODED SCRAPER SITES — the exact values from
+ * repo-intelligent-scraper/my_links.json (slots 1-7). The panel ALWAYS
+ * shows this list, even when the scraper service is offline or the
+ * my_links.json file is missing. Edit BOTH places together. */
+const HARD_LINKS = [
+  { slot:1, name:'Reddit NSFW (Amateur/Real)',      url:'https://www.reddit.com/search?q={query}+nsfw', type:'image', enabled:true  },
+  { slot:2, name:'Pornpics (High-Res Stills)',      url:'https://www.pornpics.com/search/{query}',      type:'image', enabled:true  },
+  { slot:3, name:'Babehub (Gallery Archive)',       url:'https://www.babehub.com/gallery/{query}',      type:'image', enabled:true  },
+  { slot:4, name:'DarkNaija (Realistic Porn)',      url:'https://www.darknaija.com/search/{query}',     type:'image', enabled:true  },
+  { slot:5, name:'Pichunter (Realistic Porn)',      url:'https://www.pichunter.com/gallery/{query}',    type:'image', enabled:true  },
+  { slot:6, name:'Tenor Porn GIFs (The Loop King)', url:'https://tenor.com/search/{query}-porn-gifs',   type:'gif',   enabled:true  },
+  { slot:7, name:'Giphy Adult (Polished Loops)',    url:'https://giphy.com/search/{query}+porn',        type:'gif',   enabled:true  }
+];
 
 const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
 
@@ -5427,6 +5452,7 @@ async function connectBot(){
       }
       if (connection === 'open'){
         isConnecting = false; connectionStatus = 'connected';
+        qrDataUri = null;   /* v71.2: drop the QR once paired — panel hides it */
         lastStatusChangeAt = Date.now();
         reconnectAttempts = 0; botStartTime = Date.now();
         botQrCount = 0; botCloseTimes = [];   /* v68.3: fresh cycle */
@@ -5943,6 +5969,7 @@ async function connectSchoolBot(){
       if (connection === 'open'){
         clearTimeout(schoolBootWatchdog);   /* v70: alive — fully open */
         schoolIsConnecting = false; schoolStatus = 'connected';
+        schoolQrDataUri = null;   /* v71.2: drop the QR once paired */
         schoolReconnectAttempts = 0;
         schoolQrCount = 0; schoolCloseTimes = [];   /* v68.3: fresh cycle */
         const jid = schoolSock.user?.id || null;
@@ -6210,7 +6237,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71.2</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -6231,7 +6258,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v71 — dual account</h1>
+<h1>BreadBot v71.2 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">
@@ -6290,6 +6317,11 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 </div>
 <div id="schedList" style="font-size:11px;line-height:1.7;max-height:150px;overflow-y:auto"></div>
 <div style="margin-top:6px"><button onclick="cleanTempUi()">🧹 Clean Scraper Temp</button><span id="ctOut" style="font-size:10px;color:#8b949e;margin-left:8px">auto-runs 90s after every media send</span></div>
+</div>
+<div class="card"><h2>🌐 Scraper Sites</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Every website the scraper uses — <b>actual values from the files</b>: my_links.json (hot-reloaded, no restart) + MYLINKS env. Your sites are tried FIRST on every search.</div>
+<div id="mlList" style="font-size:11px;line-height:1.7;max-height:220px;overflow-y:auto">loading…</div>
+<div style="margin-top:6px"><button onclick="loadMyLinks()">🔄 Refresh sites</button></div>
 </div>
 <div class="card"><h2>🧪 Scraper Test</h2>
 <div style="display:flex;gap:6px;margin-bottom:8px">
@@ -6410,12 +6442,12 @@ var pr=(d.ai&&d.ai.providers)||{};var act=d.ai&&d.ai.active;var h='';
 for(var k in pr){var x=pr[k];
   h+='<div>'+(x&&x.ok?'<span style="color:#3fb950">OK</span>':'<span style="color:#f85149">FAIL</span>')+' '+esc(k)+(act===k?' <span class="ai-badge">ACTIVE</span>':'')+(x&&x.ok?' '+x.ms+'ms':' '+esc((x&&x.status?x.status+' ':'')+(x&&x.error||'')))+'</div>';}
 $('aiList').innerHTML=h||'<div style="opacity:0.5">Not tested</div>';
-var q=await api('qr-data');if(q.qr&&q.status==='qr'){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
+var q=await api('qr-data');if(q.qr){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
 else $('qrImg').style.display='none';
 var qs=await api('qr-school-data');
 $('dot2').className='dot s-'+(qs.status||'disconnected');$('st2').textContent=qs.status||'-';$('bn2').textContent=qs.botNumber||'-';
 $('ss').textContent=qs.status||'-';
-if(qs.qr&&qs.status==='qr'){$('qrImg2').src='/admin/qr-school?t='+Date.now();$('qrImg2').style.display='block';}
+if(qs.qr){$('qrImg2').src='/admin/qr-school?t='+Date.now();$('qrImg2').style.display='block';}
 else $('qrImg2').style.display='none';}catch(e){}}
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
 /* ═══ v70 SESSION BACKUP — copy blobs into env, restore without QR ═══ */
@@ -6456,14 +6488,34 @@ function msgs(){var es=new EventSource('/admin/messages-stream');es.onmessage=fu
 var b=(m.account==='school')?$('msgsS'):$('msgsG');b.appendChild(msgRow(m));b.scrollTop=b.scrollHeight;while(b.children.length>250)b.removeChild(b.firstChild);}catch(e){}};
 es.onerror=function(){es.close();setTimeout(msgs,5000);};}
 refresh();logs();msgs();loadSessionBackup();setInterval(refresh,5000);
-/* ═══ v71.1 Post Scheduler UI ═══ */
+/* ═══ v71.2 Post Scheduler UI — v71.1 shipped a FATAL panel bug here: the
+ * \' escapes were eaten by the server-side template literal, so the served
+ * script had raw quotes inside a single-quoted string → SyntaxError → the
+ * ENTIRE panel script died on load (refresh() never ran) → QR cards, stats,
+ * logs: everything stayed empty. Rule for ALL panel JS below: NEVER use
+ * backslash escapes — double quotes inside single-quoted strings only. */
 async function loadSchedules(){try{var r=await api('schedules');var el=$('schedList');if(!el)return;if(r.window){$('wsStart').value=(r.window.start!=null?r.window.start:'');$('wsEnd').value=(r.window.end!=null?r.window.end:'');}
-var list=r.schedules||[];el.innerHTML=list.length?list.map(function(s){return '<div style="border-top:1px solid #21262d;padding:4px 0"><b>#'+s.id+'</b> '+s.count+' '+s.kind+' "'+s.query+'" @ '+s.time+' '+s.repeat+(s.enabled?'':' <span style=\'color:#d29922\'>(off)</span>')+' · runs '+s.runs+' · until '+s.endDate+' <a href="#" onclick="delSchedule(\''+s.id+'\');return false" style="color:#f85149">cancel</a></div>';}).join(''):'<span style="color:#8b949e">No recurring schedules yet.</span>';}catch(e){}}
+var list=r.schedules||[];el.innerHTML=list.length?list.map(function(s){return '<div style="border-top:1px solid #21262d;padding:4px 0"><b>#'+s.id+'</b> '+s.count+' '+s.kind+' "'+s.query+'" @ '+s.time+' '+s.repeat+(s.enabled?'':' <span style="color:#d29922">(off)</span>')+' · runs '+s.runs+' · until '+s.endDate+' <a href="javascript:void(0)" data-del="'+s.id+'" style="color:#f85149">cancel</a></div>';}).join(''):'<span style="color:#8b949e">No recurring schedules yet.</span>';el.onclick=function(ev){var a=ev.target&&ev.target.closest?ev.target.closest('[data-del]'):null;if(a)delSchedule(a.getAttribute('data-del'));};}catch(e){}}
 async function addScheduleUi(){var q=$('sqQuery').value.trim();if(!q){$('schedList').innerHTML='<span style="color:#d29922">Type a search query first.</span>';return;}var r=await api('schedule-add','POST',{query:q,kind:$('sqKind').value,count:parseInt($('sqCount').value,10)||6,time:$('sqTime').value.trim()||'20:00',repeat:$('sqRepeat').value,days:parseInt($('sqDays').value,10)||30});if(r.ok){$('sqQuery').value='';loadSchedules();}else{$('schedList').innerHTML='<span style="color:#f85149">Error: '+(r.error||'?')+'</span>';}}
 async function delSchedule(id){await api('schedule-del','POST',{id:id});loadSchedules();}
 async function setWindowUi(off){var r=await api('window','POST',{start:$('wsStart').value,end:$('wsEnd').value,off:off===true});if(!r.ok)$('schedList').innerHTML='<span style="color:#f85149">Window error: '+(r.error||'?')+'</span>';loadSchedules();}
 async function cleanTempUi(){var b=$('ctOut');b.innerHTML='cleaning…';try{var r=await api('cleantemp','POST',{});b.innerHTML=r.ok?('done — '+(r.result&&(r.result.deletedFiles||0))+' file(s) freed'):('failed: '+(r.error||'?'));}catch(e){b.innerHTML='failed';}}
-setInterval(loadSchedules,15000);
+/* ═══ v71.2 SCRAPER SITES — every website the scraper uses, ACTUAL values
+ * from my_links.json (hot-reloaded) + MYLINKS env, straight from the file ═══ */
+async function loadMyLinks(){var el=$('mlList');if(!el)return;try{var r=await api('mylinks');
+if(!r.ok){el.innerHTML='<span style="color:#f85149">scraper offline: '+esc(r.error||'?')+'</span>';return;}
+var d=r.data||{};var slots=d.links||[];var h='';
+h+='<div style="color:#8b949e">'+esc(r.scraperUrl||'')+' · <b>'+esc(String(d.enabled||0))+'/'+esc(String(d.loaded||0))+'</b> slots enabled'+(r.note?' · <span style="color:#d29922">'+esc(r.note)+'</span>':'')+(d.source?' · <span style="color:#d29922">'+esc(String(d.source))+'</span>':'')+'</div>';
+for(var i=0;i<slots.length;i++){var s=slots[i]||{};var on=s.enabled!==false;var last='';
+if(s.lastResult){if(s.lastResult.count!=null)last=' · last: <span style="color:#3fb950">'+esc(String(s.lastResult.count))+' results</span>'+(s.lastResult.ts?' '+esc(new Date(s.lastResult.ts).toLocaleTimeString()):'');else if(s.lastResult.error)last=' · last: <span style="color:#f85149">'+esc(String(s.lastResult.error))+'</span>';}
+h+='<div style="border-top:1px solid #21262d;padding:4px 0"><b>#'+esc(String(s.slot!=null?s.slot:(i+1)))+'</b> '+(on?'<span style="color:#3fb950">ON</span>':'<span style="color:#d29922">off</span>')+' <b>'+esc(s.type||'?')+'</b> · '+esc(s.name||'')+'<br><span style="color:#8b949e;word-break:break-all">'+esc(s.url||'')+'</span>'+last+'</div>';}
+var envArr=(r.envMyLinks?String(r.envMyLinks).split(','):[]);var envDiag=d.envLinkDiag||[];
+var seenUrls=slots.map(function(s){return String(s.url||'');});
+for(var j=0;j<envArr.length;j++){var eu=envArr[j].trim();if(!eu)continue;if(seenUrls.indexOf(eu)>=0)continue;var ed=envDiag[j]||{};
+h+='<div style="border-top:1px solid #21262d;padding:4px 0"><b>env+'+(j+1)+'</b> '+(ed.enabled!==false?'<span style="color:#3fb950">ON</span>':'<span style="color:#d29922">off</span>')+' <b>'+esc(ed.type||'image')+'</b> · MYLINKS env<br><span style="color:#8b949e;word-break:break-all">'+esc(eu)+'</span></div>';}
+h+='<div style="border-top:1px solid #21262d;padding:4px 0;color:#8b949e">Engines: images = your image slots + Bing boost · gifs = your gif slots (Tenor) · videos = YouTube (always on)</div>';
+el.innerHTML=h;}catch(e){el.innerHTML='<span style="color:#f85149">failed: '+esc(e.message)+'</span>';}}
+loadSchedules();loadMyLinks();setInterval(loadSchedules,15000);setInterval(loadMyLinks,60000);
 </script></body></html>`;
 
 app.get('/', function(req,res){ res.send(PANEL_HTML); });
@@ -6681,6 +6733,28 @@ app.post('/admin/window', function(req,res){
 app.post('/admin/cleantemp', async function(req,res){
   try { const r = await axios.post(SCRAPER_URL + '/cleanup', {}, { timeout: 15000 }); res.json({ ok:true, result:r.data }); }
   catch(e){ res.json({ ok:false, error:e.message }); }
+});
+/* ═══ v71.2 SCRAPER SITES — proxy the scraper /my-links so the panel lists
+ * the ACTUAL websites from the files (slots + per-slot diagnostics) ═══ */
+app.get('/admin/mylinks', async function(req,res){
+  /* v71.2: ALWAYS answers ok:true — the 7 hard-coded sites (HARD_LINKS)
+   * are built into the bot, and live scraper diagnostics are merged on
+   * top when the scraper is up. The panel never shows an empty card. */
+  const envMyLinks = process.env.MYLINKS || MY_LINKS_ENV.join(',');
+  const hardData = {
+    links: HARD_LINKS,
+    loaded: HARD_LINKS.length,
+    enabled: HARD_LINKS.filter(function(s){ return s.enabled; }).length
+  };
+  try{
+    const H = {};
+    if (SCRAPER_TOKEN) H['Authorization'] = 'Bearer ' + SCRAPER_TOKEN;
+    const r = await axios.get(SCRAPER_URL + '/my-links', { headers:H, timeout: 10000, validateStatus: () => true });
+    if (r.status === 200) return res.json({ ok:true, data:r.data, hardcoded:HARD_LINKS, envMyLinks: envMyLinks, scraperUrl: SCRAPER_URL });
+    return res.json({ ok:true, data:Object.assign({}, hardData, { source:'HARD-CODED values (scraper /my-links HTTP ' + r.status + ')' }), hardcoded:HARD_LINKS, envMyLinks: envMyLinks, scraperUrl: SCRAPER_URL });
+  }catch(e){
+    return res.json({ ok:true, data:Object.assign({}, hardData, { source:'HARD-CODED values (scraper offline: ' + e.message + ')' }), hardcoded:HARD_LINKS, envMyLinks: envMyLinks, scraperUrl: SCRAPER_URL });
+  }
 });
 app.post('/admin/clear-main', function(req,res){ clearMainGroup(); res.json({ ok:true }); });
 

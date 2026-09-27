@@ -1,5 +1,49 @@
 # BreadBot v71 — whatsapp-qr-app
 
+## v71.2 — PANEL QR FIX (FATAL v71.1 BUG) + SCRAPER SITES CARD
+
+WHAT CHANGED (all on top of v71.1):
+
+1. THE QR CODES WERE NOT SHOWING — ROOT CAUSE FOUND AND FIXED.
+   v71.1 shipped a FATAL bug inside the admin panel page: the Post
+   Scheduler card's JavaScript was written inside the server-side
+   template literal that builds the panel HTML, and its \' escapes were
+   EATEN by that template literal before the script reached the browser.
+   The served script then had raw quotes inside a single-quoted string
+   (`<span style='color:#d29922'>` inside '...') — a SyntaxError at
+   script PARSE time. One syntax error kills an entire <script> block,
+   so the panel's refresh() never ran AT ALL: the QR images, the
+   connection stats, the logs, everything stayed empty ("-"). That is
+   why the deploy log said "QR generated" while the panel showed no QR.
+   FIX: the scheduler row builder now uses only double quotes inside
+   single-quoted strings (zero backslash escapes anywhere in panel JS),
+   the cancel link is wired via a data-del attribute + one delegated
+   click handler instead of fragile inline onclick quoting.
+   VERIFIED: served panel script passes node --check; a real headless
+   browser session shows BOTH QR images rendering, stats populating and
+   the scheduler card live.
+
+2. QR DISPLAY HARDENED.
+   - The QR image now shows whenever a QR exists (it no longer needs the
+     exact status string 'qr' to be visible during renewal windows).
+   - Both accounts drop their stored QR the moment they connect
+     (qrDataUri/schoolQrDataUri = null on connection open), so a stale
+     QR never lingers on the panel after pairing.
+
+3. NEW PANEL CARD: "🌐 SCRAPER SITES — actual values from the files".
+   Lists EVERY website the scraper will use, read live from the scraper's
+   own my_links.json (hot-reloaded file) + the bot's MYLINKS env:
+   slot #, ON/off state, type (image/gif), name, full URL template, and
+   the per-slot last-result diagnostics (count of results or the error).
+   New bot endpoint GET /admin/mylinks proxies the scraper /my-links
+   (Bearer SCRAPER_TOKEN honored); card auto-refreshes every 60 s with a
+   🔄 Refresh sites button. Engines footnote: images = your slots + Bing
+   boost · gifs = your gif slots · videos = YouTube (always on).
+
+4. Version: package.json 71.1.0 -> 71.2.0. Scraper side untouched except
+   my_links.json now carries the user's REAL 7 live slots (see scraper
+   CHANGES.md) so a redeploy can never wipe the actual sites again.
+
 ## v71.1 — ADMIN SELF-CHAT + SCHEDULER + ACTIVE WINDOW + AUTO-CLEANUP
 
 WHAT CHANGED (all on top of the v71 test-free build):

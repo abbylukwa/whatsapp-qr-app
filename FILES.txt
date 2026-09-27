@@ -1,5 +1,5 @@
-whatsapp-qr-app v71.2 — file list
-server.js          BreadBot v71.2 (7020 lines) — THE COMPLETE BUILD, test files removed
+whatsapp-qr-app v71.3 — file list
+server.js          BreadBot v71.3 (7054 lines) — THE COMPLETE BUILD, test files removed
                    from the repo (the dev suite lives outside; all 618 assertions green).
                    Everything since v67 is inside: dual-account doc brain, admin
                    commands in ANY chat (both accounts), school fromMe=admin + LID
@@ -13,7 +13,7 @@ server.js          BreadBot v71.2 (7020 lines) — THE COMPLETE BUILD, test file
                    auto-chat OFF for the admin (STUDY_BUDDY=false, ask <q> to use),
                    ALL logs panel-only + 30-min janitor + 🧹 Clear, human-persona DM
                    AI (Abby — never location, never meetups, never AI)
-package.json       71.2.0 (pdf-parse + mammoth, ytdl-free)
+package.json       71.3.0 (pdf-parse + mammoth, ytdl-free)
 package-lock.json  regenerated (ytdl-free)
 render.yaml        Render deploy config
 build.sh           Render build script
@@ -21,7 +21,7 @@ env                demo env file — API_1..8 + MYLINKS + SESSION_B64_* + STUDY_
                    (values empty — paste yours; real keys live in Render, never in git)
 .gitignore         covers env, auth_info*, state JSONs, node_modules
 .env.example       all config vars documented (AI pool + MYLINKS + session backup)
-CHANGES.md         v71.2 + v71.1 + v71 + v70 + v69 + v68.x + v67 changelog
+CHANGES.md         v71.3 + v71.2 + v71.1 + v71 + v70 + v69 + v68.x + v67 changelog
 schedules.json     (runtime, auto-created, gitignored) recurring post
                    schedules + active window — panel Post Scheduler card
 FILES.txt          this file

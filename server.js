@@ -393,31 +393,32 @@ const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
  * so downloads come from your websites, not the public engines.
  * Empty/absent = the scraper just runs its built-in engines. */
 const MY_LINKS_ENV = (process.env.MYLINKS ||
-  /* v71.2 HARD-CODED DEFAULTS — your real sites, synced with
-   * repo-intelligent-scraper/my_links.json slots 1-7. Used when the
-   * MYLINKS env is NOT set, so YOUR sites are ALWAYS tried FIRST on
-   * every search — zero env config needed on Render. */
-  'https://www.reddit.com/search?q={query}+nsfw' +
+  /* v71.3 HARD-CODED DEFAULTS — your real sites, synced with
+   * repo-intelligent-scraper/my_links.json slots 1-7 (v2.6 patterns:
+   * reddit now uses the .json API, darknaija ?s=, pichunter /search/).
+   * Used when the MYLINKS env is NOT set, so YOUR sites are ALWAYS
+   * tried FIRST on every search — zero env config needed on Render. */
+  'https://old.reddit.com/search.json?q={query}+nsfw&include_over_18=on' +
   ',https://www.pornpics.com/search/{query}' +
   ',https://www.babehub.com/gallery/{query}' +
-  ',https://www.darknaija.com/search/{query}' +
-  ',https://www.pichunter.com/gallery/{query}' +
+  ',https://www.darknaija.com/?s={query}' +
+  ',https://www.pichunter.com/search/{query}' +
   ',https://tenor.com/search/{query}-porn-gifs' +
   ',https://giphy.com/search/{query}+porn')
   .split(/[\n,]+/).map(function(s){ return s.trim(); })
   .filter(function(s){ return /^https?:\/\//i.test(s); })
   .filter(function(s, i, a){ return a.indexOf(s) === i; });
 
-/* v71.2 HARD-CODED SCRAPER SITES — the exact values from
+/* v71.3 HARD-CODED SCRAPER SITES — the exact values from
  * repo-intelligent-scraper/my_links.json (slots 1-7). The panel ALWAYS
  * shows this list, even when the scraper service is offline or the
  * my_links.json file is missing. Edit BOTH places together. */
 const HARD_LINKS = [
-  { slot:1, name:'Reddit NSFW (Amateur/Real)',      url:'https://www.reddit.com/search?q={query}+nsfw', type:'image', enabled:true  },
+  { slot:1, name:'Reddit NSFW (Amateur/Real)',      url:'https://old.reddit.com/search.json?q={query}+nsfw&include_over_18=on', type:'image', enabled:true  },
   { slot:2, name:'Pornpics (High-Res Stills)',      url:'https://www.pornpics.com/search/{query}',      type:'image', enabled:true  },
   { slot:3, name:'Babehub (Gallery Archive)',       url:'https://www.babehub.com/gallery/{query}',      type:'image', enabled:true  },
-  { slot:4, name:'DarkNaija (Realistic Porn)',      url:'https://www.darknaija.com/search/{query}',     type:'image', enabled:true  },
-  { slot:5, name:'Pichunter (Realistic Porn)',      url:'https://www.pichunter.com/gallery/{query}',    type:'image', enabled:true  },
+  { slot:4, name:'DarkNaija (Realistic Porn)',      url:'https://www.darknaija.com/?s={query}',         type:'image', enabled:true  },
+  { slot:5, name:'Pichunter (Realistic Porn)',      url:'https://www.pichunter.com/search/{query}',     type:'image', enabled:true  },
   { slot:6, name:'Tenor Porn GIFs (The Loop King)', url:'https://tenor.com/search/{query}-porn-gifs',   type:'gif',   enabled:true  },
   { slot:7, name:'Giphy Adult (Polished Loops)',    url:'https://giphy.com/search/{query}+porn',        type:'gif',   enabled:true  }
 ];
@@ -2306,6 +2307,11 @@ async function scraperDownloadMedia(url, kind='auto'){
     if (!r || !r.mediaUrl) throw new Error('scrapper: no mediaUrl');
     if (r.sizeBytes && r.sizeBytes > MEDIA_MAX_BYTES)
       throw new Error('Media too big (' + (r.sizeBytes/1024/1024).toFixed(1) + 'MB)');
+    /* v71.3 JUNK GATE: 3-20KB "images" are logos/icons/thumbnails —
+     * the panel tests kept delivering 5-21KB junk gifs. Anything under
+     * 12KB (image/gif) is rejected so the NEXT candidate is tried. */
+    if (r.sizeBytes && r.sizeBytes < 12288 && (kind === 'image' || kind === 'gif' || kind === 'auto'))
+      throw new Error('Junk candidate (' + (r.sizeBytes/1024).toFixed(0) + 'KB < 12KB) — trying next');
     return { ok:true, mediaUrl:r.mediaUrl, title:r.title||'',
              mimetype:r.mimetype||'', kind:r.kind||kind, sizeBytes:r.sizeBytes||0 };
   } catch(e){
@@ -6237,7 +6243,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71.2</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71.3</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -6258,7 +6264,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v71.2 — dual account</h1>
+<h1>BreadBot v71.3 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">
@@ -6325,10 +6331,12 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 </div>
 <div class="card"><h2>🧪 Scraper Test</h2>
 <div style="display:flex;gap:6px;margin-bottom:8px">
-<input id="scQuery" placeholder="type a name, e.g. chess board" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:inherit;font-size:12px" onkeydown="if(event.key==='Enter')runScraperTest()">
-<button class="primary" id="scBtn" onclick="runScraperTest()">Run Test</button>
+<input id="scQuery" placeholder="type a name, e.g. chess board" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:inherit;font-size:12px" onkeydown="if(event.key==='Enter')runScraperTest('image')">
+<button class="primary" id="scBtn" onclick="runScraperTest('image')">🖼 Test Image</button>
+<button id="scBtnG" onclick="runScraperTest('gif')">🎞 Test GIF</button>
+<button id="scBtnV" onclick="runScraperTest('video')">🎬 Test Video</button>
 </div>
-<div id="scResult" style="font-size:12px;line-height:1.8;min-height:20px;color:#8b949e">Search → download, live. Same pipeline the bot uses.</div>
+<div id="scResult" style="font-size:12px;line-height:1.8;min-height:20px;color:#8b949e">Pick a type — search → download, live. Same pipeline the bot uses.</div>
 </div>
 <div class="card"><h2>💾 Session Backup — never re-scan after a deploy</h2>
 <div style="font-size:11px;line-height:1.65;color:#8b949e">Render wipes the session on EVERY deploy → QR re-scan hell → "bot not receiving messages". Fix: when an account is connected, copy its blob below into Render env <b>SESSION_B64_GROUPS</b> / <b>SESSION_B64_SCHOOL</b> (one time). Every future boot auto-restores — no QR, no phone.</div>
@@ -6395,18 +6403,22 @@ async function testAI(){var b=$('aiList');b.innerHTML='Testing the whole pool...
     html+=x&&x.ok?'<div><span style="color:#3fb950">OK</span> '+esc(k)+': '+x.ms+'ms</div>'
                  :'<div style="color:#f85149">FAIL '+esc(k)+': '+esc((x&&x.status?x.status+' ':'')+(x&&x.error||''))+'</div>';}
   b.innerHTML=html||'<div style="opacity:0.5">No providers configured — add API_1=… in env</div>';}
-async function runScraperTest(){var q=$('scQuery').value.trim();var b=$('scResult');
+function enginesHtml(e){if(!e)return '';var parts=[];for(var k in e){if(e[k])parts.push(esc(k)+' '+e[k]);}return parts.length?'<br><span style="color:#8b949e">engines: '+parts.join(' · ')+'</span>':'';}
+async function runScraperTest(kind){kind=kind||'image';var q=$('scQuery').value.trim();var b=$('scResult');
   if(!q){b.innerHTML='<span style="color:#d29922">Type a name first — e.g. chess board.</span>';return;}
-  $('scBtn').disabled=true;b.innerHTML='<span style="color:#d29922">⏳ 1/2 Searching "'+esc(q)+'"…</span>';
-  try{var r=await api('scraper-test','POST',{query:q});var s=r.steps||{};
-  if(r.ok){b.innerHTML='<span style="color:#3fb950">✅ Search</span> '+s.search.results+' results'+(s.search.myLinks?' <span style="color:#d29922">('+s.search.myLinks+' from YOUR MYLINKS)</span>':'')+' · '+s.search.ms+'ms<br><span style="color:#3fb950">✅ Download</span> '+esc(s.download.title||q)+' · '+(s.download.sizeBytes?((s.download.sizeBytes/1024).toFixed(0)+'KB · '):'')+s.download.ms+'ms<br><span style="color:#3fb950">🏆 Scraper works</span> — total '+r.totalMs+'ms <a href="'+esc(s.mediaUrl||'')+'" target="_blank" style="color:#58a6ff">open media ↗</a>';}
+  var btns={image:'scBtn',gif:'scBtnG',video:'scBtnV'};var lbl={image:'🖼 image',gif:'🎞 gif',video:'🎬 video'};
+  for(var kk in btns){var be=$(btns[kk]);if(be)be.disabled=true;}
+  b.innerHTML='<span style="color:#d29922">⏳ ['+lbl[kind]+'] 1/2 Searching "'+esc(q)+'"…</span>';
+  try{var r=await api('scraper-test','POST',{query:q,kind:kind});var s=r.steps||{};
+  if(r.ok){b.innerHTML='<span style="color:#3fb950">✅ Search ['+lbl[kkindSafe(kind)]+']</span> '+s.search.results+' results'+(s.search.myLinks?' <span style="color:#d29922">('+s.search.myLinks+' from YOUR MYLINKS)</span>':'')+' · '+s.search.ms+'ms'+enginesHtml(s.search.engines)+'<br><span style="color:#3fb950">✅ Download</span> '+esc(s.download.title||q)+' · '+(s.download.sizeBytes?(s.download.sizeBytes>1048576?((s.download.sizeBytes/1048576).toFixed(1)+'MB · '):((s.download.sizeBytes/1024).toFixed(0)+'KB · ')):'')+s.download.ms+'ms<br><span style="color:#3fb950">🏆 Scraper works</span> — total '+r.totalMs+'ms <a href="'+esc(s.mediaUrl||'')+'" target="_blank" style="color:#58a6ff">open media ↗</a>';}
   else{var msg='';
-    if(s.search&&!s.search.ok)msg='❌ Search failed — '+esc(s.search.error||'0 results')+' ('+s.search.ms+'ms)';
-    else if(s.download&&!s.download.ok)msg='<span style="color:#3fb950">✅ Search</span> '+s.search.results+' results · '+s.search.ms+'ms<br>❌ Download failed — '+esc(s.download.error||'')+' ('+s.download.ms+'ms)';
+    if(s.search&&!s.search.ok)msg='❌ Search failed — '+esc(s.search.error||'0 results')+' ('+s.search.ms+'ms)'+enginesHtml(s.search.engines);
+    else if(s.download&&!s.download.ok)msg='<span style="color:#3fb950">✅ Search</span> '+s.search.results+' results · '+s.search.ms+'ms'+enginesHtml(s.search.engines)+'<br>❌ Download failed — '+esc(s.download.error||'')+' ('+s.download.ms+'ms)';
     else msg='❌ '+esc(r.error||'Unknown error');
     b.innerHTML=msg+'<br><span style="color:#d29922">'+esc(r.hint||'')+'</span>';}
   }catch(e){b.innerHTML='<span style="color:#f85149">❌ Request failed: '+esc(e.message)+'</span>';}
-  $('scBtn').disabled=false;}
+  for(var k2 in btns){var be2=$(btns[k2]);if(be2)be2.disabled=false;}}
+function kkindSafe(k){return k||'image';}
 async function refresh(){try{var d=await api('stats');setS(d.status);
 $('md').textContent=(d.mode||'-').toUpperCase();
 $('ap').textContent=d.adminPhone||'-';
@@ -6801,38 +6813,60 @@ app.get('/admin/aitest', async function(req,res){ res.json(await testAllProvider
  * Deliberately does NOT send anything into WhatsApp — this endpoint
  * only proves the scraper pipeline (search + download) works. */
 app.post('/admin/scraper-test', async function(req,res){
+  /* v71.3: THREE test kinds from the panel — 🖼 image / 🎞 gif / 🎬 video.
+   * kind=image keeps the classic search→download flow; gif runs the
+   * scraper /gif channel; video runs the YouTube /video pipeline. */
   const query = String(req.body?.query || '').trim().slice(0, 120);
+  const kind = ['image','gif','video'].includes(String(req.body?.kind)) ? String(req.body.kind) : 'image';
   if (!query) return res.json({ ok:false, error:'Empty query — type a name first.' });
   const t0 = Date.now();
-  pushLog('info','scraper','Panel test: searching "' + query + '"');
-  const s = await scraperSearch(query, false);
-  if (!s.ok || !s.images || !s.images.length){
+  pushLog('info','scraper','Panel test [' + kind + ']: searching "' + query + '"');
+
+  /* ── VIDEO: /video searches AND downloads in one call ── */
+  if (kind === 'video'){
+    const v = await scraperVideo(query);
+    if (!v.ok) return res.json({ ok:false, query, kind,
+      steps:{ search:{ ok:false, ms:Date.now()-t0, error:v.error } },
+      hint:'YouTube pipeline failed — check the panel logs for the exact error.' });
+    pushLog('info','scraper','Panel test [' + kind + '] OK: "' + query + '" → ' + (v.title || query) +
+      (v.sizeBytes ? ' (' + (v.sizeBytes/1024/1024).toFixed(1) + 'MB)' : '') + ' in ' + (Date.now()-t0) + 'ms');
+    return res.json({ ok:true, query, kind,
+      steps:{ search:{ ok:true, ms:Date.now()-t0, results:1 },
+              download:{ ok:true, ms:Date.now()-t0, title:v.title || query,
+                         sizeBytes:v.sizeBytes || 0, mimetype:v.mimetype || 'video/mp4', kind:'video' } },
+      mediaUrl:v.mediaUrl, totalMs: Date.now()-t0 });
+  }
+
+  /* ── IMAGE / GIF: search, then download-first-working ── */
+  const s = kind === 'gif' ? await scraperGif(query) : await scraperSearch(query, false);
+  const urls = s.gifs || s.images || [];
+  if (!s.ok || !urls.length){
     return res.json({
-      ok:false, query,
-      steps:{ search:{ ok:false, ms:Date.now()-t0, error:s.error || '0 results', myLinks:s.myLinks||0 } },
+      ok:false, query, kind,
+      steps:{ search:{ ok:false, ms:Date.now()-t0, error:s.error || '0 results', myLinks:s.myLinks||0, engines:s.engines||null } },
       hint:'Scraper may be asleep (free Render cold start) — wait 60s and try again.'
     });
   }
   const searchMs = Date.now()-t0;
   const t1 = Date.now();
-  const w = await scraperDownloadFirstWorking(s.images, 'image', 4);
+  const w = await scraperDownloadFirstWorking(urls, kind, 6);
   if (!w.ok){
     return res.json({
-      ok:false, query,
-      steps:{ search:{ ok:true, ms:searchMs, results:s.images.length, myLinks:s.myLinks||0 },
-              download:{ ok:false, ms:Date.now()-t1, error:w.error, tried:Math.min(4, s.images.length) } },
-      hint:'All ' + Math.min(4, s.images.length) + ' candidates refused by their CDNs — per-attempt errors are on the panel logs.'
+      ok:false, query, kind,
+      steps:{ search:{ ok:true, ms:searchMs, results:urls.length, myLinks:s.myLinks||0, engines:s.engines||null },
+              download:{ ok:false, ms:Date.now()-t1, error:w.error, tried:Math.min(6, urls.length) } },
+      hint:'All ' + Math.min(6, urls.length) + ' candidates refused by their CDNs — per-attempt errors are on the panel logs.'
     });
   }
   const d = w.d;
-  pushLog('info','scraper','Panel test OK: "' + query + '" → ' + (d.title || query) +
+  pushLog('info','scraper','Panel test [' + kind + '] OK: "' + query + '" → ' + (d.title || query) +
     (d.sizeBytes ? ' (' + (d.sizeBytes/1024).toFixed(0) + 'KB)' : '') + ' in ' + (Date.now()-t0) + 'ms');
   res.json({
-    ok:true, query,
+    ok:true, query, kind,
     steps:{
-      search:  { ok:true, ms:searchMs, results:s.images.length, myLinks:s.myLinks||0 },
+      search:  { ok:true, ms:searchMs, results:urls.length, myLinks:s.myLinks||0, engines:s.engines||null },
       download:{ ok:true, ms:Date.now()-t1, title:d.title || query,
-                 sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '', kind:d.kind || 'image' },
+                 sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '', kind:d.kind || kind },
       mediaUrl:d.mediaUrl
     },
     totalMs: Date.now()-t0

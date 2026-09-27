@@ -1,5 +1,27 @@
 # BreadBot v71 — whatsapp-qr-app
 
+## v71.3 — SEARCH RELEVANCE FIX + 3 TEST BUTTONS (🖼 image / 🎞 gif / 🎬 video)
+
+WHY: the user said "the search is not giving me what I actually want —
+like the actual nsfw content". Panel diagnostics proved it: 5 of 7
+scraper slots returned 0 results and downloads kept landing 5-21KB
+junk gifs. Companion scraper v2.6.0 rebuilds the engines; the bot side:
+
+1. 🧪 Scraper Test card now has THREE buttons — 🖼 Test Image,
+   🎞 Test GIF, 🎬 Test Video — each runs its own pipeline live
+   (/admin/scraper-test gained kind=image|gif|video; video reports
+   title + MB in one step; image/gif try up to 6 candidates).
+2. Test results now show PER-ENGINE counts ("engines: xbooru 40 ·
+   giphy 10 · tenor 10") so you always see WHICH engine delivered.
+3. JUNK GATE: downloads under 12KB (image/gif) are rejected and the
+   next candidate is tried — logos/thumbnails/fake gifs no longer get
+   delivered to groups.
+4. HARD_LINKS + MYLINKS defaults re-synced with my_links.json v2.6:
+   reddit slot uses the .json API (parsed server-side), darknaija ?s=,
+   pichunter /search/. Your sites still lead every search with zero
+   env config.
+5. Result sizes show MB for video/Big files in the test card.
+
 ## v71.2 — PANEL QR FIX (FATAL v71.1 BUG) + SCRAPER SITES CARD
 
 WHAT CHANGED (all on top of v71.1):

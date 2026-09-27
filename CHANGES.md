@@ -1,5 +1,26 @@
 # BreadBot v71 — whatsapp-qr-app
 
+## v71.4 — LINK AUDIT: every slot live-verified, dead links replaced, hardcoded
+
+WHY: the user asked "verify if all my actual links work and give me
+new links which actually work — hardcode everything". Live testing
+through the real pipeline (fetch → extract → DOWNLOAD PROBE) proved
+5 of 7 slots were dead from a datacenter IP: reddit .json 403,
+pornpics WAF-reset, babehub 403, darknaija 0 static images,
+pichunter 403. Companion scraper v2.7.0 rebuilds the slots and fixes
+two engine bugs; the bot side:
+
+1. HARD_LINKS + MYLINKS default re-synced with my_links.json v2.7 —
+   the 7 slots are now: Realbooru (real people, full-res) · Xbooru
+   DAPI XML (file_url direct) · Rule34.xxx (full-res) · TBIB
+   (fallback) · DarkNaija (blog fallback) · Tenor gifs · Giphy gifs.
+   EVERY slot verified live 2026-09-27 (extraction AND download).
+2. Panel 🌐 Scraper Sites card shows the new values automatically
+   (it reads HARD_LINKS).
+3. Panel title/version → v71.4.
+4. Everything else from v71.3 kept: 3 test buttons, per-engine
+   counts, 12KB junk gate, session backup, hard-coded sites card.
+
 ## v71.3 — SEARCH RELEVANCE FIX + 3 TEST BUTTONS (🖼 image / 🎞 gif / 🎬 video)
 
 WHY: the user said "the search is not giving me what I actually want —

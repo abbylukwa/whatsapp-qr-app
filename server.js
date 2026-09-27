@@ -393,34 +393,37 @@ const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
  * so downloads come from your websites, not the public engines.
  * Empty/absent = the scraper just runs its built-in engines. */
 const MY_LINKS_ENV = (process.env.MYLINKS ||
-  /* v71.3 HARD-CODED DEFAULTS — your real sites, synced with
-   * repo-intelligent-scraper/my_links.json slots 1-7 (v2.6 patterns:
-   * reddit now uses the .json API, darknaija ?s=, pichunter /search/).
+  /* v71.4 HARD-CODED DEFAULTS — your real sites, synced with
+   * repo-intelligent-scraper/my_links.json slots 1-7 (v2.7: every slot
+   * LIVE-VERIFIED with extraction + download probes — reddit/pornpics/
+   * babehub/pichunter were 403/WAF-dead, replaced with booru sources
+   * that ship FULL-RES originals from datacenter IPs).
    * Used when the MYLINKS env is NOT set, so YOUR sites are ALWAYS
    * tried FIRST on every search — zero env config needed on Render. */
-  'https://old.reddit.com/search.json?q={query}+nsfw&include_over_18=on' +
-  ',https://www.pornpics.com/search/{query}' +
-  ',https://www.babehub.com/gallery/{query}' +
+  'https://realbooru.com/index.php?page=post&s=list&tags={query}' +
+  ',https://xbooru.com/index.php?page=dapi&s=post&q=index&tags={query}&limit=30' +
+  ',https://rule34.xxx/index.php?page=post&s=list&tags={query}' +
+  ',https://tbib.org/index.php?page=post&s=list&tags={query}' +
   ',https://www.darknaija.com/?s={query}' +
-  ',https://www.pichunter.com/search/{query}' +
   ',https://tenor.com/search/{query}-porn-gifs' +
   ',https://giphy.com/search/{query}+porn')
   .split(/[\n,]+/).map(function(s){ return s.trim(); })
   .filter(function(s){ return /^https?:\/\//i.test(s); })
   .filter(function(s, i, a){ return a.indexOf(s) === i; });
 
-/* v71.3 HARD-CODED SCRAPER SITES — the exact values from
+/* v71.4 HARD-CODED SCRAPER SITES — the exact values from
  * repo-intelligent-scraper/my_links.json (slots 1-7). The panel ALWAYS
  * shows this list, even when the scraper service is offline or the
- * my_links.json file is missing. Edit BOTH places together. */
+ * my_links.json file is missing. Edit BOTH places together.
+ * EVERY slot verified live 2026-09-27 (extraction + download probe). */
 const HARD_LINKS = [
-  { slot:1, name:'Reddit NSFW (Amateur/Real)',      url:'https://old.reddit.com/search.json?q={query}+nsfw&include_over_18=on', type:'image', enabled:true  },
-  { slot:2, name:'Pornpics (High-Res Stills)',      url:'https://www.pornpics.com/search/{query}',      type:'image', enabled:true  },
-  { slot:3, name:'Babehub (Gallery Archive)',       url:'https://www.babehub.com/gallery/{query}',      type:'image', enabled:true  },
-  { slot:4, name:'DarkNaija (Realistic Porn)',      url:'https://www.darknaija.com/?s={query}',         type:'image', enabled:true  },
-  { slot:5, name:'Pichunter (Realistic Porn)',      url:'https://www.pichunter.com/search/{query}',     type:'image', enabled:true  },
-  { slot:6, name:'Tenor Porn GIFs (The Loop King)', url:'https://tenor.com/search/{query}-porn-gifs',   type:'gif',   enabled:true  },
-  { slot:7, name:'Giphy Adult (Polished Loops)',    url:'https://giphy.com/search/{query}+porn',        type:'gif',   enabled:true  }
+  { slot:1, name:'Realbooru (Real People, Full-Res)',     url:'https://realbooru.com/index.php?page=post&s=list&tags={query}',                    type:'image', enabled:true  },
+  { slot:2, name:'Xbooru DAPI (Full-Res XML Direct)',     url:'https://xbooru.com/index.php?page=dapi&s=post&q=index&tags={query}&limit=30',      type:'image', enabled:true  },
+  { slot:3, name:'Rule34.xxx (Biggest Archive, Full-Res)',url:'https://rule34.xxx/index.php?page=post&s=list&tags={query}',                       type:'image', enabled:true  },
+  { slot:4, name:'TBIB (Big Image Board Fallback)',       url:'https://tbib.org/index.php?page=post&s=list&tags={query}',                         type:'image', enabled:true  },
+  { slot:5, name:'DarkNaija (Real-Porn Blog Fallback)',   url:'https://www.darknaija.com/?s={query}',                                             type:'image', enabled:true  },
+  { slot:6, name:'Tenor Porn GIFs (The Loop King)',       url:'https://tenor.com/search/{query}-porn-gifs',                                       type:'gif',   enabled:true  },
+  { slot:7, name:'Giphy Adult (Polished Loops)',          url:'https://giphy.com/search/{query}+porn',                                            type:'gif',   enabled:true  }
 ];
 
 const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
@@ -6243,7 +6246,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71.3</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71.4</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -6264,7 +6267,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v71.3 — dual account</h1>
+<h1>BreadBot v71.4 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">

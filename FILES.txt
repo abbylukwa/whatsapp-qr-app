@@ -1,54 +1,34 @@
-whatsapp-qr-app v69 — file list
-server.js          BreadBot v69 (dual-account, doc brain, study buddy, buttons,
-                   load-tested) + v69 THE AUDIT BUILD: admin commands accepted in ANY
-                   chat (both accounts), school fromMe=admin + school LID persisted,
-                   bot-LID chat guard, dynamic AI POOL (API_1..N env slots,
-                   auto-detect, round-robin load split, cooldown + auto-revive),
-                   errors-only capped admin digest, school OBSERVE MODE (AI triage,
-                   anti-hallucination grounding), creds.update LID learning, main
-                   group metadata re-sync, honest reply-rate + v68.7 MESSAGE DELIVERY: admin fromMe processed
-                   on both accounts, adminDmChat instant AI replies, bot-offline
-                   self-chat warning, !st scraper test, PANEL 🧪 Scraper Test
-                   card + /admin/scraper-test, boot AI detection + v68.6 HUMAN
-                   MODE: reads wait a random 5-90s (admin 2-8s), 70% of night
-                   messages stay unread until morning, DM cycle 75s ±35% jitter,
-                   oldest-first DM picking, AI quiet hours 23:00-06:00 + v68.5
-                   AI DM-ONLY (AI chats ONLY in DMs on the groups account,
-                   greeting = fresh conversation, 5-message memory) + v68.4
-                   one-admin conflict routing
-package.json       69.0.0 (pdf-parse + mammoth added, pdfkit removed)
+whatsapp-qr-app v71 — file list
+server.js          BreadBot v71 (6,591 lines) — THE COMPLETE BUILD, test files removed
+                   from the repo (the dev suite lives outside; all 618 assertions green).
+                   Everything since v67 is inside: dual-account doc brain, admin
+                   commands in ANY chat (both accounts), school fromMe=admin + LID
+                   persisted, AI POOL (API_1..N auto-detect, round-robin, cooldown +
+                   auto-revive), school OBSERVE MODE (AI triage, anti-hallucination),
+                   HUMAN MODE (5-90s reads, night hold, quiet hours, jittered cycle),
+                   AI DM-only with 5-message memory + greeting reset, v70 SESSION
+                   BACKUP (SESSION_B64_* restore-on-boot, no QR after redeploys),
+                   MYLINKS tried FIRST on every search AND gif, hotlink-safe
+                   4-candidate downloads, 90s boot watchdogs both accounts, AI
+                   auto-chat OFF for the admin (STUDY_BUDDY=false, ask <q> to use),
+                   ALL logs panel-only + 30-min janitor + 🧹 Clear, human-persona DM
+                   AI (Abby — never location, never meetups, never AI)
+package.json       71.0.0 (pdf-parse + mammoth, ytdl-free)
 package-lock.json  regenerated (ytdl-free)
 render.yaml        Render deploy config
 build.sh           Render build script
-env                demo env file — v69 AI POOL slots API_1..API_8 (+ legacy keys;
-                   values empty — paste yours, values never ship in zips)
-.gitignore         covers env, auth_info*, state JSONs
-.env.example       all config vars documented (incl. v69 AI pool + observe mode)
-school_data.json   your timetable + assignments (editable)
-CHANGES.md         v69 + v68.7 + v68.6 + v68.5 + v68.4 + v68.3 + v68.2 + v68.1 + v67 → v68 change log (with test evidence)
+env                demo env file — API_1..8 + MYLINKS + SESSION_B64_* + STUDY_BUDDY
+                   (values empty — paste yours; real keys live in Render, never in git)
+.gitignore         covers env, auth_info*, state JSONs, node_modules
+.env.example       all config vars documented (AI pool + MYLINKS + session backup)
+CHANGES.md         v71 + v70 + v69 + v68.x + v67 changelog (with test evidence)
 FILES.txt          this file
-tools/test_full.js    164 component tests (DM cmds, admin cmds, scraper trigger
-                      words, duplicate suppression, 5-msg history, school gate,
-                      updates filter) — ALL PASSING
-tools/test_v684.js    42 one-admin-two-bots routing tests (ownership, claims,
-                      doc ownership, my_links) — ALL PASSING
-tools/test_v685.js    43 AI-DM-only tests (group chat gone, greeting restart,
-                      5-message memory, single-text prompt fix) — ALL PASSING
-tools/test_v686.js    43 HUMAN MODE tests (read delays, night hold, quiet hours,
-                      oldest-first picking, cycle jitter, flood valve) — ALL PASSING
-tools/test_v687.js    55 v68.7 tests (adminDmChat instant replies, bot-offline
-                      warning, !st scraper 3-step, panel scraper-test endpoint +
-                      card, boot AI detect, QR honesty) — ALL PASSING
-tools/check_panel_js.js  panel inline-JS syntax guard (compiles the <script>
-                      inside PANEL_HTML as real JS) — PARSING CLEAN
-tools/test_v68.js     65 unit tests (parser, buttons, filters, PDF/DOCX roundtrip)
-tools/test_casual.js  v67 casual-parser tests (still passing)
-tools/test_v683.js    53 v68.3 tests (fromMe fix, !test, reconnect state,
-                      panel split, scraper direct-links guarantee)
-tools/boot_test.js    17 boot checks (real server boot + pipeline inject)
-tools/loadtest.js     load-test driver
-tools/results/     load-test JSON results
-tools/fixtures/sample_assignment.docx  test fixture for the docx reader
+
+Test files are NOT part of the repo as of v71 — they live in the dev workspace
+(618 assertions: test_full 164, test_v70 99, test_v68 65, test_v687 55,
+test_v683 53, test_v685 43, test_v686 43, test_v684 42, test_casual 17,
+test_v69 17, boot_test 20). Deploy needs none of them.
 
 Not shipped (recreated automatically on first boot):
-dm_histories.json, learning_data.json, policy_state.json, group_settings.json
+dm_histories.json, learning_data.json, policy_state.json, group_settings.json,
+group_registry.json, joined_groups.json, school_data.json

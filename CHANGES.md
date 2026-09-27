@@ -1,3 +1,101 @@
+# BreadBot v71 — whatsapp-qr-app
+
+## v71 — TEST-FREE COMPLETE BUILD
+
+WHAT: the complete bot, exactly v70 inside — with ONE change: the
+`tools/` test files are no longer part of the repository. The repo now
+carries ONLY the files the app needs to run: server.js, package.json
+(71.0.0), package-lock.json, render.yaml, build.sh, env, .env.example,
+.gitignore, CHANGES.md, FILES.txt.
+
+WHY: deploys pull from GitHub — tests are dev-time tooling, not runtime
+files, and uploading 15 test files + a fixture on every change was noise
+(the boss's live upload hit exactly this).
+
+VERSION STRINGS: menu, self-test, boot banners and panel all say v71;
+package.json is 71.0.0. No behaviour changed — every v70 fix is live
+(session backup, MYLINKS-first on search AND gif, hotlink-safe
+4-candidate downloads, boot watchdogs, AI off for the admin on BOTH
+accounts, panel-only logs + 30-min janitor + Clear button, Abby persona
+with never-meet/never-location rails).
+
+TESTS: the full suite still exists in the dev workspace and stays the
+release gate — 618 assertions ALL GREEN on this exact build (test_full
+164, test_v70 99, test_v68 65, test_v687 55, test_v683 53, test_v685 43,
+test_v686 43, test_v684 42, test_casual 17, test_v69 17, boot_test 20).
+Version assertions were updated to v71.
+
+---
+
+
+## v70 — THE LIVE-AGAIN BUILD (your 5 reports → code locations → fixes)
+
+### 1. "not requesting the files from my actual links — download 500"
+WHERE: scraper `media.js → fetchWithUaFallback()` — it retried only
+User-Agents and NEVER sent a Referer; pngtree's CloudFront CDN
+(dygtyjqp7pi0m.cloudfront.net) hotlink-blocks every request without
+`Referer: https://pngtree.com/`, so the scraper threw → HTTP 500.
+Also WHERE (bot): `!st` + panel test downloaded ONLY `s.images[0]` —
+one blocked CDN URL killed the whole delivery.
+FIX: (a) media.js v2.5 attempt chain = honest bot UA → browser UA →
+browser UA + mapped/derived Referer+Origin (+Accept), retries on
+403/404/418/429, human error message instead of a bare 500.
+(b) bot `scraperDownloadFirstWorking()` — tries up to 4 results and
+delivers the first that works (used by !st and the panel test).
+
+### 2. "school boot is stuck"
+WHERE: `connectSchoolBot()` waited forever if the socket never fired
+open/QR/close (a stale key file mixed with restored creds stalls Baileys
+silently — no open, no QR, no close, no log).
+FIX: (a) restoreSessionBlob() now WIPES the auth folder before writing
+creds.json — no more stale-key mixes. (b) 90s BOOT WATCHDOGS on BOTH
+accounts: no open/QR/close in 90s → clean auto-restart with a log line.
+QR patience also raised 5 → 8 renewals.
+
+### 3. "AI must not respond to the admin — it interferes with commands"
+WHERE: `handleSchoolAdminCommand()` last line — EVERY non-command admin
+DM went to `studyBuddyChat()` (AI auto-reply).
+FIX: STUDY_BUDDY now defaults to FALSE. AI answers only on an explicit
+`ask <question>` prefix (one-time hint tells you). Commands never
+trigger AI. STUDY_BUDDY=true restores old always-on chat.
+
+### 4. "no download logs on WhatsApp — panel only"
+WHERE: `pushLog()` fed every error/warn — including scraper/download
+errors — into the WhatsApp digest.
+FIX: source 'scraper' is filtered from the WhatsApp digest (panel keeps
+everything). Digest now rate-limits on failure too (a dead variable
+`lastDigestAt` was silently wasted in the finally block).
+
+### 5. "logs should be periodically cleared"
+WHERE: buffers were size-capped but never time-cleared.
+FIX: `startLogJanitor()` — every 30 min: panel logs trimmed to newest
+200, live feed to newest 120, WhatsApp digest bus emptied, scraper /temp
+self-cleanup. Logs live on the panel and clear themselves.
+
+### Session backup — never re-scan after a deploy (v70 flagship)
+Render's ephemeral disk wipes auth on every deploy (that is why the bot
+kept ending at the QR card and "stopped receiving"). Panel card 💾
+Session Backup exports each account's creds.json as a base64 blob →
+paste once into env `SESSION_B64_GROUPS` / `SESSION_B64_SCHOOL` → every
+future boot restores automatically. `POST /admin/session-restore` also
+restores a pasted blob live (no redeploy).
+
+### MY LINKS end-to-end (v70 + scraper v2.5)
+`MYLINKS` env on the BOT is forwarded with every /search; scraper
+merges file + env + per-request links, tries YOURS FIRST and puts their
+results FIRST (bot downloads images[0] — previously your sites were
+buried last). my_links.json is HOT-RELOADED (edit → next search, no
+restart). `/my-links` shows per-slot diagnostics (count/error/ts).
+Scraper /temp self-cleans every 30 min.
+
+### Tests
+tools/test_v70.js (64 assertions incl. a REAL session-blob round-trip:
+dirty folder + stale keys → restore → stale keys wiped) + all 11 prior
+suites green: boot 17 · full 164 · v68 65 · casual 17 · v683 53 ·
+v684 42 · v685 43 · v686 43 · v687 55 · v69 17 · v70 64 = 536.
+
+---
+
 # BreadBot v69 — whatsapp-qr-app
 
 ## v69 — THE AUDIT BUILD (every logged failure traced to a line)

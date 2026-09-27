@@ -1,39 +1,69 @@
 # ══════════════════════════════════════════════════════════════
-#  BreadBot v69 — ENVIRONMENT
+#  BreadBot v70 — ENV DEMO (copy the lines you need into Render env)
 #
-#  ── THE AI POOL (v69) — add as many APIs as you want ──
-#  Put a key in a numbered slot. The provider behind each key is
-#  AUTO-DETECTED from the key shape:
-#
+#  RULE: empty slot = skipped. The bot works with whatever is there.
+#  ──────────────────────────────────────────────────────────────
+#  ── THE AI POOL — paste any provider key into a numbered slot ──
+#  The provider behind each key is AUTO-DETECTED from its shape:
 #      AIza…        → Google Gemini
 #      sk-or-v1-…   → OpenRouter
 #      gsk_…        → Groq
 #      sk-…         → OpenAI
 #      anything else → Rewind (your current working endpoint)
-#
 #  Per-slot overrides (optional):
 #      API_1_NAME=venice
 #      API_1_URL=https://api.venice.ai/api/v1/chat/completions
 #      API_1_MODEL=venice-uncensored
-#
-#  HOW IT SPLITS THE WORK: every task goes to the NEXT healthy
+#  HOW THE WORK SPLITS: every task goes to the NEXT healthy
 #  provider (round-robin). 1 working API = it does everything.
-#  5 working APIs = the tasks split 5 ways. A provider that fails
-#  twice goes on cooldown (5 min, doubling to 30 min) and a
-#  background check every 5 min revives it automatically when it
-#  answers again — top up a key, no restart needed.
+#  5 working APIs = tasks split 5 ways. A provider that fails
+#  twice goes on cooldown (5→30 min) and auto-revives when it
+#  answers again — add/replace keys anytime.
+#
+#  DEMO — actual values:
+#      API_1=AIzaSyC...your-real-gemini-key
+#      API_2=sk-or-v1-8f3a...your-real-openrouter-key
+#      API_3=gsk_Xy9...your-real-groq-key
+#      API_4=sk-proj-7Hk...your-real-openai-key
+#      API_5=           (empty = skipped, fills in later)
 # ══════════════════════════════════════════════════════════════
 
 PORT=10000
 
-# You = the one admin of BOTH bots (your own number)
+# You = the one admin of BOTH bots (your own WhatsApp number)
 ADMIN_PHONE=263777627210
 
-# Web panel login (change before any public demo!)
-ADMIN_USER=admin
-ADMIN_PASS=CHANGE_THIS_TO_A_STRONG_PASSWORD
+# ── v70 MY LINKS — YOUR image sites, tried FIRST on every search ──
+# Comma or newline separated. Three URL forms all work:
+#     https://mysite.com                          (bare domain — also
+#              boosted via Bing "query site:mysite.com")
+#     https://mysite.com/free-animals-png/fish    (category page — fetched AS-IS)
+#     https://mysite.com/search?q={query}         ({query} = search word)
+# Hotlink-protected CDNs (pngtree/cloudfront…) are downloaded with the
+# right Referer automatically, and the bot retries the next result.
+# Where you SEE it worked: panel 🧪 Scraper Test shows "(N from YOUR
+# MYLINKS)", !st replies "📍 N from YOUR sites", scraper /my-links
+# shows per-slot diagnostics (count / error / time).
+#
+# DEMO — actual values:
+#     MYLINKS=https://pngtree.com, https://wallpapercave.com, https://www.cleanpng.com
 
-# Your scraper deployment
+MYLINKS=
+
+# ── v70 SESSION BACKUP — NEVER re-scan QRs after a deploy again ──
+# Render's free disk is wiped on every deploy (that is why the bot
+# "stopped receiving messages" — it sat at the QR card). Fix, ONE time:
+#   1. deploy v70, scan QR 1 (BOT phone) + QR 2 (YOUR phone)
+#   2. panel → 💾 Session Backup → Copy GROUPS blob → paste its value
+#      into Render env SESSION_B64_GROUPS
+#   3. Copy SCHOOL blob → SESSION_B64_SCHOOL
+#   4. redeploy once — from now on every boot auto-restores. No QR.
+#
+# DEMO — actual values (long base64 strings you copy from the panel):
+#     SESSION_B64_GROUPS=eyJ2IjoxLCJmaWxlcyI6eyJjcmVkcy5qc29uIjoi...
+#     SESSION_B64_SCHOOL=eyJ2IjoxLCJmaWxlcyI6eyJjcmVkcy5qc29uIjoi...
+
+# Your scraper deployment (the bot sends MYLINKS to it automatically)
 SCRAPER=https://intelligent-scraper.onrender.com
 
 # ── AI POOL SLOTS — paste keys below, leave empty = unused ──
@@ -61,9 +91,39 @@ GEMINI_MODEL=gemini-2.0-flash
 OPENAI_KEY=
 OPENAI_MODEL=gpt-4o-mini
 
+# Main group auto-set from this invite link once QR 1 connects
+# DEMO — actual value:
+#     ADMIN_GROUP_LINK=https://chat.whatsapp.com/Kf8xR2pQ1ZcEOD7hTg5sVw
+ADMIN_GROUP_LINK=
+
 # ── School account strictness (leave true) ──
 SCHOOL_STRICT_ADMIN=true
 
-# ── v69 School observe mode (group messages → AI triage → admin) ──
+# ── v70: AI auto-chat for the admin — DEFAULT OFF ──
+# It kept interfering with your commands. Commands always work;
+# "ask <question>" gives you an AI answer even when this is false.
+# Set true to restore the old always-on study-buddy chat.
+STUDY_BUDDY=false
+
+# ── v70: AI PERSONA (the girl who answers DMs) ──
+# Default: Abby Faith Sithole, 23, lives in Harare CBD, learning/studying.
+# She replies like a real girl: ONE short casual message, no "I'm happy
+# to help" filler, never admits being an AI, NEVER shares her exact
+# location and NEVER agrees to meet up (safety rails are hard-coded).
+# Optional overrides:
+#     AI_NAME=Tanya
+#     AI_FULL_NAME=Tanya Moyo
+#     AI_BIO=You are Tanya, 22, from Bulawayo...   (full custom persona)
+AI_NAME=
+AI_FULL_NAME=
+AI_BIO=
+
+# ── v70: LOGS — web panel ONLY (nothing goes to WhatsApp) ──
+# Every log lives on the panel Logs cards, auto-clears every 30 min and
+# has a 🧹 Clear button. Set LOG_TO_ADMIN=true ONLY if you ever want the
+# old "🚨 Errors" digests in your WhatsApp again (not recommended).
+LOG_TO_ADMIN=false
+
+# ── School observe mode (group messages → AI triage → admin) ──
 # How long school groups are watched before ONE triage pass runs:
 SCHOOL_OBSERVE_WINDOW_SEC=120

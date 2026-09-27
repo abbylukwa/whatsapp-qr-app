@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "69.0.0",
-  "description": "BreadBot v69 \u2014 dual-account (groups + school), dynamic AI pool (API_1..N), admin commands anywhere, school observe mode, errors-only digest, load-tested",
+  "version": "71.0.0",
+  "description": "BreadBot v70 - dual-account (groups + school), dynamic AI pool (API_1..N), MY-LINKS-FIRST scraping, session backup (no re-scan after deploy), panel-only logs, human persona AI",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

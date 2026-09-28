@@ -556,3 +556,23 @@ dedup rules, flood gate, dual-QR boot flow, Open-Meteo weather (Harare/Bindura).
 The public repo previously leaked live API keys (OpenAI/Gemini/Venice/Rewind) in the
 `env` file. Those keys were REMOVED from this package — you must still ROTATE them
 at the providers; nothing in this zip contains valid keys.
+
+## v72.0.0 — 2026-09-27 — VIDEO DROPS SCHEDULER + member video requests
+NEW FILE videoScheduler.js — main-group video drops:
+- 6 runs/day on Harare time (TZ_OFFSET_HOURS-aware; default hours 0,4,8,12,16,20)
+- 15 videos per run (SCHED_PER_RUN), every video from a DIFFERENT query
+  (20-query variety pool, round-robin; per-video exclude list of recent titles)
+- human-like pacing: random 25-55s delay between sends (SCHED_DELAY_MIN_MS/MAX_MS)
+- state persists in data/video-scheduler.json (survives restarts)
+- admin: !sched (status) · !sched here | on | off | test | run | queries
+- fully injectable deps (sendVideo/fetchVideo/log) — tested 20/20 incl. 2 REAL
+  end-to-end videos through the live v2.8.0 scraper (xnxx source)
+
+MEMBER VIDEO REQUESTS (general chat):
+- "video <query>" in groups now returns a REAL video (YouTube → xnxx →
+  xhamster → eporner chain via the scraper) — it used to fall into the GIF
+  channel, which is why members got wrong files.
+- rate limited: 3 video requests/hour per member (admins unlimited).
+- vague queries ("send a video") are ignored instead of guessing.
+
+Version 71.5.0 → 72.0.0 (panel title, COMMAND_LIST, boot messages).

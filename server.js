@@ -992,6 +992,43 @@ async function testAllProviders(){
   return providerReport;
 }
 
+/* ══════════════════════════════════════════════════════════════
+ *  v71.5 THE AI BRAIN — decisions made by AI, not keyword rules.
+ *  brain.js rides the SAME provider pool (API_1..N, round-robin,
+ *  cooldowns). Every incoming message first asks the brain:
+ *    run a command · fetch media · chat · stay silent
+ *  The old regex detectors stay as FALLBACK for AI-down moments.
+ *  Toggle: !brain on|off|status  ·  env AI_BRAIN=false.
+ * ══════════════════════════════════════════════════════════════ */
+const brain = require('./brain');
+brain.initBrain({
+  getProviders: healthyAiProviders,
+  markOk:  markAiOk,
+  markFail: markAiFail,
+  log: pushLog
+});
+/* ═══ v72 MAIN-GROUP VIDEO SCHEDULER — 6 drops/day (Harare time),
+ * 15 videos per run, human-like delays, different query → different
+ * video. Admin: !sched here | on | off | test | run | status ═══ */
+const videoScheduler = require('./videoScheduler');
+videoScheduler.initVideoScheduler({
+  sendText: (jid, text) => sendBuffer(jid, { text }, 3, 'slow', 'group', false),
+  sendVideo: async (jid, vid, caption) => {
+    await sendMediaUrl(jid, vid.mediaUrl, {
+      kind: 'video', mimetype: vid.mimetype || 'video/mp4', caption,
+      priority: 3, lane: 'slow', taskType: 'group', typing: false
+    });
+    resetDailyStats(); dailyStats.videosSent++;
+  },
+  fetchVideo: (query, exclude) => scraperVideo(query, exclude),
+  log: pushLog
+});
+function recentGroupTexts(jid, n){
+  const d = learningData.get(jid);
+  if (!d || !d.messages || !d.messages.length) return [];
+  return d.messages.slice(-n).map(x => String(x.text || '').slice(0, 120));
+}
+
 /* v69: auto-revive — every 5 min, quietly re-test providers that are
  * cooling down or failing; a key that got topped up comes back on its
  * own without a restart. */
@@ -3534,9 +3571,39 @@ async function runDmAiBatch(){
  *  DM PROCESSING
  * ══════════════════════════════════════════════════════════════ */
 async function processDM(item){
-  const { msg, text, chatJid, senderJid, pushName, phone, intent, lang } = item;
+  const { msg, text, chatJid, senderJid, pushName, phone, lang } = item;
   const langName = LANG_NAMES[lang] || 'English';
   if (containsForbidden(text)) return;
+
+  /* ═══ v71.5 AI BRAIN — one call decides what this DM means ═══
+   * The brain understands English/Shona/slang INTENT, so "ndipe
+   * mafile ekute" no longer needs a regex. It also says IGNORE on
+   * junk — the single biggest fix for unnecessary DM replies. The
+   * regex detectors below stay as the AI-down fallback. ═══ */
+  let brainDec = null;
+  if (brain.isEnabled()){
+    try {
+      brainDec = await brain.aiDecide(text, {
+        mode:'dm', senderName:pushName,
+        recent: (item.messages || []).slice(-6).map(m => String(m.text || '').slice(0, 120)),
+        nsfwWindow: isNsfwWindow()
+      });
+      if (brainDec && brainDec.action === 'ignore'){
+        pushLog('info','brain','dm ignore: "' + String(text).slice(0, 40) + '"');
+        return;                                   /* silence — no forced reply */
+      }
+    } catch(e){ pushLog('warn','brain','dm: ' + e.message); }
+  }
+  const brainMedia = !!(brainDec && ['media','gif','video','music'].includes(brainDec.action)
+                         && (brainDec.query || '').trim());
+  let intent = brainMedia
+    ? { type: brainDec.action === 'media' ? 'image' : brainDec.action, query: brainDec.query.trim() }
+    : item.intent;
+  /* a brain "chat" verdict flows to the persona chat at the bottom;
+   * a media verdict with an empty query degrades to chat too */
+  const brainChat = !brainMedia && brainDec && brainDec.action === 'chat';
+  const nsfwHit  = brainDec ? (brainChat && brainDec.nsfw === true) : detectNsfw(text);
+  const linkHit  = brainDec ? (brainDec.action === 'link') : detectGroupLinkRequest(text);
 
   if (intent && intent.type === 'music'){
     try {
@@ -3551,7 +3618,7 @@ async function processDM(item){
     return;
   }
 
-  if (detectNsfw(text) && nsfwRoleplayEnabled){
+  if (nsfwHit && nsfwRoleplayEnabled){
     if (isNsfwWindow() || isAdminSender(msg, senderJid)){
       const rp = await nsfwRoleplay(pushName, text);
       if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow', 'dmreply', true); resetDailyStats(); dailyStats.dmsReplied++; }
@@ -3562,7 +3629,7 @@ async function processDM(item){
     }
   }
 
-  if (detectGroupLinkRequest(text)){
+  if (linkHit){
     await sendBuffer(chatJid, { text:'Join our group:\n'+ADMIN_GROUP_LINK }, 2, 'slow', 'dmreply', true);
     resetDailyStats(); dailyStats.dmsReplied++;
     return;
@@ -4057,7 +4124,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v71 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v72 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -4077,6 +4144,16 @@ CASUAL — no "!" needed in DM:
 BASICS
 !help / !ping / !status / !jobs / !flow
 !test / !testall / !aitest
+!brain on|off|status — AI decision engine (v71.5)
+
+VIDEO DROPS (v72)
+!sched                 — scheduler status
+!sched here            — set THIS group as the main drop group
+!sched on | off        — enable/disable the 6x/day drops
+!sched test            — send one video now
+!sched run             — full 15-video drop now
+!sched queries         — show the query variety pool
+(videos: YouTube → xnxx → xhamster → eporner, different query = different video)
 !scraperstatus / !whoami / !stats / !summary
 !logs / !errors / !count / !groups / !inbox
 !mode / !groupchat on|off
@@ -4202,6 +4279,60 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
 
   switch(cmd){
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
+    /* ═══ v71.5 AI BRAIN — toggle + live stats ═══ */
+    case 'sched': {
+      /* ═══ v72 MAIN-GROUP VIDEO SCHEDULER — set/enable/run ═══ */
+      const arg = (args[1] || '').toLowerCase();
+      if (arg === 'here') {
+        if (!chatJid.endsWith('@g.us')) { await reply('❌ Run !sched here INSIDE the group that should receive the drops.'); break; }
+        videoScheduler.setGroup(chatJid);
+        await reply('🎬 Main group SET — scheduled video drops will land here (' + chatJid + ').\nTurn on with: !sched on');
+        break;
+      }
+      if (arg === 'on') { videoScheduler.enable(); await reply('🎬 Scheduler ON — drops go out ' + videoScheduler.status().nextHourHarare + ' (Harare time).'); break; }
+      if (arg === 'off') { videoScheduler.disable(); await reply('🛑 Scheduler OFF.'); break; }
+      if (arg === 'test') {
+        await reply('🧪 Sending ONE video to the main group now...');
+        const r = await videoScheduler.runOnce(1, true);
+        await reply(r.ok ? '✅ Test video sent.' : '❌ ' + (r.error || 'failed'));
+        break;
+      }
+      if (arg === 'run') {
+        await reply('🎬 Manual full run triggered — 15 videos with human delays. Watch the main group.');
+        videoScheduler.runOnce(videoScheduler.PER_RUN).catch(() => {});
+        break;
+      }
+      if (arg === 'queries') {
+        await reply('🎬 Query variety pool (' + videoScheduler._queries().length + ') — every video in a run uses a DIFFERENT query:\n' + videoScheduler._queries().join(' · '));
+        break;
+      }
+      const s = videoScheduler.status();
+      await reply('🎬 VIDEO SCHEDULER — ' + (s.enabled ? 'ON' : 'OFF') + (s.running ? ' (running now)' : '') + '\n' +
+        'Main group: ' + (s.groupJid ? s.groupJid : 'NOT SET (!sched here)') + '\n' +
+        'Times (Harare): ' + s.nextHourHarare + '\n' +
+        'Per run: ' + s.perRun + ' videos · delay ' + s.delaySec + 's\n' +
+        'Query pool: ' + s.queryCount + ' queries · different query per video\n' +
+        'Sent so far: ' + s.sent + ' in ' + s.runs + ' runs\n' +
+        (s.recent.length ? 'Recent: ' + s.recent.slice(-3).join(' | ').slice(0, 120) : ''));
+      break;
+    }
+    case 'brain': {
+      const arg = (args[1] || '').toLowerCase();
+      if (arg === 'on' || arg === 'off'){
+        brain.setEnabled(arg === 'on');
+        await reply('🧠 AI Brain ' + (arg === 'on' ? 'ON — every message is now decided by AI (keyword rules stay as fallback).' : 'OFF — back to keyword rules only.'));
+        break;
+      }
+      const s = brain.brainStats();
+      await reply('🧠 AI BRAIN — ' + (s.enabled ? 'ON' : 'OFF') + '\n' +
+        'Providers in pool: ' + s.providers + '\n' +
+        'Decisions made: ' + s.decisions + ' (cache hits ' + s.cacheHits + ')\n' +
+        'Calls this minute: ' + s.callsLastMin + '/' + s.maxPerMin + '\n' +
+        'Fell back to rules: ' + s.fallbacks + '\n' +
+        'Rate-limited: ' + s.rateLimited + '\n' +
+        'Breakdown: ' + (Object.keys(s.breakdown).length ? Object.entries(s.breakdown).map(([k2,v2]) => k2 + ' ' + v2).join(' · ') : 'none yet'));
+      break;
+    }
     case 'ping': await reply(`Pong!\nStatus: ${connectionStatus}\nUptime: ${Math.floor((Date.now()-botStartTime)/1000)}s`); break;
     case 'test': {
       /* ═══ v68.3 — FULL SELF-DIAGNOSTIC ═══
@@ -4211,7 +4342,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const up = Math.floor((Date.now() - botStartTime) / 1000);
       const mem = (process.memoryUsage().rss / 1048576).toFixed(0);
       const L = [];
-      L.push('🧪 BreadBot v71 SELF-TEST');
+      L.push('🧪 BreadBot v72 SELF-TEST');
       L.push('Uptime: ' + Math.floor(up/3600) + 'h ' + Math.floor((up%3600)/60) + 'm | RAM: ' + mem + 'MB');
       L.push('');
       L.push('— ACCOUNTS —');
@@ -5067,6 +5198,76 @@ function checkFlood(){
 /* ══════════════════════════════════════════════════════════════
  *  MAIN MESSAGE HANDLER
  * ══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+ *  v71.5 AI BRAIN — GROUP DECISION EXECUTOR
+ *  Turns a brain decision into the SAME sends the old regex chain
+ *  made (same senders, same gates, same counters). Returns true if
+ *  the decision consumed the message (caller stops); false/null →
+ *  caller falls back to the legacy regex chain.
+ * ══════════════════════════════════════════════════════════════ */
+async function brainHandleGroup(chatJid, dec, opts){
+  if (!dec) return false;
+  const isAdmin = !!(opts && opts.isAdmin);
+  const nsfwWin = !!(opts && opts.nsfwWin);
+
+  /* the AI itself says silence — the #1 cure for unnecessary sends */
+  if (dec.action === 'ignore' || dec.action === 'chat') return true;
+
+  if (dec.action === 'link'){
+    await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true);
+    return true;
+  }
+
+  const nsfw = dec.nsfw === true;
+  if (nsfw && !isAdmin && !nsfwWin){
+    await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group', true);
+    return true;
+  }
+  const q = (dec.query || '').trim();
+  if (!q) return false;                        /* no usable query → legacy chain */
+
+  if (dec.action === 'music'){
+    try {
+      const r = await scraperMusic(q);
+      if (r.ok){
+        await sendBuffer(chatJid, { text:r.title+' - sending...' }, 3, 'slow', 'group', true);
+        await sendMediaUrl(chatJid, r.mediaUrl, {
+          kind:'audio', mimetype:r.mimetype, caption:r.title,
+          priority:3, lane:'slow', taskType:'group', typing:true
+        });
+        return true;
+      }
+    } catch(e){ pushLog('error','brain','music: '+e.message); }
+    return false;
+  }
+  if (dec.action === 'gif' || dec.action === 'video'){
+    try {
+      const r = await scraperGif(q, nsfw);
+      if (r.ok && r.gifs.length){
+        await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
+        resetDailyStats();
+        if (dec.action === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
+        if (nsfw) dailyStats.nsfwSent++;
+        return true;
+      }
+    } catch(e){ pushLog('error','brain','gif: '+e.message); }
+    return false;
+  }
+  if (dec.action === 'media'){
+    try {
+      const r = await scraperSearch(q, nsfw);
+      if (r.ok && r.images.length){
+        await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
+        resetDailyStats(); dailyStats.picsSent++;
+        if (nsfw) dailyStats.nsfwSent++;
+        return true;
+      }
+    } catch(e){ pushLog('error','brain','media: '+e.message); }
+    return false;
+  }
+  return false;
+}
+
 async function handleMessage(msg){
   if (!sock) return;
 
@@ -5238,6 +5439,37 @@ async function handleMessage(msg){
         return;
       }
     }
+    /* ═══ v71.5 AI BRAIN — the boss's words, understood by AI ═══
+     * Reached only when the "!" command, the casual aliases and the
+     * task parser ALL failed. The brain maps plain language onto a
+     * real command ("how many dms today" → !stats) or calls it chat
+     * / noise. No more keyword-rule misfires on admin texts. */
+    if (text && text.length <= 300 && brain.isEnabled()){
+      try {
+        const dec = await brain.aiDecide(text, { mode:'admin', senderName:pushName, isGroup });
+        if (dec && dec.action === 'command' && dec.command){
+          const synth = '!' + dec.command + (dec.args ? ' ' + dec.args : '');
+          const hitB = contentBlocked(synth);
+          if (hitB){
+            pushLog('error','admin',`Brain command blocked (${hitB})`);
+            resetDailyStats(); dailyStats.policyBlocks++;
+            await adminReply(chatJid, 'Command refused.');
+            return;
+          }
+          pushLog('info','brain','admin → ' + synth);
+          await handleAdminCommand(synth, chatJid, msg);
+          return;
+        }
+        if (dec && dec.action === 'chat'){
+          /* v70 rule stands: the AI never ambushes the boss — persona
+           * chat only when STUDY_BUDDY=true, otherwise silence. */
+          if (STUDY_BUDDY_ENABLED){ await adminDmChat(chatJid, text); return; }
+          pushLog('info','brain','admin chat → silence (STUDY_BUDDY=false)');
+          return;
+        }
+        /* ignore / no decision → fall through to the v70 silence */
+      } catch(e){ pushLog('warn','brain','admin: ' + e.message); }
+    }
   }
 
   /* ═══ AUTO-JOIN — extract invite codes from ANY message ═══
@@ -5344,6 +5576,21 @@ async function handleMessage(msg){
      * requests below still work. */
 
     if (text){
+      /* ═══ v71.5 AI BRAIN decides FIRST — regex chain stays as the
+       * fallback for when the AI pool is down. The brain sees the
+       * last 6 group messages, so "that" and follow-ups make sense,
+       * and it stays silent on ordinary group chatter. ═══ */
+      if (brain.isEnabled()){
+        try {
+          const dec = await brain.aiDecide(text, {
+            mode:'group', senderName:pushName, isAdmin,
+            groupName: getGroupName(chatJid) || 'main',
+            recent: recentGroupTexts(chatJid, 6),
+            nsfwWindow: isNsfwWindow()
+          });
+          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: isNsfwWindow() })) return;
+        } catch(e){ pushLog('warn','brain','group: ' + e.message); }
+      }
       if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
       const isNsfw = detectNsfw(text);
       if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group', true); return; }
@@ -5362,16 +5609,43 @@ async function handleMessage(msg){
             }
           } catch(e){ pushLog('error','music',e.message); }
         }
-        if (gIntent.type === 'video' || gIntent.type === 'gif'){
+        if (gIntent.type === 'gif'){
           const r = await scraperGif(gIntent.query, isNsfw);
           if (r.ok && r.gifs.length){
             await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
             resetDailyStats();
-            if (gIntent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
+            dailyStats.picsSent++;
             if (isNsfw) dailyStats.nsfwSent++;
             return;
           }
-        } else {
+        }
+        if (gIntent.type === 'video'){
+          /* ═══ v72: MEMBERS CAN REQUEST SPECIFIC VIDEOS — a real video
+           * engine (YouTube → xnxx → xhamster → eporner), NOT the gif
+           * channel it used to fall into ("wrong files" complaint).
+           * Rate limit: 3 video requests/hour per member. ═══ */
+          if (!isAdmin && !videoScheduler.canRequest(senderJid)){
+            await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 3, 'slow', 'group', true);
+            return;
+          }
+          if (!isVague(gIntent.query)){
+            await sendBuffer(chatJid, { text:'🎬 Finding "' + gIntent.query + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
+            const r = await scraperVideo(gIntent.query);
+            if (r.ok){
+              if (!isAdmin) videoScheduler.recordRequest(senderJid);
+              await sendMediaUrl(chatJid, r.mediaUrl, {
+                kind: 'video', mimetype: r.mimetype || 'video/mp4',
+                caption: '🎬 ' + (r.title || gIntent.query).slice(0, 90),
+                priority: 3, lane: 'slow', taskType: 'group', typing: false
+              });
+              resetDailyStats(); dailyStats.videosSent++;
+              if (isNsfw) dailyStats.nsfwSent++;
+            } else {
+              await sendBuffer(chatJid, { text:'❌ No video for "' + gIntent.query + '" — try different words.' }, 3, 'slow', 'group', true);
+            }
+            return;
+          }
+        } else if (gIntent.type === 'image') {
           const r = await scraperSearch(gIntent.query, isNsfw);
           if (r.ok && r.images.length){
             await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
@@ -5504,8 +5778,9 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v71 ONLINE\n' +
+            'BreadBot v72 ONLINE\n' +
             'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
+            'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
@@ -6012,7 +6287,7 @@ async function connectSchoolBot(){
         });
         try {
           await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v71 SCHOOL account online\n' +
+            '🏫 BreadBot v72 SCHOOL account online\n' +
             'Bot: ' + schoolNumber + '\n' +
             'Role: admin monitor — commands + reports only (AI auto-chat OFF)\n' +
             'Send "menu" for buttons · "today" · "weather" · "ask <question>" = AI · send me PDFs/DOCX to read',
@@ -6246,7 +6521,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v71.4</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v72</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -6267,7 +6542,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v71.4 — dual account</h1>
+<h1>BreadBot v72 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">

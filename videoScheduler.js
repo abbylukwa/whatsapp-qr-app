@@ -184,6 +184,10 @@ function initVideoScheduler(d){
     loadState();
     if (state.groupJid) deps.log('info', 'sched', `state loaded — group ${state.groupJid}, ${state.enabled ? 'ON' : 'off'}, ${state.runCount} runs / ${state.sentCount} videos sent`);
     timer = setInterval(() => { tick().catch(e => deps.log('error', 'sched', 'tick: ' + e.message)); }, 60 * 1000);
+    /* v72.1: expose the api methods ON the module too — server.js calls
+     * videoScheduler.runOnce(...) / .status() / .setGroup(...) directly,
+     * which threw "not a function" before this line. */
+    Object.assign(module.exports, api);
     return api;
 }
 
@@ -221,4 +225,12 @@ const api = {
     _queries: () => QUERIES.slice(),
 };
 
-module.exports = { initVideoScheduler, PER_RUN, SCHED_HOURS, DEFAULT_QUERIES };
+module.exports = {
+    /* v72.1: api methods exported DIRECTLY on the module — server.js
+     * calls videoScheduler.runOnce(...) etc. on the module itself.
+     * (The api object alone made every !sched command throw
+     * "runOnce is not a function" on the deployed bot.) */
+    ...api,
+    initVideoScheduler,
+    PER_RUN, SCHED_HOURS, DEFAULT_QUERIES
+};

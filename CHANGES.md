@@ -1,4 +1,133 @@
-# BreadBot v71 — whatsapp-qr-app
+# BreadBot v72 — whatsapp-qr-app
+
+## v72.3 — EVERY ADMIN COMMAND VERIFIED + !nsfw actually toggles now
+
+WHY: "verify every single admin command works and remove all the
+non-nsfw fallback on the downloads".
+
+ADMIN COMMAND AUDIT (106 handler cases):
+- Static: every documented command has a handler, every alias maps,
+  ZERO dead docs. 15 commands that existed but were never documented
+  are now in !help (!teach !pending !window !schedule !schedules
+  !unschedule !cleantemp !bcad !ad !adstatus !bcastpicdm !bcastpicgroup
+  !scrapersearch !scrapergif !scrapertest + alias note).
+- NEW scripts/test_admin_cmds_live.js drives ALL 106 cases through the
+  REAL bot (stub mode + scripted scraper) and asserts each one REPLIES,
+  plus real media delivery per kind (video/audio/image/document).
+- FIXED: !bcad (and the whole broadcast family) could leave the admin
+  with NO reply when a target rejected under the cold-outreach policy —
+  the throw bubbled out of handleAdminCommand silently. The whole
+  switch is now wrapped: ANY unexpected error answers the admin with
+  "!<cmd> Err: ..." instead of silence. Live-proven: !bcad now answers
+  "Err: Policy: recipient cooldown (22h)" instead of ghosting.
+- FIXED: !nsfw on|off replied "on."/"off." and toggled NOTHING. Now a
+  real override: !nsfw on forces explicit content answered at any hour,
+  !nsfw off blocks it at all hours, !nsfw auto returns to the
+  21:00-08:00 clock, bare !nsfw reports the current state.
+- LOADTEST stub gained groupSettingUpdate + groupParticipantsUpdate so
+  the group-admin surface is reachable in tests.
+
+## v72.2 — FULL CONFLICT AUDIT: 8 real bugs found, fixed, and probe-proven
+
+WHY: "test the whole bot — make sure there is no conflicting code or
+wrong fallbacks". A static conflict scan + a new dynamic probe
+(scripts/test_conflicts.js: the REAL bot in stub mode with a scripted
+AI + scripted scraper, counting every send) found 8 real issues:
+
+1. **(HIGH) brain "video" sent GIFs** — the v72 wrong-files bug was
+   still live in the brain executor: action 'video' mapped to
+   scraperGif. Now the brain video path rides the REAL video engine
+   (scraperVideo: xnxx → xhamster → eporner) with the SAME rules as
+   the legacy branch: 3/hour member rate limit, vague-query guard.
+2. **(HIGH) policy blocked every reply for 24h** — the anti-ban
+   cold-outreach policy (24h per-recipient cooldown + daily caps)
+   gated ALL priority≥2 sends: normal group replies, DM replies,
+   scheduler video drops (only video #1 of a 15-video run went out).
+   Masked in production because Render's ephemeral disk wipes
+   policy_state.json on every deploy. Now: a chat that messaged us in
+   the last 24h is WARM — warm replies skip the gate and never start
+   cooldowns; cold outreach (ads to strangers) stays fully gated.
+3. **(HIGH) DM "video <query>" sent GIFs** — DM video intents (and the
+   admin pending-resolver) routed to the gif channel. Now: real video
+   engine + the same 3/hour rate limit in DMs.
+4. **(MED) double replies on fallback** — brain music sent its ack,
+   then a failed media send fell back to the legacy chain which
+   re-acked and re-fetched. Now: once the brain sends anything, the
+   message is consumed; legacy only retries when NOTHING was sent.
+5. **(MED) admins hit the brain twice** — admin texts ran brain ADMIN
+   mode then brain GROUP mode (two AI calls; an admin-"ignore" could
+   still become a group media send). Now: admins get exactly ONE
+   brain call; admin media requests ride the deterministic chain.
+6. **(MED) antilink verdict ignored** — a deleted link message still
+   flowed on to the brain/legacy chain (bot deleted the link then
+   replied into the group). Now the delete STOPS the flow.
+7. **(MED) NSFW mislabel backstop** — the brain path gated only on the
+   AI's own nsfw label; a mislabeled explicit query slipped out of the
+   21:00-08:00 window. Now the deterministic wordlist also gates the
+   brain query (parity with the legacy path).
+8. **(MED) !dl music→porn fallback + scraper double sweep** — a failed
+   !dl song came back as an adult clip from the xnxx chain (removed:
+   music only). The scraper ran TWO temp-cleanup intervals (15min +
+   30min) — one removed (scraper v2.8.1). The generic reconnect path
+   ended the socket with its close handler attached — sock.end()
+   re-fired close and could schedule a SECOND connectBot (428-storm
+   fuel); listeners are now detached first (same pattern as 428/440).
+
+VERIFICATION (all green):
+- scripts/test_conflicts.js 27/27 — brain video → real video + rate
+  limit (4th request blocked), backstop gate, single-ack music (ok +
+  fail), antilink stops flow, admin brain called once, AI-down
+  fallback stays on-type, ZERO gifs in any scenario.
+- tools/test_full.js 177/177 (13 new v72.2 regression gates) ·
+  boot_test 20/20 · test_brain 22/22 · test_scheduler 20/20 (incl. 2
+  REAL videos end-to-end) · test_casual 17/17 · test_v69 17/17 ·
+  live scraper v2.8.0 E2E: images 111/104/95, gifs 21/72 on-topic,
+  videos 2/2 real mp4.
+
+## v72.1 — CRITICAL FIX: !sched commands crashed ("runOnce is not a function")
+
+WHAT BROKE: the v72.0.0 build shipped videoScheduler.js exporting only
+{ initVideoScheduler, PER_RUN, SCHED_HOURS, DEFAULT_QUERIES } — but
+server.js calls videoScheduler.runOnce(...) / .status() / .setGroup(...)
+/ .enable() / .disable() / ._queries() / .canRequest() / .recordRequest()
+directly ON the module. Every !sched command and every member
+"video <query>" request threw "runOnce is not a function" on the
+deployed bot. Caught after packaging; this release is the fix.
+
+1. videoScheduler.js now spreads the full api object onto
+   module.exports (initVideoScheduler re-asserts it at init as well).
+2. exclude list is computed PER VIDEO from the live history inside
+   the run loop (video #2 can never repeat video #1).
+3. Version markers → v72.1 (panel title/h1, boot DM, school online
+   message, self-test header, COMMAND_LIST header, package.json).
+4. VERIFIED: scripts/test_scheduler.js 20/20 on the fixed module,
+   including Phase B REAL end-to-end (2 different xnxx videos,
+   different query → different file, 13.7MB payload delivered).
+
+## v72 — VIDEO ENGINE + SCHEDULER: real videos, 6x/day drops, member requests
+
+WHY: live testing against the deployed build proved /video was
+completely broken (YouTube dead from datacenter IPs: search 0-404,
+streams 200-empty, innertube 400 on every client variant, all 12
+hardcoded resolvers probed). Members asking for videos got GIFS
+(gIntent.type='video' was routed to scraperGif). Companion scraper
+v2.8.0 rebuilds the whole video side; the bot side:
+
+1. NEW FILE videoScheduler.js — main-group video drops 6x/day on
+   Harare time (SCHED_HOURS default 0,4,8,12,16,20; TZ_OFFSET_HOURS=2),
+   15 videos per run (SCHED_PER_RUN), random 25-55s human delay
+   between sends, every video from a DIFFERENT query (20-query
+   variety pool, round-robin), per-video exclude list of recent
+   titles, state persists in data/video-scheduler.json, fully
+   injectable deps for tests.
+2. Admin commands: !sched here | on | off | test | run | queries
+   (+ status shown by !sched alone).
+3. Members can now request specific videos: "video <query>" returns
+   a REAL video (was the gif channel) with a 3/hour per-user rate
+   limit; vague queries ignored.
+4. COMMAND_LIST + panel title + boot messages → v72.
+5. Scheduler wired at boot with sendVideo/fetchVideo/log injected
+   from the same media pipeline the bot already uses.
 
 ## v71.4 — LINK AUDIT: every slot live-verified, dead links replaced, hardcoded
 

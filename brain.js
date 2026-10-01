@@ -86,7 +86,7 @@ function initBrain(deps){
     (enabled ? '' : ' (DISABLED by AI_BRAIN=false)'));
 }
 
-function isEnabled(){ return enabled && !!DEPS && !process.env.LOADTEST; }
+function isEnabled(){ return enabled && !!DEPS && (!process.env.LOADTEST || process.env.LOADTEST_BRAIN === '1'); }
 function setEnabled(v){
   enabled = !!v;
   if (DEPS) DEPS.log('info','brain','AI Brain ' + (enabled ? 'ENABLED' : 'DISABLED') + ' by admin');

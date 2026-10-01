@@ -379,6 +379,7 @@ let MESSAGE_FLOOD_THRESHOLD = Math.max(20, parseInt(process.env.FLOOD_THRESHOLD 
 let FLOOD_IGNORE_MS         = 5000;
 
 const NSFW_START = 21, NSFW_END = 8;
+let nsfwWindowOverride = null;   /* v72.3: null = follow clock · true/false = !nsfw on|off */
 const DM_AI_START_HOUR = 21, DM_AI_END_HOUR = 8;
 
 const SCRAPER_URL       = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
@@ -795,7 +796,12 @@ function describeDisconnect(lastDisconnect){
  *  TIME GATE
  * ══════════════════════════════════════════════════════════════ */
 function localHour() { return (new Date().getUTCHours() + TZ_OFFSET_HOURS) % 24; }
-function isNsfwWindow() { const h=localHour(); return h>=NSFW_START || h<NSFW_END; }
+function isNsfwWindow() {
+  /* v72.3: admin override — !nsfw on|off|auto forces the window regardless
+   * of the clock (the old !nsfw on replied "on." and toggled NOTHING). */
+  if (nsfwWindowOverride !== null) return nsfwWindowOverride;
+  const h=localHour(); return h>=NSFW_START || h<NSFW_END;
+}
 function isDmAiWindow() {
   const h = localHour();
   if (DM_AI_START_HOUR <= DM_AI_END_HOUR) return h >= DM_AI_START_HOUR && h < DM_AI_END_HOUR;
@@ -1112,6 +1118,29 @@ function recordOutbound(jid){
   replyTracker.sends.push(entry);
   if (replyTracker.sends.length > replyTracker.MAX) replyTracker.sends.shift();
   return entry;
+}
+/* ═══ v72.2 WARM-CHAT FIX — the anti-ban policy (24h/recipient cooldown +
+ * daily caps) was written for COLD outreach (ads/broadcasts to strangers)
+ * but was gating EVERY priority≥2 send — normal group replies, DM replies,
+ * scheduler video drops. One send put the chat on a 24h cooldown, so the
+ * bot went silent to every chat it had ever replied to (masked in prod by
+ * Render's ephemeral disk wiping policy_state.json on each deploy).
+ * Now: a chat that messaged US within the last 24h is WARM — warm replies
+ * skip the policy gate entirely and never start cooldowns. Cold outreach
+ * (no inbound from that chat in 24h) stays fully gated. ═══ */
+const lastInboundAt = new Map();        /* jid -> ts of last inbound message */
+const WARM_WINDOW_MS   = 24 * 60 * 60 * 1000;
+function noteInbound(jid){
+  if (!jid || typeof jid !== 'string') return;
+  lastInboundAt.set(jid, Date.now());
+  if (lastInboundAt.size > 2000){
+    const cut = Date.now() - WARM_WINDOW_MS;
+    for (const [k, ts] of lastInboundAt){ if (ts < cut) lastInboundAt.delete(k); }
+  }
+}
+function warmChat(jid){
+  const ts = lastInboundAt.get(jid);
+  return !!ts && (Date.now() - ts) < WARM_WINDOW_MS;
 }
 function recordReply(jid){
   for (let i = replyTracker.sends.length - 1; i >= 0; i--){
@@ -1727,7 +1756,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
     pushLog('warn','guard','Blocked conversational send to non-main group ' + (getGroupName(jid) || jid));
     return Promise.reject(new Error('Not the main group'));
   }
-  if (priority >= 2){
+  if (priority >= 2 && !warmChat(jid)){
     const gate = policyCanSend(jid);
     if (!gate.ok){
       pushLog('warn','policy',`Send blocked to ${jid}: ${gate.reason}`);
@@ -1786,7 +1815,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
           try {
             const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
-            if (priority >= 2) policyRecordSend(jid);
+            if (priority >= 2 && !warmChat(jid)) policyRecordSend(jid);
             /* v66: remember when the bot last spoke in a group — greetings
              * scheduler uses this so it never greets a group it is already
              * actively chatting in ("no repeated greeting messages"). */
@@ -2326,6 +2355,9 @@ async function scraperGif(query, nsfw=false){
     /* v70: MY LINKS rides along on GIF searches too — the scraper tries
      * your GIF sites FIRST, same as image searches. */
     const params = { q: query, site };
+    /* v72.3: explicit nsfw flag — the scraper then SKIPS its Tenor/
+     * Giphy engines (SFW-only platforms) for this request. */
+    if (nsfw) params.nsfw = '1';
     if (MY_LINKS_ENV.length) params.myLinks = MY_LINKS_ENV.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
     return { ok:true, gifs: r.data?.gifs || [], site, myLinks: r.data?.myLinks || 0 };
@@ -3637,12 +3669,33 @@ async function processDM(item){
 
   if (intent && intent.type !== 'music'){
     if (!isVague(intent.query)){
-      if (intent.type === 'video' || intent.type === 'gif'){
+      if (intent.type === 'video'){
+        /* v72.2 FIX (was the historic wrong-fallback): DM video requests
+         * used to come back as GIFs. They now ride the REAL video engine
+         * (xnxx → xhamster → eporner) with the same 3/hour per-user rate
+         * limit as group requests; on failure it falls to the pending
+         * request below (whose resolver now also sends real videos). */
+        const dmAdmin = isAdminSender(msg, senderJid);
+        if (!dmAdmin && !videoScheduler.canRequest(senderJid)){
+          await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 2, 'slow', 'dmreply', true);
+          return;
+        }
+        const rv = await scraperVideo(intent.query);
+        if (rv.ok){
+          if (!dmAdmin) videoScheduler.recordRequest(senderJid);
+          await sendMediaUrl(chatJid, rv.mediaUrl, {
+            kind: 'video', mimetype: rv.mimetype || 'video/mp4',
+            caption: '🎬 ' + (rv.title || intent.query).slice(0, 90),
+            priority: 2, lane: 'slow', taskType: 'dmreply', typing: false
+          });
+          resetDailyStats(); dailyStats.videosSent++;
+          return;
+        }
+      } else if (intent.type === 'gif'){
         const r = await scraperGif(intent.query, false);
         if (r.ok && r.gifs.length){
           await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
-          resetDailyStats();
-          if (intent.type === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
+          resetDailyStats(); dailyStats.picsSent++;
           return;
         }
       } else {
@@ -3779,7 +3832,16 @@ async function resolvePending(id, action, payload, adminChatJid){
       return { ok:true };
     }
     const query = payload || p.intent.query;
-    if (p.intent.type === 'video' || p.intent.type === 'gif'){
+    if (p.intent.type === 'video'){
+      /* v72.2: pending video requests resolve to a REAL video (was gif). */
+      const r = await scraperVideo(query);
+      if (!r.ok){ adminReply(adminChatJid, 'No video.'); return { ok:false }; }
+      await sendMediaUrl(p.userJid, r.mediaUrl, {
+        kind: 'video', mimetype: r.mimetype || 'video/mp4',
+        caption: '🎬 ' + (r.title || query).slice(0, 90),
+        priority: 2, lane: 'slow', taskType: 'dmreply', typing: false
+      });
+    } else if (p.intent.type === 'gif'){
       const r = await scraperGif(query);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendGifSafe(p.userJid, pickFresh(r.gifs, p.userJid), '', 2, 'slow', 'dmreply', true);
@@ -4124,7 +4186,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v72 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v72.3 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -4153,13 +4215,17 @@ VIDEO DROPS (v72)
 !sched test            — send one video now
 !sched run             — full 15-video drop now
 !sched queries         — show the query variety pool
-(videos: YouTube → xnxx → xhamster → eporner, different query = different video)
+(videos: xnxx → xhamster → eporner — NSFW only, no YouTube fallback, different query = different video)
 !scraperstatus / !whoami / !stats / !summary
-!logs / !errors / !count / !groups / !inbox
-!mode / !groupchat on|off
+!logs / !errors / !count / !groups / !inbox / !pending / !dms
+!mode / !groupchat on|off / !teach <word> <reply>
+!providers / !aitest / !cleantemp / !adstatus / !mylink
+!window 20-24|off — active hours · !schedule/!schedules/!unschedule <id>
+(window/schedule/teach/pending and every command above also answer to aliases: !diag=!status · !dms=!inbox · !commands=!help · !search=!pic · !buttons=!menu · !scrapertest=!st · !providers=!aitest · !bcastpicdm/!bcastpicgroup=!bcastpic)
 
 MESSAGING (cap ${BROADCAST_BATCH_MAX}/run, rotation)
 !broadcast <msg> / !bcgroup <msg> / !bcdm <msg> / !all <msg>
+!ad <title> | <body> | <cta> — build the ad · !bcad — send it
 !send <jid> <msg>
 
 GROUP MANAGEMENT (main group only)
@@ -4173,10 +4239,11 @@ MEDIA (via intelligent scrapper)
 !gif <q> / !nextgif / !bcastgif <cap>
 !allimg <url> | <cap>
 
-DOWNLOADS (via intelligent scrapper)
+DOWNLOADS (via intelligent scrapper — NSFW sources ONLY, no YouTube fallback)
 !dl <q> / !download <url> / !music <q>
 !st <name> — FULL scraper test: search → download → sends the file here
-!nsfwvideo <q> / !nsfw <url> / !nsfwroleplay on|off
+!nsfwvideo <q> / !nsfw <url> · !nsfw on|off|auto (force window) / !nsfwroleplay on|off
+!scrapersearch <q> / !scrapergif <q> — raw endpoint tests
 
 STUDY BUDDY (v68 — buttons: send "menu")
 !menu — tap-button menus (main · school · study · groups · ads)
@@ -4277,6 +4344,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     return;
   }
 
+  /* v72.3: NO SILENT FAILURES — any unexpected throw in a command case
+   * (e.g. a broadcast target rejecting under the cold-outreach policy)
+   * used to bubble out and leave the admin with NO reply at all. Every
+   * command now ALWAYS answers. */
+  try {
   switch(cmd){
     case 'commands': case 'help': await reply(COMMAND_LIST); break;
     /* ═══ v71.5 AI BRAIN — toggle + live stats ═══ */
@@ -4342,7 +4414,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const up = Math.floor((Date.now() - botStartTime) / 1000);
       const mem = (process.memoryUsage().rss / 1048576).toFixed(0);
       const L = [];
-      L.push('🧪 BreadBot v72 SELF-TEST');
+      L.push('🧪 BreadBot v72.3 SELF-TEST');
       L.push('Uptime: ' + Math.floor(up/3600) + 'h ' + Math.floor((up%3600)/60) + 'm | RAM: ' + mem + 'MB');
       L.push('');
       L.push('— ACCOUNTS —');
@@ -4544,10 +4616,13 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'providers': case 'aitest': {
-      const r = await testAllProviders();
-      const x = r.rewind;
-      if (x.ok) await reply(`Rewind OK ${x.ms}ms — active`);
-      else await reply(`Rewind FAIL ${x.status||''} ${x.error||''}`);
+      /* v72.3 FIX: this case read testAllProviders().rewind and CRASHED
+       * with a silent no-reply whenever the pool had no provider literally
+       * named "rewind" (any custom API_1..12 setup). Report every provider. */
+      const rep = await testAllProviders();
+      const rows = Object.entries(rep || {}).map(([n, x]) =>
+        n + ': ' + (x && x.ok ? 'OK ' + (x.ms || '?') + 'ms' : 'FAIL ' + ((x && (x.status || x.error)) || 'unavailable')));
+      await reply(rows.length ? 'AI providers:\n' + rows.join('\n') : 'No AI providers configured — add API_1=<key> in env.');
       break;
     }
     case 'status': case 'diag': {
@@ -4633,7 +4708,8 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'pic': case 'search': {
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Usage: !pic <query>'); return; }
-      const r = await scraperSearch(q, false);
+      /* v72.3: NSFW-aware — explicit pic requests use the NSFW index */
+      const r = await scraperSearch(q, detectNsfw(q));
       if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
@@ -4655,7 +4731,9 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'gif': {
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Usage: !gif <query>'); return; }
-      const r = await scraperGif(q, false);
+      /* v72.3: NSFW-aware — explicit gif requests use the NSFW path so
+       * the scraper never falls back to Tenor/Giphy (SFW platforms). */
+      const r = await scraperGif(q, detectNsfw(q));
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
@@ -4774,10 +4852,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
 
     case 'dl': {
       const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('Usage: !dl <song or video>'); return; }
+      if (!q){ await reply('Usage: !dl <song>'); return; }
       await reply('Searching "'+q+'" via scrapper...');
-      let r = await scraperMusic(q);
-      if (!r.ok) r = await scraperVideo(q);
+      /* v72.2: music only — the old music→video fallback made a failed
+       * SONG request come back as an adult clip from the xnxx chain. */
+      const r = await scraperMusic(q);
       if (!r.ok){ await reply('Err: '+r.error); return; }
       await sendMediaUrl(chatJid, r.mediaUrl, {
         kind: r.mimetype?.startsWith('audio/') ? 'audio' : 'video',
@@ -4822,10 +4901,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'nsfw': {
-      if (args[1] === 'on'){ await reply('on.'); break; }
-      if (args[1] === 'off'){ await reply('off.'); break; }
+      if (args[1] === 'on'){ nsfwWindowOverride = true; await reply('🞊 NSFW window forced ON — explicit requests answered at any hour. (!nsfw auto to return to the 21:00-08:00 clock)'); break; }
+      if (args[1] === 'off'){ nsfwWindowOverride = false; await reply('🞊 NSFW window forced OFF — explicit requests blocked at all hours. (!nsfw auto to return to the clock)'); break; }
+      if (args[1] === 'auto'){ nsfwWindowOverride = null; await reply('🞊 NSFW window follows the clock again (21:00-08:00).'); break; }
       const url = args[1];
-      if (!url){ await reply('Usage: !nsfw <url> or !nsfwvideo <query>'); return; }
+      if (!url){ await reply('NSFW window: ' + (nsfwWindowOverride === null ? 'clock (21:00-08:00)' : (nsfwWindowOverride ? 'forced ON' : 'forced OFF')) + '\nUsage: !nsfw <url> · !nsfw on|off|auto · !nsfwvideo <query>'); return; }
       const r = await scraperDownloadMedia(url, 'video');
       if (!r.ok){ await reply('Err: '+r.error); return; }
       await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -4878,15 +4958,18 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'teach': {
       const id = args[1]; const rest = args.slice(2).join(' ').trim();
       if (!id || !rest){ await reply('Usage: !teach <id> <q|say|skip>'); return; }
-      if (rest === 'skip') await resolvePending(id, 'skip', null, chatJid);
-      else if (rest.startsWith('say ')) await resolvePending(id, 'say', rest.slice(4).trim(), chatJid);
-      else await resolvePending(id, 'search', rest, chatJid);
+      /* v72.3: bogus/picked-up ids used to vanish silently — always answer */
+      const tr = rest === 'skip' ? await resolvePending(id, 'skip', null, chatJid)
+               : rest.startsWith('say ') ? await resolvePending(id, 'say', rest.slice(4).trim(), chatJid)
+               : await resolvePending(id, 'search', rest, chatJid);
+      if (!tr || !tr.ok) await reply('No pending request ' + id + ' — check !pending for live ids.');
       break;
     }
     case 'scrapersearch': case 'scrapergif': {
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Give query.'); return; }
-      const r = cmd === 'scrapersearch' ? await scraperSearch(q) : await scraperGif(q);
+      /* v72.3: NSFW-aware diagnostics too */
+      const r = cmd === 'scrapersearch' ? await scraperSearch(q, detectNsfw(q)) : await scraperGif(q, detectNsfw(q));
       if (!r.ok){ await reply('Err: '+r.error); return; }
       const items = r.images || r.gifs || [];
       await reply(items.length+' results\nFirst: '+(items[0]||'none'));
@@ -5167,6 +5250,10 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     }
     default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
   }
+  } catch(e){
+    pushLog('error','admin','!'+cmd+' threw: '+e.message);
+    try { await reply('❌ Err on !'+cmd+': '+e.message); } catch(_){}
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -5209,6 +5296,7 @@ async function brainHandleGroup(chatJid, dec, opts){
   if (!dec) return false;
   const isAdmin = !!(opts && opts.isAdmin);
   const nsfwWin = !!(opts && opts.nsfwWin);
+  const senderJid = (opts && opts.senderJid) || '';
 
   /* the AI itself says silence — the #1 cure for unnecessary sends */
   if (dec.action === 'ignore' || dec.action === 'chat') return true;
@@ -5218,40 +5306,83 @@ async function brainHandleGroup(chatJid, dec, opts){
     return true;
   }
 
-  const nsfw = dec.nsfw === true;
+  const q = (dec.query || '').trim();
+  if (!q) return false;                        /* no usable query → legacy chain */
+  /* v72.2: deterministic NSFW backstop — if the AI mislabels an explicit
+   * query as safe, the wordlist still gates it (parity with the legacy
+   * path, which would have blocked the same words). The window gate now
+   * runs on this combined verdict, so a mislabeled explicit query can
+   * never slip out of the 21:00-08:00 window. */
+  const nsfw = dec.nsfw === true || detectNsfw(q);
   if (nsfw && !isAdmin && !nsfwWin){
     await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group', true);
     return true;
   }
-  const q = (dec.query || '').trim();
-  if (!q) return false;                        /* no usable query → legacy chain */
 
   if (dec.action === 'music'){
+    let acked = false;
     try {
       const r = await scraperMusic(q);
       if (r.ok){
         await sendBuffer(chatJid, { text:r.title+' - sending...' }, 3, 'slow', 'group', true);
-        await sendMediaUrl(chatJid, r.mediaUrl, {
-          kind:'audio', mimetype:r.mimetype, caption:r.title,
-          priority:3, lane:'slow', taskType:'group', typing:true
-        });
+        acked = true;
+        /* v72.2: once the ack is out, this message is CONSUMED — a failed
+         * send must not fall back to the legacy chain (it would re-ack
+         * "title - sending..." and hit the scraper twice). */
+        try {
+          await sendMediaUrl(chatJid, r.mediaUrl, {
+            kind:'audio', mimetype:r.mimetype, caption:r.title,
+            priority:3, lane:'slow', taskType:'group', typing:true
+          });
+        } catch(e2){ pushLog('error','brain','music send: '+e2.message); }
         return true;
       }
     } catch(e){ pushLog('error','brain','music: '+e.message); }
-    return false;
+    return acked ? true : false;
   }
-  if (dec.action === 'gif' || dec.action === 'video'){
+  if (dec.action === 'gif'){
     try {
       const r = await scraperGif(q, nsfw);
       if (r.ok && r.gifs.length){
         await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
-        resetDailyStats();
-        if (dec.action === 'video') dailyStats.videosSent++; else dailyStats.picsSent++;
+        resetDailyStats(); dailyStats.picsSent++;
         if (nsfw) dailyStats.nsfwSent++;
         return true;
       }
     } catch(e){ pushLog('error','brain','gif: '+e.message); }
-    return false;
+    return false;                              /* nothing sent → legacy may retry */
+  }
+  if (dec.action === 'video'){
+    /* v72.2 FIX (was the historic wrong-fallback): the brain mapped
+     * 'video' onto the GIF channel. It now rides the SAME real-video
+     * engine and the SAME rules as the legacy branch — scraperVideo
+     * (xnxx → xhamster → eporner), 3/hour member rate limit, vague
+     * guard — and consumes the message so legacy never double-fires. */
+    if (isVague(q)) return false;
+    if (!isAdmin && senderJid && !videoScheduler.canRequest(senderJid)){
+      await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 3, 'slow', 'group', true);
+      return true;
+    }
+    await sendBuffer(chatJid, { text:'🎬 Finding "' + q + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
+    try {
+      const r = await scraperVideo(q);
+      if (r.ok){
+        if (!isAdmin && senderJid) videoScheduler.recordRequest(senderJid);
+        await sendMediaUrl(chatJid, r.mediaUrl, {
+          kind: 'video', mimetype: r.mimetype || 'video/mp4',
+          caption: '🎬 ' + (r.title || q).slice(0, 90),
+          priority: 3, lane: 'slow', taskType: 'group', typing: false
+        });
+        resetDailyStats(); dailyStats.videosSent++;
+        if (nsfw) dailyStats.nsfwSent++;
+      } else {
+        await sendBuffer(chatJid, { text:'❌ No video for "' + q + '" — try different words.' }, 3, 'slow', 'group', true);
+      }
+    } catch(e){
+      pushLog('error','brain','video: '+e.message);
+      try { await sendBuffer(chatJid, { text:'❌ No video for "' + q + '" — try different words.' }, 3, 'slow', 'group', true); } catch(e2){}
+    }
+    return true;   /* ack went out — consumed, never re-run legacy */
   }
   if (dec.action === 'media'){
     try {
@@ -5371,6 +5502,7 @@ async function handleMessage(msg){
   else if (activeDMs.size < ACTIVE_SET_CAP) activeDMs.add(chatJid);
 
   recordReply(chatJid);
+  noteInbound(chatJid);   /* v72.2: marks the chat warm — policy never gates its replies */
 
   /* v68.6: human-style read — the admin gets a fast 2-8s read,
    * everyone else waits a random 5-90s (or till morning at night) */
@@ -5567,7 +5699,11 @@ async function handleMessage(msg){
 
   /* ═══ GROUP MESSAGES — MAIN ONLY ═══ */
   if (isGroup){
-    await handleAntiLink(chatJid, msg, text, senderJid, isAdmin);
+    /* v72.2: respect the verdict — if antilink deleted+warned, STOP.
+     * Before, the return value was ignored, so a link post could also
+     * trigger the brain/legacy chain (e.g. the bot handing out the join
+     * link right after deleting the same member's link). */
+    if (await handleAntiLink(chatJid, msg, text, senderJid, isAdmin)) return;
 
     /* v68.5: AI NEVER CHATS IN GROUPS — people greet and talk all day in
      * groups and the AI has no idea what the conversation is about, so
@@ -5580,7 +5716,12 @@ async function handleMessage(msg){
        * fallback for when the AI pool is down. The brain sees the
        * last 6 group messages, so "that" and follow-ups make sense,
        * and it stays silent on ordinary group chatter. ═══ */
-      if (brain.isEnabled()){
+      if (brain.isEnabled() && !isAdmin){
+        /* v72.2: admins already went through brain ADMIN mode above —
+         * running group mode for them too meant two AI calls per admin
+         * text (and an admin-"ignore" could still become a group media
+         * send). Admin media requests are handled by the deterministic
+         * chain below (admins bypass the NSFW window anyway). */
         try {
           const dec = await brain.aiDecide(text, {
             mode:'group', senderName:pushName, isAdmin,
@@ -5588,7 +5729,7 @@ async function handleMessage(msg){
             recent: recentGroupTexts(chatJid, 6),
             nsfwWindow: isNsfwWindow()
           });
-          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: isNsfwWindow() })) return;
+          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: isNsfwWindow(), senderJid })) return;
         } catch(e){ pushLog('warn','brain','group: ' + e.message); }
       }
       if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
@@ -5778,7 +5919,7 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v72 ONLINE\n' +
+            'BreadBot v72.3 ONLINE\n' +
             'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -5878,7 +6019,15 @@ async function connectBot(){
           const delay = stormGeneric ? RC.STORM_COOLDOWN_MS : backoffMs(reconnectAttempts);
           connectionStatus = 'reconnecting';
           pushLog('warn','bot','Retry in '+Math.round(delay/1000)+'s ['+reconnectAttempts+'/'+MAX_RECONNECT+']'+(stormGeneric ? ' (storm cooldown)' : ''));
-          setTimeout(function(){ try { if (sock) sock.end(undefined); } catch(e){} sock = null; connectBot(); }, delay);
+          /* v72.2: detach listeners BEFORE ending the socket (same pattern
+           * as the 428/440 path). The old code ended the socket inside the
+           * timeout with its close handler still attached — sock.end()
+           * re-fired close and could schedule a SECOND connectBot(). */
+          try { sock.ev.removeAllListeners('connection.update'); } catch(e){}
+          try { sock.ev.removeAllListeners('creds.update'); } catch(e){}
+          try { sock.end(undefined); } catch(e){}
+          sock = null;
+          setTimeout(() => connectBot(), delay);
         } else {
           connectionStatus = 'disconnected';
           pushLog('error','bot','Max retries — press Start to try again');
@@ -6036,6 +6185,7 @@ async function handleSchoolMessage(msg){
      * people stay non-admin (remoteJid = the other person). */
     const fromMe = !!msg.key?.fromMe;
     const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
+    noteInbound(chatJid);   /* v72.2: school-side chats are warm too */
     /* ═══ v69 CRITICAL FIX — admin recognition on the SCHOOL account ═══
      * The school login IS the admin's own number (263777627210). Group
      * messages the admin sends from their own phone arrive here with
@@ -6287,7 +6437,7 @@ async function connectSchoolBot(){
         });
         try {
           await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v72 SCHOOL account online\n' +
+            '🏫 BreadBot v72.3 SCHOOL account online\n' +
             'Bot: ' + schoolNumber + '\n' +
             'Role: admin monitor — commands + reports only (AI auto-chat OFF)\n' +
             'Send "menu" for buttons · "today" · "weather" · "ask <question>" = AI · send me PDFs/DOCX to read',
@@ -6465,7 +6615,13 @@ function makeLoadtestStub(){
     sendPresenceUpdate: async (state, jid)=>{ if (state === 'composing') ltRec('groups','typings', jid); },
     readMessages: async (keys)=>{ ltRec('groups','reads', (keys && keys[0] && keys[0].remoteJid) || ''); },
     updateOnlinePrivacy: async ()=>{}, updateLastSeenPrivacy: async ()=>{},
-    groupMetadata: async (jid)=>({ id:jid, subject:'Group ' + String(jid).slice(0,6), participants: [] }),
+    groupMetadata: async (jid)=>({ id:jid, subject:'Group ' + String(jid).slice(0,6),
+      /* v72.2: bot listed as admin participant so admin-gated flows
+       * (antilink delete, mute/lock checks) behave like the real world */
+      participants: [{ id: '263777000001@s.whatsapp.net', admin: 'admin' }] }),
+    /* v72.3: full group-admin surface for the admin-command probe */
+    groupSettingUpdate: async (jid, setting)=>true,
+    groupParticipantsUpdate: async (jid, participants, action)=>participants.map(p=>({ id:p, admin: action === 'remove' ? undefined : 'admin' })),
     groupFetchAllParticipating: async ()=>({}),
     sendMessage: async (jid, content)=>{ ltRec('groups','sends', jid, content); return { key:{ id:'stub-'+Date.now()+'-'+Math.random().toString(36).slice(2,8), remoteJid:jid, fromMe:true } }; },
     groupAcceptInvite: async (code)=>{ ltRec('groups','invites', code); return null; },
@@ -6521,7 +6677,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v72</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v72.3</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -6542,7 +6698,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v72 — dual account</h1>
+<h1>BreadBot v72.3 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">

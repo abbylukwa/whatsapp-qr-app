@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "72.3.0",
-  "description": "BreadBot v72.3 - dual-account (groups + school), AI BRAIN decision engine (brain.js), video scheduler (6x/day Harare), all 106 admin commands verified live, no-silent-failures command guard, !nsfw on|off|auto real override, NSFW-only video downloads",
+  "version": "74.0.0",
+  "description": "BreadBot v73.1 - dual-account (groups + school), AI BRAIN decision engine (brain.js), video scheduler (6x/day Harare), all 106 admin commands verified live, no-silent-failures command guard, !nsfw on|off|auto real override, NSFW-only video downloads via owner slots, !vidsites site-picker",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

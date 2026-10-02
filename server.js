@@ -43,10 +43,9 @@
  *    ONE AI triage pass keeps only what needs your action — no
  *    keyword spam, no hallucinated deadlines (strict grounding
  *    prompt: never invent exams/dates/chapters).
- *  - Scraper (separate repo, v2.4): real image search engines
- *    (Bing/DDG/Wikimedia + 10 PNG/photo sites) — downloads the
- *    actual image, not the site logo; my_links category URLs are
- *    used as-is; your domains are searched via site: operator.
+ *  - Scraper (separate repo, v3.0): MYLINKS-ONLY — media comes
+ *    exclusively from the slots you configure (my_links.json /
+ *    MYLINKS env); downloads the actual media, not site chrome.
  *  - Panel: AI pool list (all providers), honest reply-rate (—
  *    until there is data), no more [object Object], Bot LID
  *    learned from creds.update the moment it lands.
@@ -159,8 +158,7 @@ const {
   generateWAMessageFromContent
 } = require('@whiskeysockets/baileys');
 
-let RedgifsDownloader = null;
-try { RedgifsDownloader = require('redgifs-downloader'); } catch(e){}
+let RedgifsDownloader = null;   /* v73.1: redgifs lib no longer used — videos come only from the owner's slots */
 
 const QRCode = require('qrcode');
 const pino   = require('pino');
@@ -239,7 +237,10 @@ const USER_HISTORY_SIZE  = 5;
 const PENDING_EXPIRY_MS  = 3600000;
 const FOCUS_LOCK_TIMEOUT_MS = 30000;
 const TZ_OFFSET_HOURS    = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);
-const MEDIA_MAX_BYTES    = 34 * 1024 * 1024;
+/* v73: MEDIA_MAX_MB — max media size the bot will download & send.
+ * Default 40MB so 34MB videos download with headroom (scraper-side
+ * cap: SCRAPER_MAX_MB, same default). Override via env if needed. */
+const MEDIA_MAX_BYTES    = Math.max(1, parseInt(process.env.MEDIA_MAX_MB || '40', 10)) * 1024 * 1024;
 
 /* ─── v66: dual-host mode + reports + broadcast cap ────────────
  * BOT_MODE=manager (default): full group-management bot.
@@ -383,48 +384,28 @@ let nsfwWindowOverride = null;   /* v72.3: null = follow clock · true/false = !
 const DM_AI_START_HOUR = 21, DM_AI_END_HOUR = 8;
 
 const SCRAPER_URL       = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
-const SCRAPER_SFW_SITE  = process.env.SCRAPER_SFW_SITE  || 'darknaija';
+const SCRAPER_SFW_SITE  = process.env.SCRAPER_SFW_SITE  || 'auto';
 const SCRAPER_NSFW_SITE = process.env.SCRAPER_NSFW_SITE || 'nsfw';
 const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
 
-/* ═══ v70 MY LINKS — YOUR image sites, straight from env ═══
- * MYLINKS=https://mysite.com, https://mysite.com/search?q={query}
+/* ═══ v73 MY LINKS — YOUR media sites, straight from env ═══
+ * MYLINKS=https://mysite.com/search?q={query}, https://mysite2.com
  * (comma or newline separated, {query} optional). Sent to the
- * scraper with EVERY search — the scraper tries YOUR sites FIRST,
- * so downloads come from your websites, not the public engines.
- * Empty/absent = the scraper just runs its built-in engines. */
-const MY_LINKS_ENV = (process.env.MYLINKS ||
-  /* v71.4 HARD-CODED DEFAULTS — your real sites, synced with
-   * repo-intelligent-scraper/my_links.json slots 1-7 (v2.7: every slot
-   * LIVE-VERIFIED with extraction + download probes — reddit/pornpics/
-   * babehub/pichunter were 403/WAF-dead, replaced with booru sources
-   * that ship FULL-RES originals from datacenter IPs).
-   * Used when the MYLINKS env is NOT set, so YOUR sites are ALWAYS
-   * tried FIRST on every search — zero env config needed on Render. */
-  'https://realbooru.com/index.php?page=post&s=list&tags={query}' +
-  ',https://xbooru.com/index.php?page=dapi&s=post&q=index&tags={query}&limit=30' +
-  ',https://rule34.xxx/index.php?page=post&s=list&tags={query}' +
-  ',https://tbib.org/index.php?page=post&s=list&tags={query}' +
-  ',https://www.darknaija.com/?s={query}' +
-  ',https://tenor.com/search/{query}-porn-gifs' +
-  ',https://giphy.com/search/{query}+porn')
+ * scraper with EVERY search — the scraper uses ONLY these slots
+ * (zero built-in sites since scraper v3.0).
+ * Empty/absent = NO sources — the scraper answers honestly with a
+ * "no sources configured" hint until you set your links here or in
+ * the scraper's my_links.json (types: image, gif, video, music). */
+const MY_LINKS_ENV = (process.env.MYLINKS || '')
   .split(/[\n,]+/).map(function(s){ return s.trim(); })
   .filter(function(s){ return /^https?:\/\//i.test(s); })
   .filter(function(s, i, a){ return a.indexOf(s) === i; });
 
-/* v71.4 HARD-CODED SCRAPER SITES — the exact values from
- * repo-intelligent-scraper/my_links.json (slots 1-7). The panel ALWAYS
- * shows this list, even when the scraper service is offline or the
- * my_links.json file is missing. Edit BOTH places together.
- * EVERY slot verified live 2026-09-27 (extraction + download probe). */
+/* v73: NO hard-coded scraper sites anymore — every source lives in
+ * the scraper's my_links.json or the MYLINKS env. This array stays
+ * as a fallback view for the panel (it is empty by default and only
+ * shows the live scraper diagnostics). */
 const HARD_LINKS = [
-  { slot:1, name:'Realbooru (Real People, Full-Res)',     url:'https://realbooru.com/index.php?page=post&s=list&tags={query}',                    type:'image', enabled:true  },
-  { slot:2, name:'Xbooru DAPI (Full-Res XML Direct)',     url:'https://xbooru.com/index.php?page=dapi&s=post&q=index&tags={query}&limit=30',      type:'image', enabled:true  },
-  { slot:3, name:'Rule34.xxx (Biggest Archive, Full-Res)',url:'https://rule34.xxx/index.php?page=post&s=list&tags={query}',                       type:'image', enabled:true  },
-  { slot:4, name:'TBIB (Big Image Board Fallback)',       url:'https://tbib.org/index.php?page=post&s=list&tags={query}',                         type:'image', enabled:true  },
-  { slot:5, name:'DarkNaija (Real-Porn Blog Fallback)',   url:'https://www.darknaija.com/?s={query}',                                             type:'image', enabled:true  },
-  { slot:6, name:'Tenor Porn GIFs (The Loop King)',       url:'https://tenor.com/search/{query}-porn-gifs',                                       type:'gif',   enabled:true  },
-  { slot:7, name:'Giphy Adult (Polished Loops)',          url:'https://giphy.com/search/{query}+porn',                                            type:'gif',   enabled:true  }
 ];
 
 const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
@@ -2332,8 +2313,8 @@ async function scrapperFetch(pathname, body, timeoutMs = 30000){
 }
 
 async function scraperSearch(query, nsfw=false){
-  /* v69: site 'auto' — the scraper picks the right engines (Bing/DDG/
-   * Wikimedia + PNG sites) and only touches the NSFW index when asked. */
+  /* v73: site 'auto' — the scraper is MYLINKS-ONLY (zero built-in
+   * sites), so results come exclusively from the configured slots. */
   const site = nsfw ? (SCRAPER_NSFW_SITE || 'nsfw') : 'auto';
   resetDailyStats(); dailyStats.scraperSearches++;
   try {
@@ -2355,8 +2336,7 @@ async function scraperGif(query, nsfw=false){
     /* v70: MY LINKS rides along on GIF searches too — the scraper tries
      * your GIF sites FIRST, same as image searches. */
     const params = { q: query, site };
-    /* v72.3: explicit nsfw flag — the scraper then SKIPS its Tenor/
-     * Giphy engines (SFW-only platforms) for this request. */
+    /* v72.3: explicit nsfw flag — kept for scraper compatibility. */
     if (nsfw) params.nsfw = '1';
     if (MY_LINKS_ENV.length) params.myLinks = MY_LINKS_ENV.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
@@ -2418,56 +2398,58 @@ async function scraperMusic(query){
     return { ok:false, error:e.message };
   }
 }
-async function scraperVideo(query, exclude){
+async function scraperVideo(query, exclude, site){
   resetDailyStats(); dailyStats.scraperVideos++;
   try {
     const body = { query };
     /* v71.1: pass already-sent ids/titles so multi-video runs never repeat */
     if (Array.isArray(exclude) && exclude.length) body.exclude = exclude.slice(-10);
+    /* v73.1: optional site pick — "yona" / "pornpics" / slot number.
+     * Absent = the scraper's file order (YonaYethuu first). */
+    if (site) body.site = String(site).trim();
     const r = await scrapperFetch('/video', body, 90000);
     if (!r || !r.mediaUrl) throw new Error('scrapper: no videoUrl');
     return { ok:true, mediaUrl:r.mediaUrl, title:r.title||query,
-             videoId:r.videoId||'', mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0 };
+             videoId:r.videoId||'', mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0, site:r.site };
   } catch(e){
-    pushLog('error','scraper',`video "${query}": ${e.message}`);
-    return { ok:false, error:e.message };
+    pushLog('error','scraper',`video "${query}"${site?' ['+site+']':''}: ${e.message}`);
+    return { ok:false, error:e.message, available:e.response?.data?.available || null };
   }
 }
 
 /* ══════════════════════════════════════════════════════════════
  *  NSFW
  * ══════════════════════════════════════════════════════════════ */
-async function nsfwVideoSearchAndSend(chatJid, query, priority=2, lane='slow', taskType='group', typing=false){
-  if (!RedgifsDownloader){
-    await sendBuffer(chatJid, { text: 'NSFW downloader not installed. Run: npm i redgifs-downloader' }, priority, lane, taskType, typing);
-    return false;
-  }
+/* v73.1 VIDEO SITE PICKER — list the configured video sites so the user
+ * can choose one (!vidsites), and force it with !nsfwvideo <q> site:<pick>.
+ * (The old built-in Redgifs path is GONE — videos come ONLY from the
+ * owner's configured video slots on the scraper.) */
+async function scraperVideoSites(){
   try {
-    const links = await RedgifsDownloader.getSearchLinks(query, { numberToDownload: 3 });
-    if (!links || !links.length){
-      await sendBuffer(chatJid, { text: `No NSFW results for "${query}"` }, priority, lane, taskType, typing);
-      return false;
-    }
-    for (const link of links.slice(0, 2)){
-      try {
-        const resp = await axios.get(link.url || link, {
-          responseType: 'arraybuffer', timeout: 90000,
-          maxContentLength: MEDIA_MAX_BYTES + 1, maxBodyLength: MEDIA_MAX_BYTES + 1,
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        const buf = Buffer.from(resp.data);
-        if (buf.length > MEDIA_MAX_BYTES) continue;
-        await sendBuffer(chatJid, { video: buf, mimetype: 'video/mp4', caption: `NSFW ${query}` }, priority, lane, taskType, typing);
-        resetDailyStats(); dailyStats.nsfwSent++;
-        return true;
-      } catch(e){ pushLog('warn','nsfw',e.message); }
-    }
-    return false;
+    const H = {};
+    if (SCRAPER_TOKEN) H['Authorization'] = 'Bearer ' + SCRAPER_TOKEN;
+    const r = await axios.get(SCRAPER_URL + '/video-sites', { headers:H, timeout: 15000 });
+    return { ok:true, sites:r.data?.sites || [], defaultFirst:r.data?.defaultFirst || null };
   } catch(e){
-    pushLog('error','nsfw',e.message);
-    await sendBuffer(chatJid, { text: `NSFW search failed: ${e.message}` }, priority, lane, taskType, typing);
-    return false;
+    return { ok:false, error:e.message, sites:[] };
   }
+}
+/* parse a site pick out of an args tail: "site:2" / "site 2" / "#2" / "@yona".
+ * Returns { query, site } — site is undefined when nothing matched. */
+function parseVideoSitePick(raw){
+  const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean);
+  let site = null;
+  const rest = [];
+  for (let i = 0; i < tokens.length; i++){
+    const t = tokens[i];
+    const m1 = t.match(/^site[:=](.+)$/i);
+    const m2 = t.match(/^[#@](\w+[-\w]*)$/);
+    if (m1){ site = m1[1]; continue; }
+    if (/^site$/i.test(t) && tokens[i+1]){ site = tokens[++i]; continue; }
+    if (m2){ site = m2[1]; continue; }
+    rest.push(t);
+  }
+  return { query: rest.join(' ').trim(), site: site || undefined };
 }
 async function nsfwRoleplay(userName, text){
   /* v70: same persona + safety rails as the normal DM chat — she stays
@@ -3670,9 +3652,8 @@ async function processDM(item){
   if (intent && intent.type !== 'music'){
     if (!isVague(intent.query)){
       if (intent.type === 'video'){
-        /* v72.2 FIX (was the historic wrong-fallback): DM video requests
-         * used to come back as GIFs. They now ride the REAL video engine
-         * (xnxx → xhamster → eporner) with the same 3/hour per-user rate
+        /* v73 UPDATE: DM video requests ride the configured video
+         * slots (scraper /video) with the same 3/hour per-user rate
          * limit as group requests; on failure it falls to the pending
          * request below (whose resolver now also sends real videos). */
         const dmAdmin = isAdminSender(msg, senderJid);
@@ -4186,7 +4167,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v72.3 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v74.0.0 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -4215,7 +4196,7 @@ VIDEO DROPS (v72)
 !sched test            — send one video now
 !sched run             — full 15-video drop now
 !sched queries         — show the query variety pool
-(videos: xnxx → xhamster → eporner — NSFW only, no YouTube fallback, different query = different video)
+(videos come from YOUR configured video slots (scraper /video) — different query = different video)
 !scraperstatus / !whoami / !stats / !summary
 !logs / !errors / !count / !groups / !inbox / !pending / !dms
 !mode / !groupchat on|off / !teach <word> <reply>
@@ -4239,10 +4220,10 @@ MEDIA (via intelligent scrapper)
 !gif <q> / !nextgif / !bcastgif <cap>
 !allimg <url> | <cap>
 
-DOWNLOADS (via intelligent scrapper — NSFW sources ONLY, no YouTube fallback)
+DOWNLOADS (via intelligent scrapper — ONLY your configured slots, no built-in sites)
 !dl <q> / !download <url> / !music <q>
 !st <name> — FULL scraper test: search → download → sends the file here
-!nsfwvideo <q> / !nsfw <url> · !nsfw on|off|auto (force window) / !nsfwroleplay on|off
+!nsfwvideo <q> [site:<name|#>] / !vidsites / !nsfw <url> · !nsfw on|off|auto (force window) / !nsfwroleplay on|off
 !scrapersearch <q> / !scrapergif <q> — raw endpoint tests
 
 STUDY BUDDY (v68 — buttons: send "menu")
@@ -4414,14 +4395,17 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const up = Math.floor((Date.now() - botStartTime) / 1000);
       const mem = (process.memoryUsage().rss / 1048576).toFixed(0);
       const L = [];
-      L.push('🧪 BreadBot v72.3 SELF-TEST');
+      L.push('🧪 BreadBot v74.0.0 SELF-TEST');
       L.push('Uptime: ' + Math.floor(up/3600) + 'h ' + Math.floor((up%3600)/60) + 'm | RAM: ' + mem + 'MB');
       L.push('');
       L.push('— ACCOUNTS —');
       L.push('Groups : ' + connectionStatus + (botNumber && botNumber !== 'unknown' ? ' (' + botNumber + ')' : '') + (botLid ? ' · LID ' + botLid : ' · LID unknown'));
       L.push('School : ' + schoolStatus + (schoolNumber ? ' (' + schoolNumber + ')' : ' (not scanned)'));
       L.push('Main   : ' + (mainGroupJid ? 'SET ✓' : 'NOT SET ✗ — auto-retrying from ADMIN_GROUP_LINK every 3 min'));
-      L.push('Groups seen: ' + joinedGroups.size + ' · school registry: ' + schoolRegistry.size);
+      { let n = 0; const seen = new Set([...schoolRegistry.keys(), ...(joinedGroups ? [...joinedGroups.keys()] : [])]);
+        for (const j of seen){ if (isSchoolGroup(j)) n++; }
+        L.push('Groups seen: ' + joinedGroups.size + ' · school registry: ' + schoolRegistry.size + ' · school groups active: ' + n + (schoolGroupCfg.auto ? ' (auto-detect on)' : ' (pinned only)'));
+      }
       L.push('');
       L.push('— SCRAPER —');
       try {
@@ -4731,8 +4715,8 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'gif': {
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Usage: !gif <query>'); return; }
-      /* v72.3: NSFW-aware — explicit gif requests use the NSFW path so
-       * the scraper never falls back to Tenor/Giphy (SFW platforms). */
+      /* v73: NSFW-aware — explicit gif requests use the NSFW path so
+       * the scraper serves adult slots for them. */
       const r = await scraperGif(q, detectNsfw(q));
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
@@ -4854,8 +4838,8 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('Usage: !dl <song>'); return; }
       await reply('Searching "'+q+'" via scrapper...');
-      /* v72.2: music only — the old music→video fallback made a failed
-       * SONG request come back as an adult clip from the xnxx chain. */
+      /* v72.2: music only — a failed SONG request never falls back to
+       * the video channel (no wrong-kind media). */
       const r = await scraperMusic(q);
       if (!r.ok){ await reply('Err: '+r.error); return; }
       await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -4893,11 +4877,39 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'nsfwvideo': {
-      const q = args.slice(1).join(' ').trim();
-      if (!q){ await reply('Usage: !nsfwvideo <query>'); return; }
-      await reply('Searching "'+q+'"...');
-      const ok = await nsfwVideoSearchAndSend(chatJid, q, 0, 'fast', 'admin', false);
-      if (ok) await reply('Sent.');
+      /* v73.1: rides the configured video slots (scraper /video) — the
+       * old built-in Redgifs path is gone. Optional site pick:
+       *   !nsfwvideo <query>                → default order (YonaYethuu first)
+       *   !nsfwvideo <query> site:yona      → force one site
+       *   !nsfwvideo <query> #2 / @2        → force by listed position */
+      const picked = parseVideoSitePick(args.slice(1).join(' '));
+      if (!picked.query){ await reply('Usage: !nsfwvideo <query> [site:<name|#>]\n!vidsites lists the available video sites.'); return; }
+      await reply('Searching "'+picked.query+'"'+(picked.site ? ' on '+picked.site : '')+'...');
+      const r = await scraperVideo(picked.query, null, picked.site);
+      if (r.ok){
+        await sendMediaUrl(chatJid, r.mediaUrl, {
+          kind: 'video', mimetype: r.mimetype || 'video/mp4',
+          caption: '🎬 ' + (r.title || picked.query).slice(0, 90) + (r.site ? ' · via ' + r.site : ''),
+          priority: 0, lane: 'fast', taskType: 'admin', typing: false
+        });
+        resetDailyStats(); dailyStats.nsfwSent++;
+        await reply('Sent.');
+      } else if (r.available && r.available.length){
+        await reply('❌ Site "' + picked.site + '" not found. Available sites:\n' +
+          r.available.map(s => '• ' + s.slot + ' — ' + s.name).join('\n'));
+      } else {
+        await reply('Err: ' + r.error);
+      }
+      break;
+    }
+    case 'vidsites': {
+      /* v73.1: list the configured video sites — user picks with
+       * !nsfwvideo <query> site:<name or number>. */
+      const vs = await scraperVideoSites();
+      if (!vs.ok || !vs.sites.length){ await reply('No video sites configured — add video slots to the scraper my_links.json.'); break; }
+      await reply('🎬 VIDEO SITES (first = default):\n' +
+        vs.sites.map(s => (s.pick) + '. ' + s.name).join('\n') +
+        '\n\nUse: !nsfwvideo <query> site:' + (vs.sites[0] ? vs.sites[0].name.split(' ')[0].toLowerCase() : 'name') + ' — or site:<number>');
       break;
     }
     case 'nsfw': {
@@ -5036,7 +5048,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       tests.push('WA: '+(connectionStatus==='connected'?'OK':'FAIL'));
       tests.push('Main: '+(mainGroupJid?'OK '+mainGroupJid:'NOT SET'));
       tests.push('Bot LID: '+(botLid||'unknown'));
-      tests.push('NSFW DL: '+(RedgifsDownloader?'OK':'FAIL'));
+      tests.push('Video sites: via scraper /video-sites (!vidsites)');
       tests.push('Reply rate: '+(replyRate()*100).toFixed(0)+'%');
       tests.push('Groups: '+joinedGroups.size+' DMs: '+activeDMs.size+' Pool: '+dmPool.size);
       await reply('Tests\n\n'+tests.join('\n'));
@@ -5154,6 +5166,44 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'updates': {
       const n = await flushGroupUpdates(opts.account === 'school' ? 'school' : undefined);
       await reply(n ? 'Sent ' + n + ' update(s) above ⬆️' + (schoolUpdatesBus.length ? ' — ' + schoolUpdatesBus.length + ' more still queued.' : '.') : 'No pending group updates.');
+      break;
+    }
+    case 'schoolgroups':
+    case 'schoolgroup': {
+      /* v74.1: teach the bot WHICH groups are school groups */
+      const sub = (args[1] || '').toLowerCase();
+      if (sub === 'add' || sub === 'del' || sub === 'remove'){
+        const jid = resolveSchoolGroupTarget(args.slice(2).join(' '));
+        if (!jid){ await reply('Which group? Give a name piece (!schoolgroup add botany) or the raw jid.'); break; }
+        markSchoolGroup(jid, sub === 'add');
+        await reply((sub === 'add' ? '✅ Pinned as SCHOOL group: ' : '🔇 Muted — no longer school: ')
+          + (schoolRegistry.get(jid) || (typeof getGroupName === 'function' ? (getGroupName(jid) || '') : '') || jid));
+        break;
+      }
+      if (sub === 'auto'){
+        schoolGroupCfg.auto = !['off','false','0'].includes((args[2] || '').toLowerCase());
+        saveSchoolGroups();
+        await reply('Name auto-detect is now ' + (schoolGroupCfg.auto
+          ? 'ON — school-looking group names are triaged automatically'
+          : 'OFF — only pinned groups (!schoolgroup add) are triaged'));
+        break;
+      }
+      {
+        const rows = []; const seen = new Set(); let active = 0;
+        const pushRow = (jid, name) => {
+          if (seen.has(jid)) return; seen.add(jid);
+          const is = isSchoolGroup(jid); if (is) active++;
+          rows.push((is ? '✅' : '➖') + ' ' + (name || jid)
+            + (schoolGroupCfg.manual.indexOf(jid) >= 0 ? ' (pinned)' : '')
+            + (schoolGroupCfg.removed.indexOf(jid) >= 0 ? ' (muted)' : ''));
+        };
+        for (const [jid, name] of schoolRegistry) pushRow(jid, name);
+        try { if (typeof joinedGroups === 'object' && joinedGroups) joinedGroups.forEach((v, jid) => pushRow(jid, v && v.name)); } catch(e){}
+        await reply('🏫 School groups: ' + active + ' active of ' + rows.length + ' seen'
+          + (schoolGroupCfg.auto ? ' · auto-detect ON' : ' · auto-detect OFF') + '\n'
+          + (rows.slice(0, 25).join('\n') || '(no groups seen yet)')
+          + '\n\n!schoolgroup add|del <name piece> · !schoolgroup auto on|off');
+      }
       break;
     }
     case 'adstatus': {
@@ -5353,11 +5403,10 @@ async function brainHandleGroup(chatJid, dec, opts){
     return false;                              /* nothing sent → legacy may retry */
   }
   if (dec.action === 'video'){
-    /* v72.2 FIX (was the historic wrong-fallback): the brain mapped
-     * 'video' onto the GIF channel. It now rides the SAME real-video
-     * engine and the SAME rules as the legacy branch — scraperVideo
-     * (xnxx → xhamster → eporner), 3/hour member rate limit, vague
-     * guard — and consumes the message so legacy never double-fires. */
+    /* v73 UPDATE: rides the SAME real-video engine and the SAME rules
+     * as the legacy branch — scraperVideo (your configured video
+     * slots), 3/hour member rate limit, vague guard — and consumes
+     * the message so legacy never double-fires. */
     if (isVague(q)) return false;
     if (!isAdmin && senderJid && !videoScheduler.canRequest(senderJid)){
       await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 3, 'slow', 'group', true);
@@ -5533,7 +5582,9 @@ async function handleMessage(msg){
   /* ═══ v68: NEEDED-UPDATES FILTER — from ANY group on the groups
    * account, only messages that look like real deadlines/changes are
    * queued for the admin. Main group included; noise stays noise. ═══ */
-  if (isGroup && text && isNeededUpdate(text)){
+  /* v74.1: main group + real SCHOOL groups only — a "results are out"
+   * joke in a meme group is not an update you need. */
+  if (isGroup && text && isNeededUpdate(text) && (chatJid === mainGroupJid || isSchoolGroup(chatJid))){
     queueNeededUpdate(getGroupName(chatJid) || chatJid, text);
     pushLog('info','updates','Queued needed update from ' + (getGroupName(chatJid) || chatJid));
   }
@@ -5625,7 +5676,9 @@ async function handleMessage(msg){
      * to the SCHOOL account, which digests their docs to you. The bot
      * skips those to guarantee exactly-one reply; everywhere else the
      * bot reads docs (main group → digest, others → silent cache). */
-    const schoolOwnedDoc = isGroup && chatJid !== mainGroupJid && schoolRegistry.has(chatJid);
+    /* v74.1: only a real SCHOOL group is school-owned — same classifier
+     * as the school side, so both accounts always agree on the owner. */
+    const schoolOwnedDoc = isGroup && chatJid !== mainGroupJid && isSchoolGroup(chatJid);
     if (schoolOwnedDoc) return;      // school handles this one — no double digest
     const doc = await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'groups');
     if (doc) return;                 // docs are not chat text — stop here
@@ -5761,10 +5814,10 @@ async function handleMessage(msg){
           }
         }
         if (gIntent.type === 'video'){
-          /* ═══ v72: MEMBERS CAN REQUEST SPECIFIC VIDEOS — a real video
-           * engine (YouTube → xnxx → xhamster → eporner), NOT the gif
-           * channel it used to fall into ("wrong files" complaint).
-           * Rate limit: 3 video requests/hour per member. ═══ */
+          /* ═══ v73 UPDATE: MEMBERS CAN REQUEST SPECIFIC VIDEOS — a real
+           * video engine (your configured video slots via scraper /video),
+           * NOT the gif channel it used to fall into ("wrong files"
+           * complaint). Rate limit: 3 video requests/hour per member. ═══ */
           if (!isAdmin && !videoScheduler.canRequest(senderJid)){
             await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 3, 'slow', 'group', true);
             return;
@@ -5919,7 +5972,7 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v72.3 ONLINE\n' +
+            'BreadBot v74.0.0 ONLINE\n' +
             'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -6099,6 +6152,121 @@ async function refreshSchoolRegistry(){
 }
 function getSchoolGroupName(jid){ return schoolRegistry.get(jid) || null; }
 
+/* ═══ v74 REGISTRY SELF-HEAL — "the bot gets confused which ones are
+ * school groups" ═══
+ * refreshSchoolRegistry() used to run ONCE, 4 s after the school
+ * account connected. Any group joined AFTER that boot moment (a new
+ * class group, an added study group, a renamed group…) never landed
+ * in schoolRegistry — so its documents were mis-routed to the GROUPS
+ * account (double digests / wrong owner) and observe lines showed raw
+ * JIDs instead of names. Fix: (a) when the school account sees a group
+ * jid it does not know, schedule a debounced refresh (max once per
+ * minute); (b) a periodic refresh every 15 min keeps names fresh. */
+let schoolRegistryRefreshAt = 0;
+function scheduleSchoolRegistryRefresh(){
+  const now = Date.now();
+  if (now - schoolRegistryRefreshAt < 60000) return;   /* max 1/min */
+  schoolRegistryRefreshAt = now;
+  setTimeout(function(){ refreshSchoolRegistry().catch(function(){}); }, 1500);
+}
+let schoolRegistryTimer = null;
+function armSchoolRegistryTimer(){
+  if (schoolRegistryTimer) return;                     /* no stacking on reconnects */
+  schoolRegistryTimer = setInterval(function(){ refreshSchoolRegistry().catch(function(){}); }, 15 * 60 * 1000);
+  if (schoolRegistryTimer && typeof schoolRegistryTimer.unref === 'function') schoolRegistryTimer.unref();
+}
+
+/* ═══ v74.1 SCHOOL-GROUP CLASSIFIER — "which ones are school groups,
+ * which conversations are school related" ═══
+ * schoolRegistry lists EVERY group the admin's own phone is in —
+ * family, memes, work — so observe mode triaged ALL of them and the
+ * needed-updates filter fired on any group where someone said
+ * "results are out". Fix: a real classifier with THREE layers,
+ * persisted to school_groups.json:
+ *   1. MANUAL  — !schoolgroup add pins a group (always wins)
+ *   2. REMOVED — !schoolgroup del mutes even a school-looking name
+ *   3. AUTO    — the group NAME looks like a class/module group
+ * Observe triage, school-side doc ownership, groups-side doc skip and
+ * needed-updates all run through isSchoolGroup() now. The MAIN group
+ * stays groups-bot territory in every rule. */
+const SCHOOL_GROUPS_FILE = path.join(__dirname, 'school_groups.json');
+const schoolGroupCfg = { auto: true, manual: [], removed: [] };
+function loadSchoolGroups(){
+  try {
+    if (fs.existsSync(SCHOOL_GROUPS_FILE)){
+      const d = JSON.parse(fs.readFileSync(SCHOOL_GROUPS_FILE, 'utf8'));
+      if (d && typeof d === 'object'){
+        schoolGroupCfg.auto    = d.auto !== false;
+        schoolGroupCfg.manual  = Array.isArray(d.manual)  ? d.manual.filter(function(x){ return typeof x === 'string'; })  : [];
+        schoolGroupCfg.removed = Array.isArray(d.removed) ? d.removed.filter(function(x){ return typeof x === 'string'; }) : [];
+      }
+    }
+  } catch(e){ pushLog('warn','schoolgroups','load: ' + e.message); }
+}
+function saveSchoolGroups(){
+  try { fs.writeFileSync(SCHOOL_GROUPS_FILE, JSON.stringify(schoolGroupCfg, null, 2)); }
+  catch(e){ pushLog('warn','schoolgroups','save: ' + e.message); }
+}
+loadSchoolGroups();
+/* A group NAME that looks like an actual class/module group */
+const SCHOOL_NAME_RE = /\b(bsc|bss|hnd|msc|part\s*[1-4]|level\s*[1-4]|[1-4]\.[12]|semester|lecture|lecturer|tutorial|practical|timetable|assignment|modul|faculty|department|staff)\b/i;
+function schoolGroupNameAny(chatJid){
+  const name = schoolRegistry.get(chatJid);
+  if (name) return name;
+  try { if (typeof getGroupName === 'function'){ const g = getGroupName(chatJid); if (g) return g; } } catch(e){}
+  return null;
+}
+function isSchoolGroup(chatJid){
+  const jid = String(chatJid || '');
+  if (!jid) return false;
+  if (schoolGroupCfg.manual.indexOf(jid) >= 0) return true;     /* explicit pin wins */
+  if (schoolGroupCfg.removed.indexOf(jid) >= 0) return false;   /* explicit mute wins */
+  if (!schoolGroupCfg.auto) return false;
+  const name = schoolGroupNameAny(jid);
+  return !!(name && SCHOOL_NAME_RE.test(name));
+}
+function markSchoolGroup(jid, on){
+  jid = String(jid || '');
+  if (!jid) return false;
+  if (on){
+    schoolGroupCfg.removed = schoolGroupCfg.removed.filter(function(x){ return x !== jid; });
+    if (schoolGroupCfg.manual.indexOf(jid) < 0) schoolGroupCfg.manual.push(jid);
+  } else {
+    schoolGroupCfg.manual = schoolGroupCfg.manual.filter(function(x){ return x !== jid; });
+    if (schoolGroupCfg.removed.indexOf(jid) < 0) schoolGroupCfg.removed.push(jid);
+  }
+  saveSchoolGroups();
+  return true;
+}
+/* one quiet log line per non-school group — tells you HOW to fix a miss */
+const schoolSkipLogged = new Set();
+function schoolSkipLogOnce(jid, name){
+  if (schoolSkipLogged.has(jid)) return;
+  schoolSkipLogged.add(jid);
+  if (schoolSkipLogged.size > 300) schoolSkipLogged.clear();
+  pushLog('info','schoolgroups','Non-school group "' + (name || jid) + '" not triaged — mark it with !schoolgroup add if it IS a class group');
+}
+/* "!schoolgroup add botany" → the jid; searches BOTH registries */
+function resolveSchoolGroupTarget(word){
+  const w = String(word || '').trim();
+  if (!w) return null;
+  if (w.indexOf('@g.us') > 0) return w;                          /* raw jid */
+  const low = w.toLowerCase();
+  for (const [jid, name] of schoolRegistry){
+    if ((name || '').toLowerCase().indexOf(low) >= 0) return jid;
+  }
+  try {
+    if (typeof joinedGroups === 'object' && joinedGroups && typeof joinedGroups.forEach === 'function'){
+      let hit = null;
+      joinedGroups.forEach(function(v, jid){
+        if (!hit && v && v.name && v.name.toLowerCase().indexOf(low) >= 0) hit = jid;
+      });
+      if (hit) return hit;
+    }
+  } catch(e){}
+  return null;
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  v68 SCHOOL ACCOUNT — LOCKED TO THE ADMIN'S DM
  *  · Replies ONLY to the admin's DM (commands, buttons, study chat).
@@ -6111,7 +6279,8 @@ function getSchoolGroupName(jid){ return schoolRegistry.get(jid) || null; }
 const SCHOOL_COMMANDS = ['help','commands','menu','ping','test','status','stats','today','week',
   'timetable','weather','addlecture','dellecture','addassignment','delassignment',
   'study','deadlines','pdf','docs','forgetdocs','updates','tasks','canceltask',
-  'whoami','summary','jobs','flow','registry','logs','errors','st','scrapertest'];
+  'whoami','summary','jobs','flow','registry','logs','errors','st','scrapertest',
+  'schoolgroup','schoolgroups'];
 
 let schoolAiHintSent = false;   /* v70: one-time AI-off hint */
 async function handleSchoolAdminCommand(text, chatJid, msg){
@@ -6281,7 +6450,9 @@ async function handleSchoolMessage(msg){
      *   · your DMs: only the self-chat (or an incoming admin DM) — a
      *     PDF you send to the BOT is the bot's; school ignores it. */
     if (m?.documentMessage || m?.documentWithCaptionMessage){
-      const schoolGroupOwned = isGroup && chatJid !== mainGroupJid && schoolRegistry.has(chatJid);
+      /* v74.1: ownership now needs a real SCHOOL group — not just "the
+       * school account can see it" (that was every group on the phone). */
+      const schoolGroupOwned = isGroup && chatJid !== mainGroupJid && isSchoolGroup(chatJid);
       const dmAllowed = !isGroup && isAdmin && (!fromMe || isSelfChat);
       if ((schoolGroupOwned || dmAllowed) && claimSchool(msg.key?.id)){
         await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'school');
@@ -6299,7 +6470,18 @@ async function handleSchoolMessage(msg){
      * No noise, no 147-item floods, no hallucinated deadlines. NEVER
      * reply into the group. */
     if (isGroup){
-      if (text && !fromMe) schoolObservePush(getSchoolGroupName(chatJid) || chatJid, text);
+      if (!schoolRegistry.has(chatJid)) scheduleSchoolRegistryRefresh();   /* v74: unknown group → self-heal the registry */
+      /* v74.1 CLASSIFIER: only SCHOOL groups get AI-triaged. The school
+       * account is the admin's own phone — it also sees family/meme/work
+       * groups, and triaging those was exactly the "bot confuses school
+       * chats" bug. Non-school groups stay panel-only (never triaged). */
+      if (text && !fromMe){
+        if (isSchoolGroup(chatJid) && chatJid !== mainGroupJid){
+          schoolObservePush(getSchoolGroupName(chatJid) || chatJid, text);
+        } else {
+          schoolSkipLogOnce(chatJid, getSchoolGroupName(chatJid));
+        }
+      }
       return;                            // strictly read-only in groups
     }
 
@@ -6427,6 +6609,7 @@ async function connectSchoolBot(){
         try { await schoolSock.sendPresenceUpdate('available'); } catch(e){}
 
         setTimeout(function(){ refreshSchoolRegistry(); }, 4000);
+        armSchoolRegistryTimer();   /* v74: school-registry stays fresh forever (15 min) */
 
         pushLiveMessage({
           id: 'school-boot-' + Date.now(), ts: new Date().toISOString(),
@@ -6437,7 +6620,7 @@ async function connectSchoolBot(){
         });
         try {
           await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v72.3 SCHOOL account online\n' +
+            '🏫 BreadBot v74.0.0 SCHOOL account online\n' +
             'Bot: ' + schoolNumber + '\n' +
             'Role: admin monitor — commands + reports only (AI auto-chat OFF)\n' +
             'Send "menu" for buttons · "today" · "weather" · "ask <question>" = AI · send me PDFs/DOCX to read',
@@ -6677,7 +6860,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v72.3</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v74.0.0</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -6698,7 +6881,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v72.3 — dual account</h1>
+<h1>BreadBot v74.0.0 — dual account</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | School: <b id="ss">-</b></div>
 <div class="grid">
@@ -6959,7 +7142,7 @@ var envArr=(r.envMyLinks?String(r.envMyLinks).split(','):[]);var envDiag=d.envLi
 var seenUrls=slots.map(function(s){return String(s.url||'');});
 for(var j=0;j<envArr.length;j++){var eu=envArr[j].trim();if(!eu)continue;if(seenUrls.indexOf(eu)>=0)continue;var ed=envDiag[j]||{};
 h+='<div style="border-top:1px solid #21262d;padding:4px 0"><b>env+'+(j+1)+'</b> '+(ed.enabled!==false?'<span style="color:#3fb950">ON</span>':'<span style="color:#d29922">off</span>')+' <b>'+esc(ed.type||'image')+'</b> · MYLINKS env<br><span style="color:#8b949e;word-break:break-all">'+esc(eu)+'</span></div>';}
-h+='<div style="border-top:1px solid #21262d;padding:4px 0;color:#8b949e">Engines: images = your image slots + Bing boost · gifs = your gif slots (Tenor) · videos = YouTube (always on)</div>';
+h+='<div style="border-top:1px solid #21262d;padding:4px 0;color:#8b949e">Sources: ONLY your slots (my_links.json / MYLINKS env) · types: image · gif · video · music · no slots = no results</div>';
 el.innerHTML=h;}catch(e){el.innerHTML='<span style="color:#f85149">failed: '+esc(e.message)+'</span>';}}
 loadSchedules();loadMyLinks();setInterval(loadSchedules,15000);setInterval(loadMyLinks,60000);
 </script></body></html>`;
@@ -7183,9 +7366,9 @@ app.post('/admin/cleantemp', async function(req,res){
 /* ═══ v71.2 SCRAPER SITES — proxy the scraper /my-links so the panel lists
  * the ACTUAL websites from the files (slots + per-slot diagnostics) ═══ */
 app.get('/admin/mylinks', async function(req,res){
-  /* v71.2: ALWAYS answers ok:true — the 7 hard-coded sites (HARD_LINKS)
-   * are built into the bot, and live scraper diagnostics are merged on
-   * top when the scraper is up. The panel never shows an empty card. */
+  /* v73: ALWAYS answers ok:true — the panel lists the LIVE scraper
+   * diagnostics when the scraper is up; HARD_LINKS is an (empty)
+   * offline fallback view since there are no built-in sites anymore. */
   const envMyLinks = process.env.MYLINKS || MY_LINKS_ENV.join(',');
   const hardData = {
     links: HARD_LINKS,
@@ -7249,7 +7432,7 @@ app.get('/admin/aitest', async function(req,res){ res.json(await testAllProvider
 app.post('/admin/scraper-test', async function(req,res){
   /* v71.3: THREE test kinds from the panel — 🖼 image / 🎞 gif / 🎬 video.
    * kind=image keeps the classic search→download flow; gif runs the
-   * scraper /gif channel; video runs the YouTube /video pipeline. */
+   * scraper /gif channel; video runs the configured-slots /video pipeline. */
   const query = String(req.body?.query || '').trim().slice(0, 120);
   const kind = ['image','gif','video'].includes(String(req.body?.kind)) ? String(req.body.kind) : 'image';
   if (!query) return res.json({ ok:false, error:'Empty query — type a name first.' });
@@ -7261,7 +7444,7 @@ app.post('/admin/scraper-test', async function(req,res){
     const v = await scraperVideo(query);
     if (!v.ok) return res.json({ ok:false, query, kind,
       steps:{ search:{ ok:false, ms:Date.now()-t0, error:v.error } },
-      hint:'YouTube pipeline failed — check the panel logs for the exact error.' });
+      hint:'Video pipeline failed (no configured video slots, or none returned a file) — check the panel logs for the exact error.' });
     pushLog('info','scraper','Panel test [' + kind + '] OK: "' + query + '" → ' + (v.title || query) +
       (v.sizeBytes ? ' (' + (v.sizeBytes/1024/1024).toFixed(1) + 'MB)' : '') + ' in ' + (Date.now()-t0) + 'ms');
     return res.json({ ok:true, query, kind,

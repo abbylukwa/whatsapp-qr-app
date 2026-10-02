@@ -1,5 +1,72 @@
 # BreadBot v72 — whatsapp-qr-app
 
+## v74.0.0 — SCHOOL-GROUP CLASSIFIER + REGISTRY SELF-HEAL (whole-number release)
+
+WHY: owner report — "the bot gets confused which ones are school group
+accounts and also which conversations are school related".
+
+ROOT CAUSE: the school account is the admin's OWN phone number, so
+schoolRegistry listed EVERY group that phone is in — family, memes,
+work — not just class groups. Observe mode AI-triaged all of them,
+doc ownership treated every non-main group as school-owned, and the
+needed-updates filter fired on any group where someone said "results
+are out". There was NO school-group classification at all.
+
+1. v74.1 SCHOOL-GROUP CLASSIFIER (new school_groups.json, gitignored):
+   three layers — (a) MANUAL: `!schoolgroup add|del <name piece|jid>`
+   always wins (pins / mutes a specific group, persisted);
+   (b) REMOVED set: a manual del mutes even a school-looking name;
+   (c) AUTO: the group NAME decides (bsc/bss/hnd/msc/part 1-4/level/
+   1-4/semester/lecture/tutorial/practical/timetable/assignment/module/
+   faculty/department/staff). `!schoolgroup auto on|off` switches the
+   name layer; `!schoolgroups` lists every group seen with ✅/➖ marks
+   and (pinned)/(muted) tags.
+2. The classifier now gates ALL FOUR school-routing rules: observe-mode
+   AI triage (school handler), school-side doc ownership, groups-side
+   doc skip (both accounts agree on the owner), and the needed-updates
+   queue (main group + real school groups only). The MAIN group stays
+   groups-bot territory everywhere.
+3. v74 REGISTRY SELF-HEAL (from the interrupted session, now finished
+   + test-locked): unknown group jid → debounced refreshSchoolRegistry
+   (max 1/min) + a 15-min periodic refresh, so groups joined after boot
+   get their names and classification automatically.
+4. Misses are explainable: a non-school group that receives a doc or
+   chatter logs ONE line — "not triaged — mark it with !schoolgroup
+   add if it IS a class group".
+5. Version is now a whole number: BreadBot v74.0.0 (panel, boot
+   messages, COMMAND_LIST, self-test all updated).
+TESTS: tools/test_v74_routing.js 51/51 — classifier layers, family-
+group non-triage, non-school doc skip, unknown-group self-heal,
+classified observe, doc ownership, span hygiene (zero media links).
+
+## v73.1 — MYLINKS-ONLY CARRIER + !vidsites SITE PICKER
+
+WHY: owner request — all media links unified into the scraper's
+my_links.json (single source of truth); "first on videos search should
+start on yonalethu or user can choose which one they want by listing
+the available websites".
+
+1. ZERO media links left in the bot: MY_LINKS_ENV default '' (the old
+   7 hardcoded URL defaults are gone), HARD_LINKS=[] (panel now shows
+   live scraper diagnostics instead), SCRAPER_SFW_SITE default 'auto',
+   redgifs-downloader require REMOVED (!nsfwvideo rerouted onto the
+   owner's slots via sendMediaUrl). The bot carries no sources — every
+   search/download is resolved by the scraper from my_links.json
+   (hot-reloaded) / MYLINKS env / per-request slots.
+2. !vidsites lists the scraper's configured video sites (GET
+   /video-sites, numbered, default-first).
+3. !nsfwvideo <q> [site:<name|#>] and DM/group video requests forward
+   an optional site pick; absent = the scraper's file order (YonaYethuu
+   first). MYLINKS env urls are forwarded with every search — your
+   sites tried FIRST.
+4. Stale tests asserting removed links deleted (test_v683/test_v684/
+   test_v70); test_realistic mock site param 'darknaija'→'auto';
+   stale xnxx→xhamster→eporner comments/help/panel text scrubbed.
+5. FINAL SWEEP: zero media-site URLs or site names remain in
+   server.js/brain.js/videoScheduler.js — matches are comments only.
+6. Version identity synced to 73.1.0 (package.json + panel/boot
+   markers; internal v73 comments aligned).
+
 ## v72.3 — EVERY ADMIN COMMAND VERIFIED + !nsfw actually toggles now
 
 WHY: "verify every single admin command works and remove all the

@@ -1,37 +1,383 @@
 {
-  "_comment": "API Keys Configuration — 20 slots, 60% video_pipeline (12), rest split across platforms",
+  "_comment": "API Keys Configuration \u2014 v82 \u2014 28 slots, 60% video_pipeline, 8 new free keys (Rewind x4, Gemini x2, Groq x2)",
   "_usage": "Set 'assignTo' to: 'video_pipeline', 'twitter', 'whatsapp', 'research', 'all'",
-  "_scope_options": ["all", "youtube", "facebook", "twitter", "tiktok", "main", "video_pipeline", "research"],
-  "_control_options": ["everything", "dm_only", "comments_only", "broadcast_only", "content_generation", "video_rendering", "tts", "analytics", "verification", "script_gen"],
-
-  "keys": [
-    {"name":"video_research_1","assignTo":"video_pipeline","scope":["content_generation","verification"],"priority":90,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Deep research + fact verification"},
-    {"name":"video_research_2","assignTo":"video_pipeline","scope":["content_generation","verification"],"priority":85,"provider":"gemini","freeLimit":"1500 req/day","costInfo":"free","description":"Image search + dimension extraction"},
-    {"name":"video_script_gen","assignTo":"video_pipeline","scope":["script_gen"],"priority":80,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Blender Python script generation"},
-    {"name":"video_physics_check","assignTo":"video_pipeline","scope":["verification"],"priority":95,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Physics verification engine"},
-    {"name":"video_movement_check","assignTo":"video_pipeline","scope":["verification"],"priority":90,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Movement/animation verification"},
-    {"name":"video_dimension_check","assignTo":"video_pipeline","scope":["verification"],"priority":88,"provider":"gemini","freeLimit":"1500 req/day","costInfo":"free","description":"Real-world dimension verification"},
-    {"name":"video_cinematic_check","assignTo":"video_pipeline","scope":["verification"],"priority":85,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Cinematic quality verification"},
-    {"name":"video_audio_check","assignTo":"video_pipeline","scope":["verification"],"priority":82,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Audio quality verification"},
-    {"name":"video_tts_edge","assignTo":"video_pipeline","scope":["tts"],"priority":70,"provider":"edge-tts","freeLimit":"unlimited","costInfo":"free","description":"Edge-TTS voice narration (FREE unlimited)"},
-    {"name":"video_tts_piper","assignTo":"video_pipeline","scope":["tts"],"priority":65,"provider":"piper","freeLimit":"unlimited","costInfo":"free","description":"Piper local TTS (FREE offline)"},
-    {"name":"video_render_sheepit","assignTo":"video_pipeline","scope":["video_rendering"],"priority":60,"provider":"sheepit","freeLimit":"unlimited","costInfo":"free (crowdsourced)","description":"SheepIt render farm (FREE)"},
-    {"name":"video_yt_upload","assignTo":"video_pipeline","scope":["analytics"],"priority":55,"provider":"youtube-api","freeLimit":"6 uploads/day","costInfo":"free quota","description":"YouTube Data API v3 (6/day free)"},
-    {"name":"twitter_post_1","assignTo":"twitter","scope":["content_generation"],"priority":50,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Twitter NSFW caption generation"},
-    {"name":"twitter_reply_1","assignTo":"twitter","scope":["comments_only"],"priority":45,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Twitter reply generation"},
-    {"name":"twitter_dm_1","assignTo":"twitter","scope":["dm_only"],"priority":40,"provider":"openai","freeLimit":0,"costInfo":"$0.03/1K tokens","description":"Twitter DM conversation AI"},
-    {"name":"whatsapp_ai_1","assignTo":"whatsapp","scope":["content_generation","everything"],"priority":50,"provider":"gemini","freeLimit":"1500 req/day","costInfo":"free","description":"WhatsApp AI brain (main)"},
-    {"name":"whatsapp_ai_2","assignTo":"whatsapp","scope":["content_generation"],"priority":45,"provider":"openrouter","freeLimit":0,"costInfo":"pay-per-use","description":"WhatsApp AI backup provider"},
-    {"name":"research_web_1","assignTo":"research","scope":["content_generation"],"priority":70,"provider":"web-search","freeLimit":"unlimited","costInfo":"free","description":"Web search for deep research"},
-    {"name":"research_image_1","assignTo":"research","scope":["content_generation"],"priority":65,"provider":"image-search","freeLimit":"unlimited","costInfo":"free","description":"Image search for reference photos"},
-    {"name":"research_wiki_1","assignTo":"research","scope":["content_generation"],"priority":60,"provider":"wikipedia","freeLimit":"unlimited","costInfo":"free","description":"Wikipedia API for factual data"}
+  "_scope_options": [
+    "all",
+    "youtube",
+    "facebook",
+    "twitter",
+    "tiktok",
+    "main",
+    "video_pipeline",
+    "research"
   ],
-
+  "_control_options": [
+    "everything",
+    "dm_only",
+    "comments_only",
+    "broadcast_only",
+    "content_generation",
+    "video_rendering",
+    "tts",
+    "analytics",
+    "verification",
+    "script_gen"
+  ],
+  "keys": [
+    {
+      "name": "video_research_1",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "content_generation",
+        "verification"
+      ],
+      "priority": 90,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Deep research + fact verification"
+    },
+    {
+      "name": "video_research_2",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "content_generation",
+        "verification"
+      ],
+      "priority": 85,
+      "provider": "gemini",
+      "freeLimit": "1500 req/day",
+      "costInfo": "free",
+      "description": "Image search + dimension extraction"
+    },
+    {
+      "name": "video_script_gen",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "script_gen"
+      ],
+      "priority": 80,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Blender Python script generation"
+    },
+    {
+      "name": "video_physics_check",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "verification"
+      ],
+      "priority": 95,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Physics verification engine"
+    },
+    {
+      "name": "video_movement_check",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "verification"
+      ],
+      "priority": 90,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Movement/animation verification"
+    },
+    {
+      "name": "video_dimension_check",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "verification"
+      ],
+      "priority": 88,
+      "provider": "gemini",
+      "freeLimit": "1500 req/day",
+      "costInfo": "free",
+      "description": "Real-world dimension verification"
+    },
+    {
+      "name": "video_cinematic_check",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "verification"
+      ],
+      "priority": 85,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Cinematic quality verification"
+    },
+    {
+      "name": "video_audio_check",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "verification"
+      ],
+      "priority": 82,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Audio quality verification"
+    },
+    {
+      "name": "video_tts_edge",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "tts"
+      ],
+      "priority": 70,
+      "provider": "edge-tts",
+      "freeLimit": "unlimited",
+      "costInfo": "free",
+      "description": "Edge-TTS voice narration (FREE unlimited)"
+    },
+    {
+      "name": "video_tts_piper",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "tts"
+      ],
+      "priority": 65,
+      "provider": "piper",
+      "freeLimit": "unlimited",
+      "costInfo": "free",
+      "description": "Piper local TTS (FREE offline)"
+    },
+    {
+      "name": "video_render_sheepit",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "video_rendering"
+      ],
+      "priority": 60,
+      "provider": "sheepit",
+      "freeLimit": "unlimited",
+      "costInfo": "free (crowdsourced)",
+      "description": "SheepIt render farm (FREE)"
+    },
+    {
+      "name": "video_yt_upload",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "analytics"
+      ],
+      "priority": 55,
+      "provider": "youtube-api",
+      "freeLimit": "6 uploads/day",
+      "costInfo": "free quota",
+      "description": "YouTube Data API v3 (6/day free)"
+    },
+    {
+      "name": "twitter_post_1",
+      "assignTo": "twitter",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 50,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Twitter NSFW caption generation"
+    },
+    {
+      "name": "twitter_reply_1",
+      "assignTo": "twitter",
+      "scope": [
+        "comments_only"
+      ],
+      "priority": 45,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Twitter reply generation"
+    },
+    {
+      "name": "twitter_dm_1",
+      "assignTo": "twitter",
+      "scope": [
+        "dm_only"
+      ],
+      "priority": 40,
+      "provider": "openai",
+      "freeLimit": 0,
+      "costInfo": "$0.03/1K tokens",
+      "description": "Twitter DM conversation AI"
+    },
+    {
+      "name": "whatsapp_ai_1",
+      "assignTo": "whatsapp",
+      "scope": [
+        "content_generation",
+        "everything"
+      ],
+      "priority": 50,
+      "provider": "gemini",
+      "freeLimit": "1500 req/day",
+      "costInfo": "free",
+      "description": "WhatsApp AI brain (main)"
+    },
+    {
+      "name": "whatsapp_ai_2",
+      "assignTo": "whatsapp",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 45,
+      "provider": "openrouter",
+      "freeLimit": 0,
+      "costInfo": "pay-per-use",
+      "description": "WhatsApp AI backup provider"
+    },
+    {
+      "name": "research_web_1",
+      "assignTo": "research",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 70,
+      "provider": "web-search",
+      "freeLimit": "unlimited",
+      "costInfo": "free",
+      "description": "Web search for deep research"
+    },
+    {
+      "name": "research_image_1",
+      "assignTo": "research",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 65,
+      "provider": "image-search",
+      "freeLimit": "unlimited",
+      "costInfo": "free",
+      "description": "Image search for reference photos"
+    },
+    {
+      "name": "research_wiki_1",
+      "assignTo": "research",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 60,
+      "provider": "wikipedia",
+      "freeLimit": "unlimited",
+      "costInfo": "free",
+      "description": "Wikipedia API for factual data"
+    },
+    {
+      "name": "rewind_1",
+      "assignTo": "all",
+      "scope": [
+        "content_generation",
+        "everything"
+      ],
+      "priority": 75,
+      "provider": "rewind",
+      "freeLimit": "varies",
+      "costInfo": "free tier",
+      "description": "Rewind AI \u2014 primary uncensored (sk-rewind-4333d7)"
+    },
+    {
+      "name": "rewind_2",
+      "assignTo": "twitter",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 70,
+      "provider": "rewind",
+      "freeLimit": "varies",
+      "costInfo": "free tier",
+      "description": "Rewind AI \u2014 Twitter caption gen (sk-rewind-f15c84)"
+    },
+    {
+      "name": "rewind_3",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "script_gen",
+        "verification"
+      ],
+      "priority": 72,
+      "provider": "rewind",
+      "freeLimit": "varies",
+      "costInfo": "free tier",
+      "description": "Rewind AI \u2014 video script (sk-rewind-07354d)"
+    },
+    {
+      "name": "rewind_4",
+      "assignTo": "whatsapp",
+      "scope": [
+        "content_generation"
+      ],
+      "priority": 68,
+      "provider": "rewind",
+      "freeLimit": "varies",
+      "costInfo": "free tier",
+      "description": "Rewind AI \u2014 WhatsApp brain backup (sk-rewind-3aa655)"
+    },
+    {
+      "name": "gemini_1",
+      "assignTo": "all",
+      "scope": [
+        "content_generation",
+        "verification"
+      ],
+      "priority": 80,
+      "provider": "gemini",
+      "freeLimit": "1500 req/day",
+      "costInfo": "free",
+      "description": "Google Gemini \u2014 primary (AQ...N7IA)"
+    },
+    {
+      "name": "gemini_2",
+      "assignTo": "video_pipeline",
+      "scope": [
+        "verification",
+        "content_generation"
+      ],
+      "priority": 78,
+      "provider": "gemini",
+      "freeLimit": "1500 req/day",
+      "costInfo": "free",
+      "description": "Google Gemini \u2014 video verification (AQ...q0xw)"
+    },
+    {
+      "name": "groq_1",
+      "assignTo": "all",
+      "scope": [
+        "content_generation",
+        "everything"
+      ],
+      "priority": 76,
+      "provider": "groq",
+      "freeLimit": "30 RPM, 14.4K RPD",
+      "costInfo": "free",
+      "description": "Groq \u2014 fast inference llama-3.3-70b (gsk_GomjO0)"
+    },
+    {
+      "name": "groq_2",
+      "assignTo": "twitter",
+      "scope": [
+        "content_generation",
+        "comments_only"
+      ],
+      "priority": 74,
+      "provider": "groq",
+      "freeLimit": "30 RPM",
+      "costInfo": "free",
+      "description": "Groq \u2014 Twitter replies (gsk_SgHJ4D)"
+    }
+  ],
   "apis": {
     "openai": {
       "key": "",
       "assignTo": "main",
-      "scope": ["content_generation", "everything"],
+      "scope": [
+        "content_generation",
+        "everything"
+      ],
       "model": "gpt-4",
       "maxTokens": 4096,
       "enabled": false,
@@ -40,89 +386,110 @@
     "google_tts": {
       "key": "",
       "assignTo": "all",
-      "scope": ["tts"],
+      "scope": [
+        "tts"
+      ],
       "freeLimit": "1M chars/month",
       "enabled": false,
-      "_note": "Google Cloud TTS — 1M chars/month free"
+      "_note": "Google Cloud TTS \u2014 1M chars/month free"
     },
     "azure_tts": {
       "key": "",
       "region": "eastus",
       "assignTo": "all",
-      "scope": ["tts"],
+      "scope": [
+        "tts"
+      ],
       "freeLimit": "5M chars/month",
       "enabled": false,
-      "_note": "Azure TTS — 5M chars/month free (BEST free tier)"
+      "_note": "Azure TTS \u2014 5M chars/month free (BEST free tier)"
     },
     "elevenlabs": {
       "key": "",
       "assignTo": "youtube",
-      "scope": ["tts"],
+      "scope": [
+        "tts"
+      ],
       "freeLimit": "10K chars/month",
       "enabled": false,
-      "_note": "ElevenLabs — most natural voices, 10K chars/month free"
+      "_note": "ElevenLabs \u2014 most natural voices, 10K chars/month free"
     },
     "captcha_2captcha": {
       "key": "",
       "assignTo": "all",
-      "scope": ["everything"],
+      "scope": [
+        "everything"
+      ],
       "cost": "$2.99/1000",
       "enabled": false,
-      "_note": "2Captcha for CAPTCHA solving — use only when necessary"
+      "_note": "2Captcha for CAPTCHA solving \u2014 use only when necessary"
     },
     "captcha_anticaptcha": {
       "key": "",
       "assignTo": "all",
-      "scope": ["everything"],
+      "scope": [
+        "everything"
+      ],
       "cost": "$1.80/1000",
       "enabled": false,
-      "_note": "Anti-Captcha — cheaper alternative"
+      "_note": "Anti-Captcha \u2014 cheaper alternative"
     },
     "proxy_residential": {
       "key": "",
       "provider": "smartproxy",
       "assignTo": "all",
-      "scope": ["everything"],
+      "scope": [
+        "everything"
+      ],
       "cost": "$8/GB",
       "enabled": false,
-      "_note": "Residential proxy — 5-12% detection rate (vs 85-95% datacenter)"
+      "_note": "Residential proxy \u2014 5-12% detection rate (vs 85-95% datacenter)"
     },
     "proxy_isp": {
       "key": "",
       "provider": "",
       "assignTo": "all",
-      "scope": ["everything"],
+      "scope": [
+        "everything"
+      ],
       "cost": "$2-8/IP/month",
       "enabled": false,
-      "_note": "ISP proxy — best for accounts, 5-12% detection rate"
+      "_note": "ISP proxy \u2014 best for accounts, 5-12% detection rate"
     },
     "blender_renderfarm": {
       "key": "",
       "provider": "sheepit",
       "assignTo": "youtube",
-      "scope": ["video_rendering"],
+      "scope": [
+        "video_rendering"
+      ],
       "cost": "free (crowdsourced)",
       "enabled": false,
-      "_note": "SheepIt — free unlimited rendering (crowdsourced). iRender for paid GPU."
+      "_note": "SheepIt \u2014 free unlimited rendering (crowdsourced). iRender for paid GPU."
     },
     "scraper": {
       "key": "",
       "assignTo": "main",
-      "scope": ["content_generation", "analytics"],
+      "scope": [
+        "content_generation",
+        "analytics"
+      ],
       "enabled": false,
       "_note": "Intelligent-scraper API key (from abbylukwa/intelligent-scraper)"
     }
   },
-
   "schedules": {
     "tts_rotation": {
       "description": "Rotate TTS engines to avoid fingerprint",
-      "engines": ["edge-tts", "google_tts", "azure_tts"],
+      "engines": [
+        "edge-tts",
+        "google_tts",
+        "azure_tts"
+      ],
       "current": "edge-tts",
       "rotateEvery": "24h"
     }
   },
-
   "validateVideoKeyRatio": true,
   "_videoKeyMinimum": "60%"
 }

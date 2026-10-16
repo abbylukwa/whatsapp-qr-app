@@ -61,15 +61,16 @@ MYLINKS=
 #
 # DEMO — actual values (long base64 strings you copy from the panel):
 #     SESSION_B64_GROUPS=eyJ2IjoxLCJmaWxlcyI6eyJjcmVkcy5qc29uIjoi...
-#     SESSION_B64_SCHOOL=eyJ2IjoxLCJmaWxlcyI6eyJjcmVkcy5qc29uIjoi...
-
+#     
 # Your scraper deployment (the bot sends MYLINKS to it automatically)
 SCRAPER=https://intelligent-scraper.onrender.com
 
 # ── AI POOL SLOTS — paste keys below, leave empty = unused ──
-API_1=
-API_2=
-API_3=
+API_1=sk-rewind-4333d7fa464607525568ffaa02ec1d5c
+API_2=AQ.Ab8RN6KSESLOymMaDOMjo5rpM-mSwladUus6ja8yRlBVnxN7IA
+# NOTE: Gemini keys work but are region-locked (User location not supported). May work from different region.
+API_3=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
+# NOTE: Groq keys return 403 Forbidden — may need to be regenerated at console.groq.com
 API_4=
 API_5=
 API_6=
@@ -82,7 +83,7 @@ API_8=
 #API_1_MODEL=
 
 # Legacy named keys still work too (they join the same pool):
-REWIND_KEY=
+REWIND_KEY=sk-rewind-4333d7fa464607525568ffaa02ec1d5c
 REWIND_MODEL=rewind-uncensored
 VENICE_KEY=
 VENICE_MODEL=venice-uncensored
@@ -151,3 +152,16 @@ TWITTER_PASSWORD=
 # ── TikTok ──
 TIKTOK_USERNAME=
 TIKTOK_PASSWORD=
+
+# ── v82: Additional Rewind Keys ──
+REWIND_KEY_2=sk-rewind-f15c84b6e4e2a4c5c8a0034b6240b0f9
+REWIND_KEY_3=sk-rewind-07354d0da5b3ade6519b305eb4b5db11
+REWIND_KEY_4=sk-rewind-3aa65541a08f460fdf56b4377e00437a
+
+# ── v82: Gemini API Keys ──
+GEMINI_KEY=AQ.Ab8RN6KSESLOymMaDOMjo5rpM-mSwladUus6ja8yRlBVnxN7IA
+GEMINI_KEY_2=AQ.Ab8RN6IGV0gI5sk0x6EO1im5KX_rEh4ZBd_sqzZwRNypxnq0xw
+
+# ── v82: Groq API Keys ──
+GROQ_KEY=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
+GROQ_KEY_2=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

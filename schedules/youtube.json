@@ -1,0 +1,90 @@
+{
+  "platform": "youtube",
+  "enabled": true,
+  "tasks": [
+    {
+      "id": "yt-upload",
+      "name": "Upload video",
+      "action": "uploadVideo",
+      "interval": 14400000,
+      "jitter": 0.3,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: 1-5/day. 4h gap with 30% jitter. Circadian gates further."
+    },
+    {
+      "id": "yt-community-post",
+      "name": "Community post",
+      "action": "communityPost",
+      "interval": 43200000,
+      "jitter": 0.25,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: 1-2/day. 12h gap. Content from pipeline."
+    },
+    {
+      "id": "yt-upload-short",
+      "name": "Upload Short",
+      "action": "uploadShort",
+      "interval": 14400000,
+      "jitter": 0.3,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: 1-5/day. 4h gap. Educational + fun facts mix."
+    },
+    {
+      "id": "yt-subscribe",
+      "name": "Subscribe to channels",
+      "action": "subscribe",
+      "interval": 3600000,
+      "jitter": 0.2,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: 10-40/day. 1h gap. Always watches first."
+    },
+    {
+      "id": "yt-comment",
+      "name": "Comment on videos",
+      "action": "comment",
+      "interval": 5400000,
+      "jitter": 0.25,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: 20-50/day. 1.5h gap. Variable text from pipeline."
+    },
+    {
+      "id": "yt-like",
+      "name": "Like videos",
+      "action": "like",
+      "interval": 1800000,
+      "jitter": 0.15,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: 30-60/day. 30min gap. Passive engagement."
+    },
+    {
+      "id": "yt-watch",
+      "name": "Watch videos",
+      "action": "watchVideo",
+      "interval": 7200000,
+      "jitter": 0.3,
+      "enabled": true,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "SAFE: Passive. 2h gap. 30s-2.5min watch time with scrolling."
+    }
+  ]
+}

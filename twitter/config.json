@@ -1,0 +1,62 @@
+{
+  "_comment": "Twitter/X Configuration — INDEPENDENT from WhatsApp (v3.0)",
+  "_instructions": "Twitter now posts NSFW on its OWN schedule using the excited girl persona. No WhatsApp cross-posting. DMs handled independently.",
+
+  "platform": "twitter",
+  "enabled": false,
+
+  "independentNSFW": {
+    "enabled": true,
+    "persona": "excited_girl",
+    "minIntervalMinutes": 60,
+    "maxIntervalMinutes": 180,
+    "_note": "Posts like she woke up in the mood — random 1-3hr intervals"
+  },
+
+  "dmHandling": {
+    "enabled": true,
+    "maxPerCycle": 2,
+    "checkIntervalMinutes": 45,
+    "_note": "Handles DMs with flirty 'this could be us' style"
+  },
+
+  "schedule": {
+    "broadcastFromWhatsApp": false,
+    "broadcastIntervalMinutes": 120,
+    "broadcastJitter": 0.3,
+    "activeHoursStart": 7,
+    "activeHoursEnd": 23,
+    "restDays": [0, 3],
+    "_restDaysNote": "Sunday=0, Wednesday=3 — no automated posts on rest days"
+  },
+
+  "sources": {
+    "_comment": "Twitter sources its OWN content — NOT from WhatsApp",
+    "whatsappAdminBroadcasts": false,
+    "independentNSFW": true,
+    "youtubeLatestUploads": false,
+    "facebookLatestPosts": false,
+    "customMessages": [],
+    "contentFile": "./data/content/twitter-queue.json"
+  },
+
+  "limits": {
+    "_comment": "Safe limits based on research. Twitter detects bots via Botometer + behavioral biometrics.",
+    "tweetsPerHour": 5,
+    "tweetsPerDay": 30,
+    "repliesPerDay": 20,
+    "followsPerDay": 30,
+    "likesPerDay": 100,
+    "dmsPerDay": 15,
+    "cooldownMs": 30000,
+    "_note": "Operating AT limits is itself a detection signal — stay 30% below"
+  },
+
+  "antiDetect": {
+    "varyTweetText": true,
+    "addHashtags": true,
+    "maxHashtags": 3,
+    "neverPostIdentical": true,
+    "useSpintax": true
+  }
+}

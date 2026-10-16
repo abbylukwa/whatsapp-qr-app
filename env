@@ -127,3 +127,27 @@ LOG_TO_ADMIN=false
 # ── School observe mode (group messages → AI triage → admin) ──
 # How long school groups are watched before ONE triage pass runs:
 SCHOOL_OBSERVE_WINDOW_SEC=120
+
+# ══════════════════════════════════════════════════════════════
+#  v75 MULTI-PLATFORM AUTOMATION — Facebook, YouTube, Twitter, TikTok
+#  Each platform is independent: separate browser, data, schedule.
+#  Activated/deactivated via WhatsApp admin commands:
+#    !fb on|off  !yt on|off  !tw on|off  !tt on|off
+#  Anti-bot detection is built into all non-WhatsApp platforms.
+# ══════════════════════════════════════════════════════════════
+
+# ── Facebook ──
+FB_EMAIL=
+FB_PASSWORD=
+
+# ── YouTube (browser automation — unofficial, no API key needed) ──
+YOUTUBE_EMAIL=
+YOUTUBE_PASSWORD=
+
+# ── Twitter/X ──
+TWITTER_USERNAME=
+TWITTER_PASSWORD=
+
+# ── TikTok ──
+TIKTOK_USERNAME=
+TIKTOK_PASSWORD=

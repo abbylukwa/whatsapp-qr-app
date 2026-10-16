@@ -1,21 +1,18 @@
 'use strict';
 /* ════════════════════════════════════════════════════════════════
- *  videoScheduler.js — BreadBot v72 MAIN-GROUP VIDEO SCHEDULER
+ *  videoScheduler.js — BreadBot v73 MAIN-GROUP VIDEO SCHEDULER
  * ════════════════════════════════════════════════════════════════
  *  WHAT IT DOES
  *  - Posts NSFW videos to ONE main group on a fixed timetable:
- *      6 runs/day (Harare time = UTC+2, follows the bot's TZ_OFFSET_HOURS)
+ *      6 runs/day (Harare time = UTC+2)
  *      15 videos per run (env SCHED_PER_RUN)
- *  - HUMAN PACING: every send waits a random 25–55s ("download time
- *    delay") so the group never sees a machine-gun burst.
- *  - DIFFERENT QUERY → DIFFERENT VIDEO: every video in a run comes
- *    from a DIFFERENT query, picked round-robin from a 20-query
- *    variety pool; already-sent titles are passed to the scraper as
- *    an exclude list, and the scraper keeps its own recent-clip list.
- *  - SURVIVES RESTARTS: state (group, on/off, last hour, history)
- *    persists in data/video-scheduler.json.
- *  - FULLY INJECTABLE for tests: initVideoScheduler(deps) takes
- *    sendVideo / fetchVideo / log — no WhatsApp needed to test.
+ *  - HUMAN PACING: every send waits a random 25–55s
+ *  - DIFFERENT QUERY → DIFFERENT VIDEO: every video uses a unique
+ *    query from the QueryEngine (time-aware, varied, never repeated)
+ *  - DEDUP: Media hashes prevent sending the same video twice
+ *  - CROSS-POST HOOK: every video sent triggers onVideoSent() for
+ *    Twitter NSFW cross-posting
+ *  - SURVIVES RESTARTS: state persists in data/video-scheduler.json
  *
  *  ADMIN COMMANDS (wired in server.js):
  *      !sched                 status
@@ -28,106 +25,173 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 /* ── Config (env-overridable) ── */
-const TZ_OFFSET_HOURS = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);   /* 2 = Harare (CAT) */
-const SCHED_HOURS     = (process.env.SCHED_HOURS || '0,4,8,12,16,20')       /* 6 runs/day, Harare local */
+const TZ_OFFSET_HOURS = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);
+const SCHED_HOURS     = (process.env.SCHED_HOURS || '0,4,8,12,16,20')
     .split(',').map(h => parseInt(h, 10)).filter(h => h >= 0 && h <= 23);
 const PER_RUN         = Math.max(1, parseInt(process.env.SCHED_PER_RUN || '15', 10));
 const DELAY_MIN_MS    = Math.max(1000, parseInt(process.env.SCHED_DELAY_MIN_MS || '25000', 10));
 const DELAY_MAX_MS    = Math.max(DELAY_MIN_MS, parseInt(process.env.SCHED_DELAY_MAX_MS || '55000', 10));
 
-/* ── Variety pool — every scheduled video uses a DIFFERENT query ── */
+/* ── State ── */
+const STATE_FILE = path.join(__dirname, 'data', 'video-scheduler.json');
+const state = {
+    groupJid: process.env.SCHED_GROUP_JID || '',
+    enabled:  process.env.SCHED_ENABLED === '1',  // DEFAULT OFF — admin must !sched on
+    lastHourKey: '',
+    queryCursor: 0,
+    sentCount: 0,
+    runCount: 0,
+    lastRun: null,
+    history: [],             /* [{ q, title, source, hash, ts }] */
+    sentMediaHashes: []      /* MD5 hashes of all sent media for dedup */
+};
+let deps = null;
+let timer = null;
+let running = false;
+
+/* ── QueryEngine (lazy-loaded to avoid circular deps) ── */
+let QueryEngine = null;
+let queryEngine = null;
+function getQueryEngine() {
+    if (!queryEngine) {
+        try {
+            QueryEngine = require('./core/content/query-engine');
+            queryEngine = new QueryEngine({ log: deps ? deps.log : console.log });
+            // Load persisted query state
+            if (state.queryEngineState) {
+                queryEngine.loadState(state.queryEngineState);
+            }
+        } catch (e) {
+            // Fallback to default queries if query engine not available
+        }
+    }
+    return queryEngine;
+}
+
+/* ── Default queries (fallback) ── */
 const DEFAULT_QUERIES = [
     'ebony twerk', 'latina booty', 'african porn', 'big booty twerking',
     'ebony dance', 'nigerian twerk', 'south african porn', 'ghana porn',
     'booty shake', 'ebony threesome', 'latina porn', 'ebony bbw',
     'african booty', 'sexy dance', 'twerking compilation', 'ebony lesbian',
-    'kenyan porn', 'ebony milf', 'booty clapping', 'african ebony'
+    'kenyan porn', 'ebony milf', 'booty clapping', 'african ebony',
+    'zimbabwean twerk', 'mapouka dance', 'ebony homemade', 'african amateur',
+    'thick ebony solo', 'ghanaian booty', 'naija dance', 'ebony oil',
+    'african lap dance', 'ebony bbw twerk', 'latina milf', 'african couples',
+    'ebony shower', 'mzansi booty', 'kenyan twerk', 'ebony strip'
 ];
 let QUERIES = (process.env.SCHED_QUERIES || '').split(',').map(s => s.trim()).filter(Boolean);
 if (QUERIES.length < 5) QUERIES = DEFAULT_QUERIES;
-
-/* ── State ── */
-const STATE_FILE = path.join(__dirname, 'data', 'video-scheduler.json');
-const state = {
-    groupJid: process.env.SCHED_GROUP_JID || '',
-    enabled:  process.env.SCHED_ENABLED === '1',
-    lastHourKey: '',            /* 'YYYY-MM-DDTHH' guard — one run per scheduled hour */
-    queryCursor: 0,             /* round-robin position in QUERIES */
-    sentCount: 0,
-    runCount: 0,
-    lastRun: null,              /* { at, sent, failed, queries:[...] } */
-    history: []                 /* [{ q, title, source, ts }] — feeds the exclude list */
-};
-let deps = null;                /* { sendVideo, fetchVideo, log, now } */
-let timer = null;
-let running = false;
 
 /* ── Persistence ── */
 function loadState(){
     try {
         const raw = fs.readFileSync(STATE_FILE, 'utf8');
         const saved = JSON.parse(raw);
-        Object.assign(state, saved, {});
+        Object.assign(state, saved);
         if (!Array.isArray(state.history)) state.history = [];
-    } catch (e) { /* first boot — defaults */ }
+        if (!Array.isArray(state.sentMediaHashes)) state.sentMediaHashes = [];
+    } catch (e) { /* first boot */ }
 }
 function saveState(){
     try {
         fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+        // Persist query engine state too
+        if (queryEngine) {
+            state.queryEngineState = queryEngine.exportState();
+        }
+        // Cap sentMediaHashes at 5000 to avoid unbounded growth
+        if (state.sentMediaHashes.length > 5000) {
+            state.sentMediaHashes = state.sentMediaHashes.slice(-3000);
+        }
         fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
     } catch (e) { if (deps && deps.log) deps.log('warn', 'sched', 'save: ' + e.message); }
 }
 
 /* ── Time helpers (Harare) ── */
 function harareHour(now){
-    const d = now instanceof Date ? now : (deps && deps.now ? deps.now() : new Date());
+    const d = now instanceof Date ? now : new Date();
     return (d.getUTCHours() + TZ_OFFSET_HOURS) % 24;
 }
 function hourKey(now){
-    const d = now instanceof Date ? now : (deps && deps.now ? deps.now() : new Date());
-    /* shift by TZ offset so the key rolls over at Harare midnight */
+    const d = now instanceof Date ? now : new Date();
     const shifted = new Date(d.getTime() + TZ_OFFSET_HOURS * 3600 * 1000);
     return shifted.toISOString().slice(0, 13);
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const humanDelay = () => DELAY_MIN_MS + Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS));
 
-/* ── Query rotation: every video gets a DIFFERENT query ── */
+/* ── Query rotation ── */
 function nextQuery(){
+    // Use QueryEngine if available (time-aware, varied, deduped)
+    const engine = getQueryEngine();
+    if (engine) {
+        return engine.generate({ hour: harareHour() });
+    }
+    // Fallback: round-robin from static pool
     const q = QUERIES[state.queryCursor % QUERIES.length];
     state.queryCursor = (state.queryCursor + 1) % QUERIES.length;
     return q;
 }
 
+/* ── Media hash for dedup ── */
+function hashMedia(vid) {
+    const key = (vid.mediaUrl || vid.url || '') + '|' + (vid.title || '') + '|' + (vid.source || '');
+    return crypto.createHash('md5').update(key).digest('hex').substring(0, 16);
+}
+
 /* ── The actual run: n videos, different query each, human delays ── */
 async function runOnce(n = PER_RUN, quiet = false){
     if (!deps) throw new Error('scheduler not initialised');
-    if (!state.groupJid) { if (!quiet) deps.log('warn', 'sched', 'no main group set — use !sched here'); return { ok: false, error: 'no main group set (use !sched here)' }; }
+    if (!state.groupJid) { if (!quiet) deps.log('warn', 'sched', 'no main group set — use !sched here'); return { ok: false, error: 'no main group set' }; }
     if (running) return { ok: false, error: 'a run is already in progress' };
     running = true;
-    const summary = { at: new Date().toISOString(), sent: 0, failed: 0, queries: [], delays: [] };
+    const summary = { at: new Date().toISOString(), sent: 0, failed: 0, deduped: 0, queries: [] };
     try {
-        if (!quiet) await deps.sendText(state.groupJid, '🎬 Video drop starting — ' + Math.min(n, QUERIES.length) + ' videos, one every ' + Math.round(DELAY_MIN_MS / 1000) + '-' + Math.round(DELAY_MAX_MS / 1000) + 's. Sit back.');
+        if (!quiet) await deps.sendText(state.groupJid, '🎬 Video drop starting — ' + Math.min(n, QUERIES.length) + ' videos, one every ' + Math.round(DELAY_MIN_MS / 1000) + '-' + Math.round(DELAY_MAX_MS / 1000) + 's.');
+
         for (let i = 0; i < n; i++) {
             const query = nextQuery();
             summary.queries.push(query);
-            /* v72.1: exclude is computed PER VIDEO from the live history —
-             * video #2 must not repeat video #1, etc. */
-            const exclude = state.history.slice(-10).map(h => h.title).filter(Boolean);
+
+            // Exclude recent titles from history
+            const exclude = state.history.slice(-15).map(h => h.title).filter(Boolean);
+
             let vid = null;
             try {
                 vid = await deps.fetchVideo(query, exclude);
             } catch (e) { deps.log('warn', 'sched', 'fetch "' + query + '": ' + e.message); }
+
             if (vid && vid.ok) {
+                // DEDUP CHECK: skip if we already sent this exact media
+                const mediaHash = hashMedia(vid);
+                if (state.sentMediaHashes.includes(mediaHash)) {
+                    summary.deduped++;
+                    deps.log('info', 'sched', 'dedup: skipping "' + (vid.title || '').slice(0, 40) + '" (already sent)');
+                    continue; // Skip to next video, don't count as failed
+                }
+
                 try {
                     await deps.sendVideo(state.groupJid, vid, '🎬 ' + (vid.title || query).slice(0, 90));
                     summary.sent++;
                     state.sentCount++;
-                    state.history.push({ q: query, title: vid.title || '', source: vid.source || '', ts: Date.now() });
+
+                    // Record in history with hash
+                    state.history.push({ q: query, title: vid.title || '', source: vid.source || '', hash: mediaHash, ts: Date.now() });
                     if (state.history.length > 60) state.history = state.history.slice(-40);
+
+                    // Add to dedup set
+                    state.sentMediaHashes.push(mediaHash);
+
                     deps.log('success', 'sched', `run ${summary.sent}/${n}: "${query}" → ${(vid.title || '').slice(0, 50)}`);
+
+                    // ═══ NO MORE CROSS-POST HOOK ════════════════════════════
+                    // Twitter is now INDEPENDENT from WhatsApp.
+                    // No onVideoSent() hook — Twitter posts on its own schedule.
+                    // WhatsApp NSFW stays in WhatsApp only.
                 } catch (e) {
                     summary.failed++;
                     deps.log('error', 'sched', 'send "' + query + '": ' + e.message);
@@ -136,18 +200,19 @@ async function runOnce(n = PER_RUN, quiet = false){
                 summary.failed++;
                 deps.log('warn', 'sched', 'no video for "' + query + '"' + (vid && vid.error ? ' (' + vid.error.slice(0, 60) + ')' : ''));
             }
-            /* human-like pause between sends — NOT after the last one */
+
+            /* human-like pause between sends */
             if (i < n - 1) {
                 const d = humanDelay();
-                summary.delays.push(Math.round(d / 100) / 10);   /* seconds, 1 decimal */
                 await sleep(d);
             }
         }
+
         state.runCount++;
         state.lastRun = summary;
         saveState();
-        if (!quiet) await deps.sendText(state.groupJid, '✅ Drop done — ' + summary.sent + ' sent' + (summary.failed ? ', ' + summary.failed + ' skipped' : '') + '.');
-        deps.log('info', 'sched', `run complete: ${summary.sent}/${n} sent`);
+        if (!quiet) await deps.sendText(state.groupJid, '✅ Drop done — ' + summary.sent + ' sent' + (summary.failed ? ', ' + summary.failed + ' skipped' : '') + (summary.deduped ? ', ' + summary.deduped + ' deduped' : '') + '.');
+        deps.log('info', 'sched', `run complete: ${summary.sent}/${n} sent, ${summary.deduped} deduped`);
         return { ok: true, ...summary };
     } finally {
         running = false;
@@ -158,17 +223,17 @@ async function runOnce(n = PER_RUN, quiet = false){
 async function tick(){
     if (!state.enabled || running) return;
     const hk = hourKey();
-    if (state.lastHourKey === hk) return;            /* already ran this hour */
+    if (state.lastHourKey === hk) return;
     if (!SCHED_HOURS.includes(harareHour())) return;
     state.lastHourKey = hk;
     saveState();
-    deps.log('info', 'sched', `scheduled run starting (${hk} Harare ${String(harareHour()).padStart(2, '0')}:00)`);
+    deps.log('info', 'sched', `scheduled run starting (Harare ${String(harareHour()).padStart(2, '0')}:00)`);
     try { await runOnce(PER_RUN); } catch (e) { deps.log('error', 'sched', 'run: ' + e.message); }
 }
 
 /* ── Member "video <query>" requests — rate limited per user ── */
-const userRequests = new Map();      /* userId -> [ts] */
-const USER_LIMIT = 3;                /* per hour */
+const userRequests = new Map();
+const USER_LIMIT = 3;
 const USER_WINDOW_MS = 3600 * 1000;
 function canRequest(userId){
     const now = Date.now();
@@ -176,17 +241,14 @@ function canRequest(userId){
     userRequests.set(userId, arr);
     return arr.length < USER_LIMIT;
 }
-function recordRequest(userId){ userRequests.get(userId).push(Date.now()); }
+function recordRequest(userId){ (userRequests.get(userId) || []).push(Date.now()); }
 
 /* ── Init ── */
 function initVideoScheduler(d){
     deps = d;
     loadState();
-    if (state.groupJid) deps.log('info', 'sched', `state loaded — group ${state.groupJid}, ${state.enabled ? 'ON' : 'off'}, ${state.runCount} runs / ${state.sentCount} videos sent`);
+    if (state.groupJid) deps.log('info', 'sched', `state loaded — group ${state.groupJid}, ${state.enabled ? 'ON' : 'off'}, ${state.runCount} runs / ${state.sentCount} videos sent / ${state.sentMediaHashes.length} unique`);
     timer = setInterval(() => { tick().catch(e => deps.log('error', 'sched', 'tick: ' + e.message)); }, 60 * 1000);
-    /* v72.1: expose the api methods ON the module too — server.js calls
-     * videoScheduler.runOnce(...) / .status() / .setGroup(...) directly,
-     * which threw "not a function" before this line. */
     Object.assign(module.exports, api);
     return api;
 }
@@ -211,25 +273,22 @@ const api = {
             harareHour: harareHour(),
             runs: state.runCount,
             sent: state.sentCount,
+            uniqueMedia: state.sentMediaHashes.length,
             lastRun: state.lastRun,
             recent: state.history.slice(-5).map(h => h.title || h.q),
-            running
+            running,
+            queryEngineStats: getQueryEngine()?.getStats()
         };
     },
     runOnce,
     canRequest,
     recordRequest,
-    /* test hook — overrides timers/behaviour without touching state */
     _state: state,
     _stop(){ if (timer) clearInterval(timer); timer = null; },
     _queries: () => QUERIES.slice(),
 };
 
 module.exports = {
-    /* v72.1: api methods exported DIRECTLY on the module — server.js
-     * calls videoScheduler.runOnce(...) etc. on the module itself.
-     * (The api object alone made every !sched command throw
-     * "runOnce is not a function" on the deployed bot.) */
     ...api,
     initVideoScheduler,
     PER_RUN, SCHED_HOURS, DEFAULT_QUERIES

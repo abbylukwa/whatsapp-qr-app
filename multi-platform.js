@@ -283,7 +283,10 @@ class MultiPlatformManager {
     this._startFingerprintRotation();
 
     this.initialized = true;
-    this.log('info', 'multi-platform', 'Multi-platform manager ready (Twitter INDEPENDENT, content pipeline active, auto-posting started)');
+    const statusParts = ['Twitter INDEPENDENT', 'content pipeline active'];
+    if (anyChromeAvailable) statusParts.push('auto-posting started');
+    else statusParts.push('auto-posting SKIPPED (no Chrome)');
+    this.log('info', 'multi-platform', 'Multi-platform manager ready (' + statusParts.join(', ') + ')');
   }
 
   /* ════════════════════════════════════════════════════════════

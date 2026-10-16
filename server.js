@@ -17,12 +17,11 @@
 })();
 
 /* ============================================================
- *  v83 — FIX: Groq model (llama-3.1-8b-instant SHUT DOWN Aug 2026 → openai/gpt-oss-20b),
+ *  v84 — REMOVE Groq and Gemini from pool (both broken/empty keys).
  *         Chrome fix (puppeteer-core + @sparticuz/chromium for Render),
  *         school account disabled by
  *         default, Rewind x4 keys in pool, graceful Chrome-not-found
- *         (platforms degrade instead of crashing), removed bad
- *         Venice/Gemini/OpenAI keys from default env.
+ *         (platforms degrade instead of crashing).
  *  v71 — TEST-FREE COMPLETE BUILD: every app file, zero test files in
  *         the repo (suite runs in dev); version bump, all v70 fixes live
  *  v70 — LIVE-AGAIN BUILD: sessions SURVIVE redeploys (SESSION_B64_*),
@@ -136,7 +135,7 @@
  *  - FIX: greeting repetition (bigger pools + per-group phrase memory +
  *         skip greeting if bot already spoke to the group recently)
  *  - FIX: main-group probe now max once per day (was EVERY reconnect)
- *  - AI: failover chain Rewind → Venice → Gemini → OpenAI (all .env keys)
+ *  - AI: failover chain Rewind → OpenRouter → OpenAI (all .env keys)
  *  - AI: DM replies now use the FULL pooled messages + 5-turn history
  *  - AI: histories persisted to dm_histories.json (survive restarts)
  *  - NEW: group registry (id, name/subject, announce-only detection,
@@ -803,13 +802,12 @@ function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF 
  *  Put as many API keys as you want in env:
  *      API_1=<key>   API_2=<key>   API_3=<key> ...
  *  The provider behind each slot is AUTO-DETECTED from the key:
- *      AIza…       → Google Gemini (openai-compat endpoint)
  *      sk-or-v1-…  → OpenRouter
- *      gsk_…       → Groq
+ *      sk-rewind-… → Rewind (checked BEFORE sk-)
  *      sk-…        → OpenAI
  *      anything else → Rewind (the current working endpoint)
  *  Per-slot overrides: API_1_NAME / API_1_URL / API_1_MODEL.
- *  Legacy keys still work: REWIND_KEY / VENICE_KEY / GEMINI_KEY / OPENAI_KEY.
+ *  Legacy keys still work: REWIND_KEY / OPENAI_KEY.
  *
  *  HOW THE WORK IS SPLIT: every askAI() call starts on the NEXT
  *  provider in the pool (round-robin), so N working APIs share the
@@ -825,14 +823,10 @@ const AI_FAIL_STREAK_GATE = 2;
 function aiShapeFor(key, slot, existingBases){
   const k = String(key);
   let name, url, model;
-  if (/^AIza/.test(k)){
-    name='gemini'; url='https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'; model='gemini-2.0-flash';
-  } else if (/^sk-or-v1-/.test(k)){
+  if (/^sk-or-v1-/.test(k)){
     name='openrouter'; url='https://openrouter.ai/api/v1/chat/completions'; model='openrouter/auto';
   } else if (/^sk-rewind-/.test(k)){
     name='rewind'; url='https://api.rewind.ai/v1/chat/completions'; model='rewind-uncensored';
-  } else if (/^gsk_/.test(k)){
-    name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='openai/gpt-oss-20b';
   } else if (/^sk-/.test(k)){
     name='openai'; url='https://api.openai.com/v1/chat/completions'; model='gpt-4o-mini';
   } else {
@@ -864,9 +858,6 @@ function buildAiPool(){
     ['rewind2', process.env.REWIND_KEY_2, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
     ['rewind3', process.env.REWIND_KEY_3, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
     ['rewind4', process.env.REWIND_KEY_4, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
-    ['gemini', process.env.GEMINI_KEY, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', process.env.GEMINI_MODEL || 'gemini-2.0-flash'],
-    ['groq', process.env.GROQ_KEY, 'https://api.groq.com/openai/v1/chat/completions', process.env.GROQ_MODEL || 'openai/gpt-oss-20b'],
-    ['groq2', process.env.GROQ_KEY_2, 'https://api.groq.com/openai/v1/chat/completions', process.env.GROQ_MODEL || 'openai/gpt-oss-20b'],
     ['openai', process.env.OPENAI_KEY, 'https://api.openai.com/v1/chat/completions', process.env.OPENAI_MODEL || 'gpt-4o-mini']
   ];
   for (const [name, key, url, model] of legacy){
@@ -7056,7 +7047,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v83.0.0</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.0.0</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7077,7 +7068,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v83.0.0</h1>
+<h1>BreadBot v84.0.0</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -7118,7 +7109,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div><label style="font-size:10px;color:#8b949e">TikTok Password</label><input id="cfgTtPass" type="password" placeholder="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
 </div>
 <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
-<input id="cfgApiKey" placeholder="API key (e.g. AIza... or sk-or-v1-...)" style="flex:1;min-width:200px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px">
+<input id="cfgApiKey" placeholder="API key (e.g. sk-rewind-... or sk-or-v1-...)" style="flex:1;min-width:200px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px">
 <select id="cfgApiSlot" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"><option value="API_1">API_1</option><option value="API_2">API_2</option><option value="API_3">API_3</option><option value="API_4">API_4</option><option value="API_5">API_5</option><option value="API_6">API_6</option><option value="API_7">API_7</option><option value="API_8">API_8</option></select>
 <button class="primary" onclick="saveAccountSetup()">💾 Save All</button>
 </div>
@@ -7128,7 +7119,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="card"><h2>🛡️ Bot Detection Meter</h2>
 <div style="font-size:11px;color:#8b949e;margin-bottom:6px">Real-time detection risk score across all platforms. Lower = safer.</div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<div style="text-align:center"><div id="bdTwitter" style="font-size:24px;font-weight:700;color:#3fb950D">-</div><div style="font-size:10px;color:#8b949e">Twitter</div></div>
+<div style="text-align:center"><div id="bdTwitter" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">Twitter</div></div>
 <div style="text-align:center"><div id="bdFacebook" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">Facebook</div></div>
 <div style="text-align:center"><div id="bdYoutube" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">YouTube</div></div>
 <div style="text-align:center"><div id="bdTiktok" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">TikTok</div></div>
@@ -7196,9 +7187,9 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="card"><h2>📖 Setup Demo — how actual values look</h2>
 <div style="font-size:11px;line-height:1.8;color:#c9d1d9">
 <b style="color:#8b949e">AI KEYS</b> (Render env — any provider, auto-detected):<br>
-<code>API_1=AIza…your-gemini-key</code><br>
-<code>API_2=sk-or-v1-…openrouter-key</code><br>
-<code>API_3=gsk_…groq-key</code> · <code>API_4=sk-rewind-…rewind-key</code><br>
+<code>API_1=sk-or-v1-…openrouter-key</code><br>
+<code>API_2=sk-rewind-…rewind-key</code><br>
+<code>API_3=sk-…openai-key</code><br>
 <b style="color:#8b949e">YOUR IMAGE SITES</b> (MYLINKS env — tried FIRST on every search):<br>
 <code>MYLINKS=https://mysite.com, https://mysite.com/search?q={query}</code><br>
 <b style="color:#8b949e">MAIN GROUP</b>:<br>
@@ -7685,7 +7676,7 @@ async function testFreeApis(){var r=$('freeApiResult');r.innerHTML='<span style=
 var brResults=[];var brIdx=0;var brTested=0;var brTotal=0;var brTesting=false;
 async function loadBrowserSites(){var sel=$('brSite');if(!sel)return;try{var r=await api('mylinks');if(!r.ok){sel.innerHTML='<option value="">Scraper offline</option>';return;}var d=r.data||{};var slots=d.links||[];var h='<option value="">-- Select site --</option>';for(var i=0;i<slots.length;i++){var s=slots[i]||{};h+='<option value="'+esc(String(s.slot))+'" data-type="'+esc(s.type||'image')+'" data-name="'+esc(s.name||'')+'">#'+esc(String(s.slot))+' '+esc(s.type||'?')+' — '+esc(s.name||'')+(s.enabled!==false?'':' [OFF]')+'</option>';}sel.innerHTML=h;}catch(e){sel.innerHTML='<option value="">Error: '+esc(e.message)+'</option>';}}
 async function browserSearch(){var sel=$('brSite');var q=$('brQuery').value.trim();var area=$('brResultArea');if(!q){area.innerHTML='<span style="color:#d29922">Type a search query first.</span>';return;}var slot=sel.value;var opt=sel.options[sel.selectedIndex];var type=opt&&opt.getAttribute('data-type')||'image';area.innerHTML='<span style="color:#d29922">Searching site #'+esc(slot)+' for "'+esc(q)+'"…</span>';try{var r=await api('scraper-test','POST',{query:q,kind:type,site:slot?parseInt(slot):undefined});brResults=r.results||[];brIdx=0;renderBrowserResult();}catch(e){area.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
-function renderBrowserResult(){var area=$('brResultArea');if(!brResults.length){area.innerHTML='<span style="color:#d29922">No results found.</span>';$('brNav').textContent='0/0';return;}var r=brResults[brIdx]||{};$('brNav').textContent=(brIdx+1)+'/'+brResults.length;var h='<div style="margin-bottom:8px">';if(r.mediaUrl){if(r.type==='video'||r.type==='gif'){h+='<video src="'+esc(r.mediaUrl)+'" controls style="max-width:100%;max-height:300px;border-radius:6px"></video>';}else{h+='<img src="'+esc(r.mediaUrl)+'" style="max-width:100%;max-height:300px;border-radius:6px" onerror="this.style.display=\'none\'">';}}h+='</div>';h+='<div style="color:#8b949e;font-size:11px">';if(r.title)h+='<b>'+esc(r.title)+'</b><br>';if(r.sizeBytes)h+='Size: '+(r.sizeBytes>1048576?((r.sizeBytes/1048576).toFixed(1)+'MB'):((r.sizeBytes/1024).toFixed(0)+'KB'))+'<br>';if(r.source)h+='Source: '+esc(r.source)+'<br>';h+='Result '+(brIdx+1)+' of '+brResults.length+'</div>';area.innerHTML=h;}
+function renderBrowserResult(){var area=$('brResultArea');if(!brResults.length){area.innerHTML='<span style="color:#d29922">No results found.</span>';$('brNav').textContent='0/0';return;}var r=brResults[brIdx]||{};$('brNav').textContent=(brIdx+1)+'/'+brResults.length;var h='<div style="margin-bottom:8px">';if(r.mediaUrl){if(r.type==='video'||r.type==='gif'){h+='<video src="'+esc(r.mediaUrl)+'" controls style="max-width:100%;max-height:300px;border-radius:6px"></video>';}else{h+='<img src="'+esc(r.mediaUrl)+'" style="max-width:100%;max-height:300px;border-radius:6px" onerror="this.hidden=true">';}}h+='</div>';h+='<div style="color:#8b949e;font-size:11px">';if(r.title)h+='<b>'+esc(r.title)+'</b><br>';if(r.sizeBytes)h+='Size: '+(r.sizeBytes>1048576?((r.sizeBytes/1048576).toFixed(1)+'MB'):((r.sizeBytes/1024).toFixed(0)+'KB'))+'<br>';if(r.source)h+='Source: '+esc(r.source)+'<br>';h+='Result '+(brIdx+1)+' of '+brResults.length+'</div>';area.innerHTML=h;}
 function browserNext(){if(brResults.length&&brIdx<brResults.length-1){brIdx++;renderBrowserResult();}}
 function browserPrev(){if(brResults.length&&brIdx>0){brIdx--;renderBrowserResult();}}
 async function browserTestAllSites(){if(brTesting)return;brTesting=true;brTested=0;var sel=$('brSite');var q=$('brQuery').value.trim();if(!q){$('brQuery').value='test';q='test';}var total=sel.options.length-1;brTotal=total;$('brProgress').textContent='0/'+total+' tested';for(var i=1;i<sel.options.length;i++){sel.selectedIndex=i;await browserSearch();await new Promise(function(r){setTimeout(r,2000);});brTested++;$('brProgress').textContent=brTested+'/'+total+' tested';}brTesting=false;$('brProgress').textContent='Done! '+brTested+'/'+total+' sites tested';}

@@ -7812,7 +7812,7 @@ app.get('/admin/group-links', function(req, res) {
   }
   // Always include the main admin group link
   if (ADMIN_GROUP_LINK) {
-    links.unshift({ link: ADMIN_GROUP_LINK, name: 'Main Admin Group', jid: mainGroup || '' });
+    links.unshift({ link: ADMIN_GROUP_LINK, name: 'Main Admin Group', jid: mainGroupJid || '' });
   }
   res.json({ links: links });
 });
@@ -8780,7 +8780,10 @@ app.listen(PORT, async function(){
   (async () => {
     try {
       await multiPlatform.init();
-      pushLog('info', 'multi-platform', 'Multi-platform manager initialized and auto-posting active');
+      const activeNames = Object.entries(multiPlatform.platforms || {})
+        .filter(([,b]) => b._chromeAvailable !== false && b.schedule && b.schedule.isEnabled())
+        .map(([n]) => n);
+      pushLog('info', 'multi-platform', 'Multi-platform manager initialized — active: ' + (activeNames.length ? activeNames.join(', ') + ' (auto-posting started)' : 'none (add credentials to enable)'));
     } catch (e) {
       pushLog('error', 'multi-platform', 'Init failed: ' + e.message);
     }

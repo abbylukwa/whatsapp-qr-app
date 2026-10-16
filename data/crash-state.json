@@ -1,0 +1,706 @@
+{
+  "crashes": [
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276520,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 62906344,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276520,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63014256,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276521,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63092144,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276521,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63170032,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276522,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63277944,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276522,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63355832,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276522,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63433720,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276522,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63541632,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276523,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63619520,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276523,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63697408,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276523,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63805320,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276524,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63883208,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276524,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 63961096,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276525,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64069008,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276525,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64146896,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276525,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64224784,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276526,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64332696,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276526,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64410584,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276526,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64488472,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276526,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64596384,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276527,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64674272,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276527,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64752160,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276527,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64860072,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276528,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 64937960,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276528,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65015848,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276528,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65123760,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276529,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65201648,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276529,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65279536,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276529,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65387448,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276529,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65465336,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276530,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65543224,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276530,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65651136,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276530,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65729024,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276531,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65806912,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276531,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65914824,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276531,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 65992712,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276532,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66070600,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276532,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66178512,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276555,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66256400,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276555,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66334288,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276555,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66442200,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276556,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66520088,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276556,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66597976,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276557,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66705888,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276558,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66783776,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276558,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66861664,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276559,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 66969576,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276559,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 67047464,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276559,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 67125392,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    },
+    {
+      "type": "uncaughtException",
+      "message": "write EPIPE",
+      "stack": "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)\n    at writeGeneric (node:internal/stream_base_commons:150:3)\n    at Socket._writeGeneric (node:net:1262:11)\n    at Socket._write (node:net:1274:8)\n    at writeOrBuffer (node:internal/streams/writable:574:12)\n    at _write (node:internal/streams/writable:503:10)\n    at Writable.write (node:internal/streams/writable:512:10)\n    at [kWriteToConsole] (node:internal/console/constructor:314:16)\n    at console.log (node:internal/console/constructor:417:26)\n    at CrashRecovery.pushLog [as log] (/home/z/my-project/whatsapp-qr-app/server.js:552:11)\n    at CrashRecovery.recordCrash (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:126:10)\n    at process.<anonymous> (/home/z/my-project/whatsapp-qr-app/core/crash-recovery.js:73:12)\n    at process.emit (node:events:526:24)\n    at process._fatalException (node:internal/process/execution:159:25)",
+      "timestamp": 1792186276562,
+      "pid": 6647,
+      "memory": {
+        "rss": 199471104,
+        "heapTotal": 129007616,
+        "heapUsed": 67459200,
+        "external": 4224929,
+        "arrayBuffers": 151233
+      }
+    }
+  ],
+  "restartCount": 8,
+  "lastSave": 1792186667065
+}

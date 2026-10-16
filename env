@@ -8,6 +8,7 @@
 #      AIza…        → Google Gemini
 #      sk-or-v1-…   → OpenRouter
 #      gsk_…        → Groq
+#      sk-rewind-… → Rewind (checked BEFORE sk-)
 #      sk-…         → OpenAI
 #      anything else → Rewind (your current working endpoint)
 #  HOW THE WORK SPLITS: every task goes to the NEXT healthy
@@ -40,7 +41,7 @@ SCRAPER=https://intelligent-scraper.onrender.com
 API_1=sk-rewind-4333d7fa464607525568ffaa02ec1d5c
 # Slot 2: Rewind backup
 API_2=sk-rewind-f15c84b6e4e2a4c5c8a0034b6240b0f9
-# Slot 3: Groq (model: llama-3.1-8b-instant)
+# Slot 3: Groq (model: openai/gpt-oss-20b — llama models SHUT DOWN Aug 2026)
 API_3=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
 # Slot 4: Rewind backup 3
 API_4=sk-rewind-07354d0da5b3ade6519b305eb4b5db11
@@ -101,6 +102,6 @@ TWITTER_PASSWORD=
 TIKTOK_USERNAME=
 TIKTOK_PASSWORD=
 
-# ── v82: Groq API Keys (model: llama-3.1-8b-instant) ──
+# ── v83: Groq API Keys (model: openai/gpt-oss-20b — llama-3.1-8b-instant SHUT DOWN Aug 2026) ──
 GROQ_KEY=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
 GROQ_KEY_2=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

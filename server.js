@@ -17,8 +17,9 @@
 })();
 
 /* ============================================================
- *  v82 — CLEAN DEPLOY: Chrome install via postinstall, Groq model
- *         fix (llama-3.1-8b-instant), school account disabled by
+ *  v83 — FIX: Groq model (llama-3.1-8b-instant SHUT DOWN Aug 2026 → openai/gpt-oss-20b),
+ *         Chrome fix (puppeteer-core + @sparticuz/chromium for Render),
+ *         school account disabled by
  *         default, Rewind x4 keys in pool, graceful Chrome-not-found
  *         (platforms degrade instead of crashing), removed bad
  *         Venice/Gemini/OpenAI keys from default env.
@@ -831,7 +832,7 @@ function aiShapeFor(key, slot, existingBases){
   } else if (/^sk-rewind-/.test(k)){
     name='rewind'; url='https://api.rewind.ai/v1/chat/completions'; model='rewind-uncensored';
   } else if (/^gsk_/.test(k)){
-    name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='llama-3.1-8b-instant';
+    name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='openai/gpt-oss-20b';
   } else if (/^sk-/.test(k)){
     name='openai'; url='https://api.openai.com/v1/chat/completions'; model='gpt-4o-mini';
   } else {
@@ -864,8 +865,8 @@ function buildAiPool(){
     ['rewind3', process.env.REWIND_KEY_3, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
     ['rewind4', process.env.REWIND_KEY_4, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
     ['gemini', process.env.GEMINI_KEY, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', process.env.GEMINI_MODEL || 'gemini-2.0-flash'],
-    ['groq', process.env.GROQ_KEY, 'https://api.groq.com/openai/v1/chat/completions', 'llama-3.1-8b-instant'],
-    ['groq2', process.env.GROQ_KEY_2, 'https://api.groq.com/openai/v1/chat/completions', 'llama-3.1-8b-instant'],
+    ['groq', process.env.GROQ_KEY, 'https://api.groq.com/openai/v1/chat/completions', process.env.GROQ_MODEL || 'openai/gpt-oss-20b'],
+    ['groq2', process.env.GROQ_KEY_2, 'https://api.groq.com/openai/v1/chat/completions', process.env.GROQ_MODEL || 'openai/gpt-oss-20b'],
     ['openai', process.env.OPENAI_KEY, 'https://api.openai.com/v1/chat/completions', process.env.OPENAI_MODEL || 'gpt-4o-mini']
   ];
   for (const [name, key, url, model] of legacy){
@@ -7055,7 +7056,7 @@ const app = express();
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v82.0.0</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v83.0.0</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7076,7 +7077,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v82.0.0</h1>
+<h1>BreadBot v83.0.0</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -7197,7 +7198,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <b style="color:#8b949e">AI KEYS</b> (Render env — any provider, auto-detected):<br>
 <code>API_1=AIza…your-gemini-key</code><br>
 <code>API_2=sk-or-v1-…openrouter-key</code><br>
-<code>API_3=gsk_…groq-key</code> · <code>API_4=sk-…openai-key</code><br>
+<code>API_3=gsk_…groq-key</code> · <code>API_4=sk-rewind-…rewind-key</code><br>
 <b style="color:#8b949e">YOUR IMAGE SITES</b> (MYLINKS env — tried FIRST on every search):<br>
 <code>MYLINKS=https://mysite.com, https://mysite.com/search?q={query}</code><br>
 <b style="color:#8b949e">MAIN GROUP</b>:<br>

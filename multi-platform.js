@@ -237,6 +237,7 @@ class MultiPlatformManager {
         this.log('info', 'multi-platform', name + ' is enabled — initializing browser...');
         try {
           await bot.init();
+          bot._chromeAvailable = true;
           this.log('info', 'multi-platform', name + ' browser initialized (login required before posting)');
         } catch (e) {
           const msg = e.message || '';
@@ -246,6 +247,7 @@ class MultiPlatformManager {
             bot._chromeAvailable = false;
           } else {
             this.log('error', 'multi-platform', name + ' init failed: ' + msg);
+            bot._chromeAvailable = false;
           }
           this.health.platformCrashes[name] = (this.health.platformCrashes[name] || 0) + 1;
         }

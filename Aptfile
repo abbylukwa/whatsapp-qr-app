@@ -1,1 +1,17 @@
+# Aptfile — packages needed by Chromium on Render
+# These are system libraries that Chromium needs to run
 chromium-browser
+libx11-xcb1
+libxcomposite1
+libxcursor1
+libxdamage1
+libxi6
+libxtst6
+libnss3
+libcups2
+libxrandr2
+libasound2
+libatk1.0-0
+libgtk-3-0
+libgbm1
+libxshmfence1

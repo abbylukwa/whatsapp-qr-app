@@ -53,9 +53,49 @@
  *    ✅ Circadian rhythm scheduling
  * ══════════════════════════════════════════════════════════════ */
 
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-puppeteer.use(StealthPlugin());
+/* ── Puppeteer setup — works locally AND on Render.com ──
+ *  On Render/serverless: uses puppeteer-core + @sparticuz/chromium
+ *  Locally: falls back to puppeteer (bundled Chrome) or system Chrome
+ */
+let puppeteer;
+let stealthAvailable = false;
+let chromiumAvailable = false;
+let spChromiumModule = null;
+
+// Try @sparticuz/chromium first (for Render/serverless)
+try {
+  const spModule = require('@sparticuz/chromium');
+  // ESM module — the actual chromium object is on .default
+  spChromiumModule = spModule.default || spModule;
+  // Verify it has the expected API
+  if (typeof spChromiumModule.executablePath !== 'function') {
+    throw new Error('executablePath not found on @sparticuz/chromium');
+  }
+  chromiumAvailable = true;
+} catch(e) {
+  spChromiumModule = null;
+  // Not available — will use puppeteer's bundled Chrome or system Chrome
+}
+
+// Try puppeteer-extra with stealth (wraps puppeteer or puppeteer-core)
+try {
+  const puppeteerExtra = require('puppeteer-extra');
+  const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+  puppeteerExtra.use(StealthPlugin());
+  puppeteer = puppeteerExtra;
+  stealthAvailable = true;
+} catch(e) {
+  // Fallback to puppeteer-core directly (no stealth plugin)
+  try {
+    puppeteer = require('puppeteer-core');
+  } catch(e2) {
+    try {
+      puppeteer = require('puppeteer');
+    } catch(e3) {
+      // Will fail at launch time
+    }
+  }
+}
 
 const { sleep, humanDelay, browseRandomly } = require('./human-behavior');
 
@@ -147,69 +187,108 @@ async function launchStealthBrowser(options = {}) {
     ignoreHTTPSErrors: true
   };
 
-  // ═══ Chrome/Chromium resolution — try multiple sources ═══
+  // ═══ Chrome/Chromium resolution — Render.com / serverless / local ═══
+  let chromeSource = 'none';
+  
   // 1. @sparticuz/chromium (cloud/serverless — works on Render, Vercel, AWS Lambda)
-  // 2. puppeteer's bundled Chrome (from postinstall)
-  // 3. System chromium-browser / chromium / google-chrome
-  let useSparticuz = false;
-  try {
-    const spChromium = require('@sparticuz/chromium');
-    launchOptions.executablePath = await spChromium.executablePath();
-    if (Array.isArray(spChromium.args)) {
-      launchOptions.args = [...new Set([...spChromium.args, ...launchOptions.args])];
+  if (chromiumAvailable && spChromiumModule) {
+    try {
+      const spExecPath = await spChromiumModule.executablePath();
+      if (spExecPath) {
+        launchOptions.executablePath = spExecPath;
+        // Merge @sparticuz/chromium args (required for serverless)
+        if (Array.isArray(spChromiumModule.args)) {
+          launchOptions.args = [...new Set([...spChromiumModule.args, ...launchOptions.args])];
+        }
+        // Serverless needs headless: 'shell' mode
+        launchOptions.headless = 'shell';
+        chromeSource = '@sparticuz/chromium';
+        console.log('[anti-detection] Using @sparticuz/chromium (cloud-optimized) path:', spExecPath);
+      }
+    } catch(e) {
+      console.log('[anti-detection] @sparticuz/chromium executablePath failed:', e.message);
     }
-    useSparticuz = true;
-    console.log('[anti-detection] Using @sparticuz/chromium (cloud-optimized)');
-  } catch(e) {
-    // @sparticuz/chromium not available — try puppeteer bundled or system Chrome
+  }
+
+  // 2. PUPPETEER_EXECUTABLE_PATH env var (Render can set this)
+  if (!launchOptions.executablePath && process.env.PUPPETEER_EXECUTABLE_PATH) {
+    try {
+      const fs = require('fs');
+      if (fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+        launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+        chromeSource = 'PUPPETEER_EXECUTABLE_PATH env';
+        console.log('[anti-detection] Using PUPPETEER_EXECUTABLE_PATH:', launchOptions.executablePath);
+      }
+    } catch(e) {}
+  }
+
+  // 3. Puppeteer's bundled Chrome (from npx puppeteer browsers install chrome)
+  if (!launchOptions.executablePath) {
+    try {
+      const pupModule = require('puppeteer');
+      if (pupModule.executablePath && typeof pupModule.executablePath === 'function') {
+        const p = pupModule.executablePath();
+        if (p) {
+          const fs = require('fs');
+          if (fs.existsSync(p)) {
+            launchOptions.executablePath = p;
+            chromeSource = 'puppeteer bundled';
+            console.log('[anti-detection] Using puppeteer bundled Chrome:', p);
+          }
+        }
+      }
+    } catch(e) { /* puppeteer not installed, or no executablePath */ }
+  }
+
+  // 4. System chromium-browser / chromium / google-chrome
+  if (!launchOptions.executablePath) {
     try {
       const { execSync } = require('child_process');
-      const pupBrowser = require('puppeteer');
-      if (pupBrowser.executablePath && typeof pupBrowser.executablePath === 'function') {
-        const p = pupBrowser.executablePath();
-        if (p) {
-          launchOptions.executablePath = p;
-          console.log('[anti-detection] Using puppeteer bundled Chrome');
-        }
+      const which = execSync('which chromium-browser || which chromium || which google-chrome 2>/dev/null', {encoding:'utf8'}).trim();
+      if (which) {
+        launchOptions.executablePath = which;
+        chromeSource = 'system chromium';
+        console.log('[anti-detection] Using system Chromium:', which);
       }
-      if (!launchOptions.executablePath) {
-        const which = (() => { try { return execSync('which chromium-browser || which chromium || which google-chrome 2>/dev/null', {encoding:'utf8'}).trim(); } catch(e) { return ''; } })();
-        if (which) {
-          launchOptions.executablePath = which;
-          console.log('[anti-detection] Using system Chromium:', which);
-        }
-      }
-    } catch(e2) { /* no executablePath — let puppeteer try its default */ }
+    } catch(e) { /* no system Chrome */ }
   }
 
   if (proxy) {
     launchOptions.args.push(`--proxy-server=${proxy}`);
   }
 
+  if (!puppeteer) {
+    throw new Error('Chrome/Chromium not available: neither puppeteer, puppeteer-core, nor @sparticuz/chromium could be loaded. Install: npm install puppeteer-core @sparticuz/chromium');
+  }
+
   let browser;
   try {
     browser = await puppeteer.launch(launchOptions);
+    console.log('[anti-detection] Browser launched successfully via ' + chromeSource);
   } catch (launchErr) {
     const msg = launchErr.message || '';
-    if (msg.includes('Could not find Chrome') || msg.includes('Could not find chromium')) {
-      // Last resort: try @sparticuz/chromium if not tried yet
-      if (!useSparticuz) {
-        try {
-          const spChromium = require('@sparticuz/chromium');
-          launchOptions.executablePath = await spChromium.executablePath();
-          if (Array.isArray(spChromium.args)) {
-            launchOptions.args = [...new Set([...spChromium.args, ...launchOptions.args])];
+    console.log('[anti-detection] Launch failed via ' + chromeSource + ':', msg.substring(0, 200));
+    
+    // Last resort: if sparticuz wasn't tried yet (might have failed on executablePath), try directly
+    if (chromeSource !== '@sparticuz/chromium' && chromiumAvailable && spChromiumModule) {
+      try {
+        const spExecPath = await spChromiumModule.executablePath();
+        if (spExecPath) {
+          launchOptions.executablePath = spExecPath;
+          launchOptions.headless = 'shell';
+          if (Array.isArray(spChromiumModule.args)) {
+            launchOptions.args = [...new Set([...spChromiumModule.args, ...launchOptions.args])];
           }
           browser = await puppeteer.launch(launchOptions);
           console.log('[anti-detection] Recovered using @sparticuz/chromium');
-        } catch(e3) {
-          throw new Error('Chrome/Chromium not available. Install: npm install @sparticuz/chromium, or run: npx puppeteer browsers install chrome');
         }
-      } else {
-        throw new Error('Chrome/Chromium not available even via @sparticuz/chromium: ' + msg);
+      } catch(e3) {
+        // Give up
       }
-    } else {
-      throw launchErr;
+    }
+    
+    if (!browser) {
+      throw new Error('Chrome/Chromium not available. Tried: @sparticuz/chromium, PUPPETEER_EXECUTABLE_PATH, puppeteer bundled, system chromium. All failed. Install: npm install puppeteer-core @sparticuz/chromium');
     }
   }
 

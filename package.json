@@ -1,10 +1,11 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "82.0.0",
-  "description": "BreadBot v82 - commercial-grade multi-platform automation (WhatsApp + Facebook + YouTube + Twitter + TikTok), 100% unofficial browser automation, AI BRAIN, anti-bot detection with detection meter, human behavior simulation, per-platform schedules, cross-platform broadcast, self-update, crash recovery, health monitoring, structured logging, YouTube video upload + community posts + Shorts + educational content generator, Facebook content adapter (half YT frequency) + auto-join from WhatsApp links, research-based safe rate limits, spintax content variation, intelligent-scraper integration, cross-platform interaction tracker, internet monitor, optional API keys config, Twitter standalone config, all admin commands via WhatsApp",
+  "version": "83.0.0",
+  "description": "BreadBot v83 - commercial-grade multi-platform automation (WhatsApp + Facebook + YouTube + Twitter + TikTok), 100% unofficial browser automation, AI BRAIN, anti-bot detection with detection meter, human behavior simulation, per-platform schedules, cross-platform broadcast, self-update, crash recovery, health monitoring, structured logging, YouTube video upload + community posts + Shorts + educational content generator, Facebook content adapter (half YT frequency) + auto-join from WhatsApp links, research-based safe rate limits, spintax content variation, intelligent-scraper integration, cross-platform interaction tracker, internet monitor, optional API keys config, Twitter standalone config, all admin commands via WhatsApp",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "postinstall": "node -e \"try{require('@sparticuz/chromium')}catch(e){console.log('@sparticuz/chromium not available, trying puppeteer bundled...');try{require('child_process').execSync('npx puppeteer browsers install chrome 2>/dev/null',{stdio:'inherit'})}catch(e2){console.log('Chrome install skipped - will use @sparticuz/chromium or system Chrome at runtime')}}\"",
     "test": "node test-all.js",
     "test-all": "node test-all.js",
     "test-new": "node test-new-modules.js",
@@ -18,7 +19,7 @@
   },
   "dependencies": {
     "@puppeteer/browsers": "^2.0.0",
-    "@sparticuz/chromium": "^153.0.0",
+    "@sparticuz/chromium": "^133.0.0",
     "@whiskeysockets/baileys": "6.7.18",
     "axios": "^1.7.0",
     "baileys-antiban": "^4.10.0",
@@ -29,6 +30,7 @@
     "pdf-parse": "^1.1.1",
     "pino": "^9.5.0",
     "puppeteer": "^22.0.0",
+    "puppeteer-core": "^22.0.0",
     "puppeteer-extra": "^3.3.4",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "qrcode": "^1.5.4",

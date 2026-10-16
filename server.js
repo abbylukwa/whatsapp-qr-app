@@ -17,6 +17,11 @@
 })();
 
 /* ============================================================
+ *  v82 — CLEAN DEPLOY: Chrome install via postinstall, Groq model
+ *         fix (llama-3.1-8b-instant), school account disabled by
+ *         default, Rewind x4 keys in pool, graceful Chrome-not-found
+ *         (platforms degrade instead of crashing), removed bad
+ *         Venice/Gemini/OpenAI keys from default env.
  *  v71 — TEST-FREE COMPLETE BUILD: every app file, zero test files in
  *         the repo (suite runs in dev); version bump, all v70 fixes live
  *  v70 — LIVE-AGAIN BUILD: sessions SURVIVE redeploys (SESSION_B64_*),
@@ -824,7 +829,7 @@ function aiShapeFor(key, slot, existingBases){
   } else if (/^sk-or-v1-/.test(k)){
     name='openrouter'; url='https://openrouter.ai/api/v1/chat/completions'; model='openrouter/auto';
   } else if (/^gsk_/.test(k)){
-    name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='llama-3.3-70b-versatile';
+    name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='llama-3.1-8b-instant';
   } else if (/^sk-/.test(k)){
     name='openai'; url='https://api.openai.com/v1/chat/completions'; model='gpt-4o-mini';
   } else {
@@ -853,8 +858,12 @@ function buildAiPool(){
   /* legacy named keys still honoured (appended, deduped by key) */
   const legacy = [
     ['rewind', process.env.REWIND_KEY, 'https://api.rewind.ai/v1/chat/completions', process.env.REWIND_MODEL || 'rewind-uncensored'],
-    ['venice', process.env.VENICE_KEY, 'https://api.venice.ai/api/v1/chat/completions', process.env.VENICE_MODEL || 'venice-uncensored'],
+    ['rewind2', process.env.REWIND_KEY_2, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
+    ['rewind3', process.env.REWIND_KEY_3, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
+    ['rewind4', process.env.REWIND_KEY_4, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
     ['gemini', process.env.GEMINI_KEY, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', process.env.GEMINI_MODEL || 'gemini-2.0-flash'],
+    ['groq', process.env.GROQ_KEY, 'https://api.groq.com/openai/v1/chat/completions', 'llama-3.1-8b-instant'],
+    ['groq2', process.env.GROQ_KEY_2, 'https://api.groq.com/openai/v1/chat/completions', 'llama-3.1-8b-instant'],
     ['openai', process.env.OPENAI_KEY, 'https://api.openai.com/v1/chat/completions', process.env.OPENAI_MODEL || 'gpt-4o-mini']
   ];
   for (const [name, key, url, model] of legacy){
@@ -8788,17 +8797,20 @@ app.listen(PORT, async function(){
   ensureSessionFromEnv('groups', AUTH_FOLDER, 'SESSION_B64_GROUPS');
   ensureSessionFromEnv('school', SCHOOL_AUTH_FOLDER, 'SESSION_B64_SCHOOL');
 
-  /* v67: TWO ACCOUNTS, ONE PROCESS — groups account + school account,
-   * each with its own QR on the same panel, sharing the same AI. */
+  /* v82: School account DISABLED by default — single account mode.
+   * The school account code is kept for !school on/off toggle but
+   * does NOT auto-start. This removes the second QR card and the
+   * "Initializing school account..." log noise. Re-enable with
+   * ADMIN env: ENABLE_SCHOOL=true or panel toggle. */
   if (LOADTEST){
     makeLoadtestStub();
-    makeSchoolLoadtestStub();   /* v68.5: BOTH accounts live in sim mode */
+    // School stub skipped in v82 (single-account mode by default)
   } else {
     connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
-    if (!SCHOOL_MODE){
+    if (!SCHOOL_MODE && process.env.ENABLE_SCHOOL === 'true'){
       setTimeout(function(){ connectSchoolBot().catch(function(err){ pushLog('error','system','Boot school: '+err.message); }); }, 2500);
     } else {
-      pushLog('info','system','BOT_MODE=school — second QR skipped (the groups socket is already the school monitor)');
+      pushLog('info','system','School account OFF (single-account mode). Set ENABLE_SCHOOL=true to enable.');
     }
   }
 });

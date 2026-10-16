@@ -1,9 +1,10 @@
 {
   "name": "whatsapp-qr-app",
   "version": "82.0.0",
-  "description": "BreadBot v78 - commercial-grade multi-platform automation (WhatsApp + Facebook + YouTube + Twitter + TikTok), 100% unofficial browser automation, AI BRAIN, anti-bot detection with detection meter, human behavior simulation, per-platform schedules, cross-platform broadcast, self-update, crash recovery, health monitoring, structured logging, YouTube video upload + community posts + Shorts + educational content generator, Facebook content adapter (half YT frequency) + auto-join from WhatsApp links, research-based safe rate limits, spintax content variation, intelligent-scraper integration, cross-platform interaction tracker, internet monitor, optional API keys config, Twitter standalone config, all admin commands via WhatsApp",
+  "description": "BreadBot v82 - commercial-grade multi-platform automation (WhatsApp + Facebook + YouTube + Twitter + TikTok), 100% unofficial browser automation, AI BRAIN, anti-bot detection with detection meter, human behavior simulation, per-platform schedules, cross-platform broadcast, self-update, crash recovery, health monitoring, structured logging, YouTube video upload + community posts + Shorts + educational content generator, Facebook content adapter (half YT frequency) + auto-join from WhatsApp links, research-based safe rate limits, spintax content variation, intelligent-scraper integration, cross-platform interaction tracker, internet monitor, optional API keys config, Twitter standalone config, all admin commands via WhatsApp",
   "main": "server.js",
   "scripts": {
+    "postinstall": "npx puppeteer browsers install chrome 2>/dev/null || echo 'Chrome install skipped (may already exist or not needed)'",
     "start": "node server.js",
     "test": "node test-all.js",
     "test-all": "node test-all.js",
@@ -27,6 +28,7 @@
     "pdf-parse": "^1.1.1",
     "pino": "^9.5.0",
     "puppeteer": "^22.0.0",
+    "@puppeteer/browsers": "^2.0.0",
     "puppeteer-extra": "^3.3.4",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "qrcode": "^1.5.4",

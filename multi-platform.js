@@ -239,7 +239,14 @@ class MultiPlatformManager {
           await bot.init();
           this.log('info', 'multi-platform', name + ' browser initialized (login required before posting)');
         } catch (e) {
-          this.log('error', 'multi-platform', name + ' init failed: ' + e.message);
+          const msg = e.message || '';
+          // Chrome not available is expected on some hosts — degrade gracefully, don't crash
+          if (msg.includes('Chrome') || msg.includes('chromium') || msg.includes('Could not find')) {
+            this.log('warn', 'multi-platform', name + ' SKIPPED — Chrome/Chromium not available (browser automation disabled for this platform). Install with: npx puppeteer browsers install chrome');
+            bot._chromeAvailable = false;
+          } else {
+            this.log('error', 'multi-platform', name + ' init failed: ' + msg);
+          }
           this.health.platformCrashes[name] = (this.health.platformCrashes[name] || 0) + 1;
         }
       } else {
@@ -260,7 +267,7 @@ class MultiPlatformManager {
     // Start Twitter's INDEPENDENT NSFW posting (excited girl persona)
     // This is NOT from WhatsApp — Twitter sources its own content
     const tw = this.platforms.twitter;
-    if (tw && tw.schedule.isEnabled()) {
+    if (tw && tw.schedule.isEnabled() && tw._chromeAvailable !== false) {
       tw.startIndependentNSFW();
       this.log('info', 'multi-platform', 'Twitter independent NSFW started (excited girl persona)');
     }
@@ -386,6 +393,11 @@ class MultiPlatformManager {
     const bot = this.platforms[platform];
     if (!bot || !bot.schedule.isEnabled()) {
       return; // Platform not enabled
+    }
+
+    // Chrome not available — skip gracefully
+    if (bot._chromeAvailable === false) {
+      return;
     }
 
     // ═══ CIRCADIAN GATE — Ask the circadian engine if we should act ═══

@@ -1,14 +1,8 @@
 #!/bin/bash
 set -e
-echo "=== Build v22.1 ==="
-if command -v yt-dlp &> /dev/null; then
-  echo "yt-dlp already installed"
-else
-  echo "Installing yt-dlp..."
-  curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /opt/render/project/src/yt-dlp
-  chmod +x /opt/render/project/src/yt-dlp
-  cp /opt/render/project/src/yt-dlp /usr/local/bin/yt-dlp 2>/dev/null || true
-fi
+echo "=== Build v82 ==="
 echo "Installing npm dependencies..."
 npm install --production
+echo "Installing Chrome for Puppeteer..."
+npx puppeteer browsers install chrome 2>/dev/null || echo "Chrome install skipped (may already exist)"
 echo "=== Build complete ==="

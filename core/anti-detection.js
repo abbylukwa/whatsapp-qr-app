@@ -147,11 +147,50 @@ async function launchStealthBrowser(options = {}) {
     ignoreHTTPSErrors: true
   };
 
+  // Try to find Chrome executable — Render.com, CI, and local dev all differ
+  try {
+    const { execSync } = require('child_process');
+    // puppeteer's built-in Chrome (from npx puppeteer browsers install chrome)
+    const pupBrowser = require('puppeteer');
+    if (pupBrowser.executablePath && typeof pupBrowser.executablePath === 'function') {
+      const p = pupBrowser.executablePath();
+      if (p) launchOptions.executablePath = p;
+    }
+    // Fallback: check common locations
+    if (!launchOptions.executablePath) {
+      const which = (() => { try { return execSync('which chromium-browser || which chromium || which google-chrome 2>/dev/null', {encoding:'utf8'}).trim(); } catch(e) { return ''; } })();
+      if (which) launchOptions.executablePath = which;
+    }
+  } catch(e) { /* no executablePath — let puppeteer find it */ }
+
   if (proxy) {
     launchOptions.args.push(`--proxy-server=${proxy}`);
   }
 
-  const browser = await puppeteer.launch(launchOptions);
+  let browser;
+  try {
+    browser = await puppeteer.launch(launchOptions);
+  } catch (launchErr) {
+    // Chrome not found — try with system Chromium as last resort
+    const msg = launchErr.message || '';
+    if (msg.includes('Could not find Chrome') || msg.includes('Could not find chromium')) {
+      console.error('[anti-detection] Bundled Chrome not found, trying system chromium-browser...');
+      try {
+        const { execSync } = require('child_process');
+        const sysChrome = execSync('which chromium-browser || which chromium || which google-chrome 2>/dev/null', {encoding:'utf8'}).trim();
+        if (sysChrome) {
+          launchOptions.executablePath = sysChrome;
+          browser = await puppeteer.launch(launchOptions);
+        } else {
+          throw new Error('No Chrome/Chromium found. Run: npx puppeteer browsers install chrome');
+        }
+      } catch(e2) {
+        throw new Error('Chrome/Chromium not available — browser automation disabled. ' + e2.message);
+      }
+    } else {
+      throw launchErr;
+    }
+  }
 
   // Apply enhanced runtime evasions to every new page
   browser.on('targetcreated', async (target) => {

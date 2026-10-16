@@ -354,7 +354,7 @@
       "provider": "groq",
       "freeLimit": "30 RPM, 14.4K RPD",
       "costInfo": "free",
-      "description": "Groq \u2014 fast inference llama-3.3-70b (gsk_GomjO0)"
+      "description": "Groq \u2014 fast inference llama-3.1-8b-instant (gsk_GomjO0)"
     },
     {
       "name": "groq_2",

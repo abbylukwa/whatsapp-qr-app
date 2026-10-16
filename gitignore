@@ -1,7 +1,0 @@
-node_modules/
-auth_info/
-*.log
-.env
-data/
-school_data.json
-sessions/

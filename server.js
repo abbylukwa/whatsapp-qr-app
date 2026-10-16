@@ -4188,7 +4188,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v74.0.0 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v82.0.0 — Admin (mode: ${BOT_MODE.toUpperCase()})
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -4588,7 +4588,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const up = Math.floor((Date.now() - botStartTime) / 1000);
       const mem = (process.memoryUsage().rss / 1048576).toFixed(0);
       const L = [];
-      L.push('🧪 BreadBot v74.0.0 SELF-TEST');
+      L.push('🧪 BreadBot v82.0.0 SELF-TEST');
       L.push('Uptime: ' + Math.floor(up/3600) + 'h ' + Math.floor((up%3600)/60) + 'm | RAM: ' + mem + 'MB');
       L.push('');
       L.push('— ACCOUNTS —');
@@ -6165,7 +6165,7 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v74.0.0 ONLINE\n' +
+            'BreadBot v82.0.0 ONLINE\n' +
             'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -6813,7 +6813,7 @@ async function connectSchoolBot(){
         });
         try {
           await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v74.0.0 SCHOOL account online\n' +
+            '🏫 BreadBot v82.0.0 SCHOOL account online\n' +
             'Bot: ' + schoolNumber + '\n' +
             'Role: admin monitor — commands + reports only (AI auto-chat OFF)\n' +
             'Send "menu" for buttons · "today" · "weather" · "ask <question>" = AI · send me PDFs/DOCX to read',

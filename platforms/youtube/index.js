@@ -259,7 +259,7 @@ class YouTubeBot {
     } catch (e) {
       this.log('error', 'youtube', 'Init failed: ' + e.message);
       this.health.lastError = e.message;
-      return false;
+      throw e;  // throw so multi-platform orchestrator can catch Chrome errors
     }
   }
 

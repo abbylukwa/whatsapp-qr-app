@@ -262,7 +262,12 @@ class MultiPlatformManager {
     }, 300000);
 
     // Start auto-posting scheduler (circadian-aware)
-    this.startAutoPosting();
+    const anyChromeAvailable = Object.values(this.platforms).some(b => b._chromeAvailable !== false && b.schedule && b.schedule.isEnabled());
+    if (anyChromeAvailable) {
+      this.startAutoPosting();
+    } else {
+      this.log('warn', 'multi-platform', 'Auto-posting SKIPPED — no platform has Chrome available');
+    }
 
     // Start Twitter's INDEPENDENT NSFW posting (excited girl persona)
     // This is NOT from WhatsApp — Twitter sources its own content

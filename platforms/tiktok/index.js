@@ -85,7 +85,7 @@ class TikTokBot {
     } catch (e) {
       this.log('error', 'tiktok', 'Init failed: ' + e.message);
       this.health.lastError = e.message;
-      return false;
+      throw e;  // throw so multi-platform orchestrator can catch Chrome errors
     }
   }
 

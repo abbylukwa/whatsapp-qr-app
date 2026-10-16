@@ -395,7 +395,7 @@ class TwitterBot {
       return { success: true };
     } catch (e) {
       this.log('error', 'twitter', 'Init failed: ' + e.message);
-      return { success: false, error: e.message };
+      throw e;  // throw so multi-platform orchestrator can catch Chrome errors
     }
   }
 

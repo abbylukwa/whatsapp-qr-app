@@ -359,7 +359,7 @@ class FacebookBot {
     } catch (e) {
       this.log('error', 'facebook', 'Init failed: ' + e.message);
       this.health.lastError = e.message;
-      return false;
+      throw e;  // throw so multi-platform orchestrator can catch Chrome errors
     }
   }
 

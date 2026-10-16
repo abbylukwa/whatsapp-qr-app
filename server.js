@@ -828,6 +828,8 @@ function aiShapeFor(key, slot, existingBases){
     name='gemini'; url='https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'; model='gemini-2.0-flash';
   } else if (/^sk-or-v1-/.test(k)){
     name='openrouter'; url='https://openrouter.ai/api/v1/chat/completions'; model='openrouter/auto';
+  } else if (/^sk-rewind-/.test(k)){
+    name='rewind'; url='https://api.rewind.ai/v1/chat/completions'; model='rewind-uncensored';
   } else if (/^gsk_/.test(k)){
     name='groq'; url='https://api.groq.com/openai/v1/chat/completions'; model='llama-3.1-8b-instant';
   } else if (/^sk-/.test(k)){

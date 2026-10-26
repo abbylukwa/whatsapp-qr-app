@@ -371,6 +371,69 @@ class YouTubeBot {
   }
 
   /* ── Ensure logged in (auto-retry) ─────────────────────────── */
+  /* ── v84.2: UNOFFICIAL verification (no YouTube API anywhere) ──
+   * checkLoginState: cheap cookie/browser session check without typing creds.
+   * verifyViaFeed: "did my upload land" via the PUBLIC channel RSS feed —
+   * no API key, no quota, no OAuth. Works forever. */
+  async checkLoginState() {
+    let cookies = 0;
+    try { cookies = JSON.parse(fs.readFileSync(this.cookieFile, 'utf8')).length; } catch (e) {}
+    if (this.browser && this.page && !this.page.isClosed()) {
+      try {
+        await this.page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+        const avatar = await this.page.$('#avatar-btn');
+        if (avatar) { this.loggedIn = true; return { ok: true, method: 'browser', cookies, loggedIn: true }; }
+        return { ok: true, method: 'browser', cookies, loggedIn: false };
+      } catch (e) { return { ok: false, method: 'browser', cookies, error: e.message }; }
+    }
+    return { ok: cookies > 0, method: 'cookies-only', cookies, loggedIn: null,
+      note: cookies ? 'cookies saved — browser check runs on next browser action' : 'no saved session' };
+  }
+
+  async verifyViaFeed(expectedVideoIdOrTitle) {
+    let channelId = null;
+    try {
+      const ch = JSON.parse(fs.readFileSync(path.join(this.dataDir, 'youtube', 'channel.json'), 'utf8'));
+      channelId = ch.channelId || null;
+    } catch (e) {}
+    if (!channelId) return { ok: false, error: 'no channel ID saved yet — captured automatically on first Studio login/upload' };
+    const axios = require('axios');
+    const url = 'https://www.youtube.com/feeds/videos.xml?channel_id=' + encodeURIComponent(channelId);
+    try {
+      const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0 (BreadBot verify)' } });
+      const xml = String(r.data || '');
+      const ids = [...xml.matchAll(/<yt:videoId>([^<]+)<\/yt:videoId>/g)].map(m => m[1]);
+      const titles = [...xml.matchAll(/<media:title>([^<]+)<\/media:title>/g)].map(m => m[1]);
+      const latest = ids.map((id, i) => ({ videoId: id, title: titles[i] || '' }));
+      let match = null;
+      if (expectedVideoIdOrTitle) {
+        const needle = String(expectedVideoIdOrTitle).toLowerCase();
+        match = latest.find(v => v.videoId.toLowerCase() === needle || v.title.toLowerCase().includes(needle)) || null;
+      }
+      return { ok: true, channelId, feedVideos: latest.length, latest: latest.slice(0, 5), match };
+    } catch (e) { return { ok: false, channelId, error: e.message }; }
+  }
+
+  /* capture the channel ID from the Studio page — enables the RSS verify */
+  async captureChannelId() {
+    try {
+      if (!this.page || this.page.isClosed()) return null;
+      const chId = await this.page.evaluate(() => {
+        try {
+          const s = JSON.stringify(window.ytInitialData || {});
+          const m = s.match(/"externalChannelId":"(UC[\w-]{22})"/) || s.match(/"channelId":"(UC[\w-]{22})"/);
+          return m ? m[1] : null;
+        } catch (e) { return null; }
+      });
+      if (chId) {
+        writeJSONAtomic(path.join(this.dataDir, 'youtube', 'channel.json'),
+          { channelId: chId, savedAt: new Date().toISOString() });
+        this.log('info', 'youtube', 'Channel ID captured for API-free verification: ' + chId);
+      }
+      return chId || null;
+    } catch (e) { return null; }
+  }
+
   async ensureReady() {
     if (this.loggedIn && this.page && !this.page.isClosed()) return true;
     this.log('info', 'youtube', 'Re-establishing session...');
@@ -426,6 +489,8 @@ class YouTubeBot {
         waitUntil: 'networkidle2', timeout: 30000
       });
       await humanDelay(3000, 6000);
+      /* v84.2: capture channel ID → enables API-free upload verification (RSS feed) */
+      await this.captureChannelId();
 
       // Check for CAPTCHA
       const captchaCheck = await detectCaptcha(this.page);

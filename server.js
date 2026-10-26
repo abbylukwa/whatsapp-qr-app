@@ -2322,6 +2322,90 @@ async function routeButton(jid, id, account, msg){
 /* ══════════════════════════════════════════════════════════════
  *  SCRAPPER CLIENT
  * ══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════
+ * v84.2 LOCAL MEDIA CACHE — panel links that actually open
+ * WHY: the scraper serves panel media from ITS OWN /temp/<id> files.
+ * Those die within 1h (sweep), after 100 items, or on any scraper
+ * restart — so every "open media" link eventually 404s ("not found"
+ * in the panel even though the logs said OK). From v84.2 the bot
+ * KEEPS ITS OWN COPY of every downloaded file and serves it from
+ * /admin/media — links stay openable for 24h, and /admin/media
+ * lists everything you can open. Files: data/media-cache/
+ * ══════════════════════════════════════════════════════════ */
+const MEDIA_DIR = path.join(__dirname, 'data', 'media-cache');
+const MEDIA_MAX_AGE_MS = 24 * 3600 * 1000;   /* panel copies live 24h, then swept */
+const MEDIA_CACHE_MAX_BYTES = 60 * 1024 * 1024;
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
+const MEDIA_CRYPTO = require('crypto');
+const SELF_BASE = (process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL || '').replace(/\/$/, '');
+const MEDIA_MIME = {
+  '.mp4':'video/mp4', '.webm':'video/webm', '.mov':'video/quicktime',
+  '.mp3':'audio/mpeg', '.m4a':'audio/mp4', '.ogg':'audio/ogg', '.wav':'audio/wav', '.aac':'audio/aac',
+  '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.webp':'image/webp', '.gif':'image/gif',
+  '.txt':'text/plain; charset=utf-8', '.json':'application/json'
+};
+function mediaFileUrl(req, file){
+  const rel = '/admin/media/' + encodeURIComponent(file);
+  const base = req ? (req.protocol + '://' + req.get('host')) : (SELF_BASE || '');
+  return base ? base + rel : rel;   /* relative still resolves fine inside the panel */
+}
+function saveLocalMedia(buf, kind, ext, meta){
+  ext = (ext || '.bin').toLowerCase();
+  if (!MEDIA_MIME[ext]) ext = '.bin';
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const file = stamp + '_' + String(kind || 'media').replace(/[^a-z0-9]/gi, '') + '_' + MEDIA_CRYPTO.randomBytes(4).toString('hex') + ext;
+  fs.writeFileSync(path.join(MEDIA_DIR, file), buf);
+  return { file, size: buf.length, url: mediaFileUrl(null, file) };
+}
+/* pull the scraper's (or any) mediaUrl into OUR cache — returns null on failure */
+async function downloadToLocalMedia(mediaUrl, kind){
+  const extMap = { video:'.mp4', audio:'.mp3', music:'.mp3', image:'.jpg', gif:'.gif' };
+  let ext = extMap[kind] || '.bin';
+  try { const m = /\.(mp4|webm|mov|mp3|m4a|ogg|wav|aac|jpe?g|png|webp|gif)(\?|$)/i.exec(new URL(mediaUrl).pathname);
+        if (m) ext = '.' + m[1].toLowerCase().replace('jpeg', 'jpg'); } catch(e){}
+  try {
+    const r = await axios.get(mediaUrl, { responseType:'arraybuffer', timeout: 150000,
+      maxContentLength: MEDIA_CACHE_MAX_BYTES, headers:{ 'User-Agent':'Mozilla/5.0 (BreadBot panel cache)' } });
+    const buf = Buffer.from(r.data);
+    const min = (kind === 'image' || kind === 'gif') ? 12288 : 102400;   /* junk gate — same as delivery */
+    if (buf.length < min) throw new Error('file too small (' + buf.length + 'B)');
+    const saved = saveLocalMedia(buf, kind, ext, null);
+    saved.mimetype = MEDIA_MIME[saved.file.slice(saved.file.lastIndexOf('.'))] || 'application/octet-stream';
+    return saved;
+  } catch(e){ pushLog('warn','media','local copy failed (' + kind + '): ' + e.message); return null; }
+}
+function mediaSweep(){
+  try {
+    const files = fs.readdirSync(MEDIA_DIR); const now = Date.now(); let deleted = 0;
+    for (const f of files){
+      const p = path.join(MEDIA_DIR, f);
+      try { if (now - fs.statSync(p).mtimeMs > MEDIA_MAX_AGE_MS) { fs.unlinkSync(p); deleted++; } } catch(e){}
+    }
+    if (deleted) pushLog('info','media','swept ' + deleted + ' old media file(s) (24h cap)');
+    return deleted;
+  } catch(e){ return 0; }
+}
+setInterval(mediaSweep, 3600 * 1000).unref();
+function guessMediaKind(file){
+  const m = /_(video|audio|music|image|gif|prompt|script)_/.exec(file);
+  if (m) return m[1] === 'music' ? 'audio' : m[1];
+  return /\.(mp4|webm|mov)$/i.test(file) ? 'video' : /\.(mp3|m4a|ogg|wav|aac)$/i.test(file) ? 'audio'
+       : /\.(jpe?g|png|webp|gif)$/i.test(file) ? 'image' : 'file';
+}
+/* v84.2 YouTube UNOFFICIAL verification — public channel RSS feed.
+ * No API key, no quota, no OAuth. Google has served this feed since 2015. */
+async function verifyYoutubeFeed(channelId){
+  try {
+    const url = 'https://www.youtube.com/feeds/videos.xml?channel_id=' + encodeURIComponent(channelId);
+    const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0 (BreadBot verify)' } });
+    const xml = String(r.data || '');
+    const ids  = [...xml.matchAll(/<yt:videoId>([^<]+)<\/yt:videoId>/g)].map(m => m[1]);
+    const titles = [...xml.matchAll(/<media:title>([^<]+)<\/media:title>/g)].map(m => m[1]);
+    const entries = ids.map((id, i) => ({ videoId: id, title: titles[i] || '' }));
+    return { ok: true, count: entries.length, latest: entries.slice(0, 5) };
+  } catch(e){ return { ok: false, error: e.message }; }
+}
+
 async function scrapperFetch(pathname, body, timeoutMs = 30000){
   const url = `${SCRAPER_URL}${pathname}`;
   const headers = { 'Content-Type':'application/json' };
@@ -2382,8 +2466,17 @@ async function scraperDownloadMedia(url, kind='auto'){
      * 12KB (image/gif) is rejected so the NEXT candidate is tried. */
     if (r.sizeBytes && r.sizeBytes < 12288 && (kind === 'image' || kind === 'gif' || kind === 'auto'))
       throw new Error('Junk candidate (' + (r.sizeBytes/1024).toFixed(0) + 'KB < 12KB) — trying next');
-    return { ok:true, mediaUrl:r.mediaUrl, title:r.title||'',
-             mimetype:r.mimetype||'', kind:r.kind||kind, sizeBytes:r.sizeBytes||0 };
+    /* v84.2: keep OUR OWN copy — the scraper's temp link dies in 1h */
+    const local = await downloadToLocalMedia(r.mediaUrl, r.kind || kind);
+    if (local){
+      return { ok:true, mediaUrl: local.url, sourceUrl: r.mediaUrl, localFile: local.file,
+               title:r.title||'', mimetype: local.mimetype || r.mimetype || '',
+               kind:r.kind||kind, sizeBytes: local.size };
+    }
+    /* local copy failed — fall back to the scraper's temp URL, honestly labeled */
+    return { ok:true, mediaUrl:r.mediaUrl, sourceUrl:r.mediaUrl, title:r.title||'',
+             mimetype:r.mimetype||'', kind:r.kind||kind, sizeBytes:r.sizeBytes||0,
+             tempLink:true, expiresInSeconds:r.expiresInSeconds||3600 };
   } catch(e){
     pushLog('error','scraper',`download "${url}": ${e.message}`);   /* panel only — never WhatsApp (v70) */
     return { ok:false, error:e.message };
@@ -2409,8 +2502,13 @@ async function scraperMusic(query){
   try {
     const r = await scrapperFetch('/music', { query }, 90000);
     if (!r || !r.mediaUrl) throw new Error('scrapper: no musicUrl');
-    return { ok:true, mediaUrl:r.mediaUrl, title:r.title||query,
-             mimetype:r.mimetype||'audio/mpeg', sizeBytes:r.sizeBytes||0 };
+    /* v84.2: local copy first — temp scraper links die within the hour */
+    const local = await downloadToLocalMedia(r.mediaUrl, 'audio');
+    if (local) return { ok:true, mediaUrl:local.url, sourceUrl:r.mediaUrl, localFile:local.file,
+                        title:r.title||query, mimetype:local.mimetype||'audio/mpeg', sizeBytes:local.size };
+    return { ok:true, mediaUrl:r.mediaUrl, sourceUrl:r.mediaUrl, title:r.title||query,
+             mimetype:r.mimetype||'audio/mpeg', sizeBytes:r.sizeBytes||0,
+             tempLink:true, expiresInSeconds:r.expiresInSeconds||3600 };
   } catch(e){
     pushLog('error','scraper',`music "${query}": ${e.message}`);
     return { ok:false, error:e.message };
@@ -2427,8 +2525,14 @@ async function scraperVideo(query, exclude, site){
     if (site) body.site = String(site).trim();
     const r = await scrapperFetch('/video', body, 90000);
     if (!r || !r.mediaUrl) throw new Error('scrapper: no videoUrl');
-    return { ok:true, mediaUrl:r.mediaUrl, title:r.title||query,
-             videoId:r.videoId||'', mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0, site:r.site };
+    /* v84.2: local copy first — temp scraper links die within the hour */
+    const local = await downloadToLocalMedia(r.mediaUrl, 'video');
+    if (local) return { ok:true, mediaUrl:local.url, sourceUrl:r.mediaUrl, localFile:local.file,
+                        title:r.title||query, videoId:r.videoId||'',
+                        mimetype:local.mimetype||'video/mp4', sizeBytes:local.size, site:r.site };
+    return { ok:true, mediaUrl:r.mediaUrl, sourceUrl:r.mediaUrl, title:r.title||query,
+             videoId:r.videoId||'', mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0, site:r.site,
+             tempLink:true, expiresInSeconds:r.expiresInSeconds||3600 };
   } catch(e){
     pushLog('error','scraper',`video "${query}"${site?' ['+site+']':''}: ${e.message}`);
     return { ok:false, error:e.message, available:e.response?.data?.available || null };
@@ -7047,10 +7151,11 @@ function makeSchoolLoadtestStub(){
  *  EXPRESS APP
  * ══════════════════════════════════════════════════════════════ */
 const app = express();
+app.set('trust proxy', true);   /* v84.2: req.protocol=https behind Render's proxy — self-hosted media URLs come out right */
 app.use(express.json());
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.0.0</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.2</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7171,6 +7276,12 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <button id="scBtnM" onclick="runScraperTest('music')">🎵 Music</button>
 </div>
 <div id="scResult" style="font-size:12px;line-height:1.8;min-height:20px;color:#8b949e">Pick a type + optional site — search → download, live.</div>
+</div>
+<div class="card"><h2>📁 Media Cache — files you can actually open</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Every panel download (image/gif/video/music) and every generated audio/prompt lands here as <b>your own copy</b> — openable for 24h, instead of dying with the scraper's 1-hour temp links (the old "things not found" bug).</div>
+<div style="margin-bottom:6px"><button onclick="loadMediaCache()">🔄 Refresh</button> <button onclick="mediaCleanup()" style="font-size:10px">🧹 Clean expired</button> <button onclick="verifyLogins()" style="font-size:10px">🔐 Verify logins</button></div>
+<div id="mediaCache" style="font-size:11px;line-height:1.8;max-height:260px;overflow-y:auto">click Refresh…</div>
+<div id="loginVerify" style="font-size:11px;line-height:1.7;max-height:220px;overflow-y:auto;margin-top:6px;color:#8b949e"></div>
 </div>
 <div class="card"><h2>🧪 Test All — Truthful Full System Test</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Runs <b>test-all.js</b> — loads and exercises every core module, platform, content pipeline, schedule, config, and existing test suites. No simulation. Reports what <b>actually works vs crashes</b>.</div>
@@ -7546,11 +7657,11 @@ async function testAI(){var b=$('aiList');b.innerHTML='Testing the whole pool...
 function enginesHtml(e){if(!e)return '';var parts=[];for(var k in e){if(e[k])parts.push(esc(k)+' '+e[k]);}return parts.length?'<br><span style="color:#8b949e">engines: '+parts.join(' · ')+'</span>':'';}
 async function runScraperTest(kind){kind=kind||'image';var q=$('scQuery').value.trim();var b=$('scResult');
   if(!q){b.innerHTML='<span style="color:#d29922">Type a name first — e.g. chess board.</span>';return;}
-  var btns={image:'scBtn',gif:'scBtnG',video:'scBtnV',music:'scBtnM'};var lbl={image:'🖼 image',gif:'🎞 gif',video:'🎬 video'};
+  var btns={image:'scBtn',gif:'scBtnG',video:'scBtnV',music:'scBtnM'};var lbl={image:'🖼 image',gif:'🎞 gif',video:'🎬 video',music:'🎵 music'};
   for(var kk in btns){var be=$(btns[kk]);if(be)be.disabled=true;}
   b.innerHTML='<span style="color:#d29922">⏳ ['+lbl[kind]+'] 1/2 Searching "'+esc(q)+'"…</span>';
   try{var r=await api('scraper-test','POST',{query:q,kind:kind});var s=r.steps||{};
-  if(r.ok){b.innerHTML='<span style="color:#3fb950">✅ Search ['+lbl[kkindSafe(kind)]+']</span> '+s.search.results+' results'+(s.search.myLinks?' <span style="color:#d29922">('+s.search.myLinks+' from YOUR MYLINKS)</span>':'')+' · '+s.search.ms+'ms'+enginesHtml(s.search.engines)+'<br><span style="color:#3fb950">✅ Download</span> '+esc(s.download.title||q)+' · '+(s.download.sizeBytes?(s.download.sizeBytes>1048576?((s.download.sizeBytes/1048576).toFixed(1)+'MB · '):((s.download.sizeBytes/1024).toFixed(0)+'KB · ')):'')+s.download.ms+'ms<br><span style="color:#3fb950">🏆 Scraper works</span> — total '+r.totalMs+'ms <a href="'+esc(s.mediaUrl||'')+'" target="_blank" style="color:#58a6ff">open media ↗</a>';}
+  if(r.ok){b.innerHTML='<span style="color:#3fb950">✅ Search ['+lbl[kkindSafe(kind)]+']</span> '+s.search.results+' results'+(s.search.myLinks?' <span style="color:#d29922">('+s.search.myLinks+' from YOUR MYLINKS)</span>':'')+' · '+s.search.ms+'ms'+enginesHtml(s.search.engines)+'<br><span style="color:#3fb950">✅ Download</span> '+esc(s.download.title||q)+' · '+(s.download.sizeBytes?(s.download.sizeBytes>1048576?((s.download.sizeBytes/1048576).toFixed(1)+'MB · '):((s.download.sizeBytes/1024).toFixed(0)+'KB · ')):'')+s.download.ms+'ms<br><span style="color:#3fb950">🏆 Scraper works</span> — total '+r.totalMs+'ms <a href="'+esc(s.mediaUrl||'')+'" target="_blank" style="color:#58a6ff">open media ↗</a><span style="color:#8b949e;font-size:10px"> '+(r.tempLink?'· ⚠ TEMP link — scraper copy (~1h)':'· YOUR copy — kept 24h')+'</span>';}
   else{var msg='';
     if(s.search&&!s.search.ok)msg='❌ Search failed — '+esc(s.search.error||'0 results')+' ('+s.search.ms+'ms)'+enginesHtml(s.search.engines);
     else if(s.download&&!s.download.ok)msg='<span style="color:#3fb950">✅ Search</span> '+s.search.results+' results · '+s.search.ms+'ms'+enginesHtml(s.search.engines)+'<br>❌ Download failed — '+esc(s.download.error||'')+' ('+s.download.ms+'ms)';
@@ -7636,7 +7747,7 @@ div.innerHTML='<div style="color:#8b949e;font-size:11px">'+new Date(m.ts).toLoca
 function msgs(){var es=new EventSource('/admin/messages-stream');es.onmessage=function(e){try{var m=JSON.parse(e.data);
 var b=$('msgsG');b.appendChild(msgRow(m));b.scrollTop=b.scrollHeight;while(b.children.length>500)b.removeChild(b.firstChild);}catch(e){}};
 es.onerror=function(){es.close();setTimeout(msgs,5000);};}
-refresh();logs();msgs();loadSessionBackup();setInterval(refresh,5000);
+refresh();logs();msgs();loadSessionBackup();loadMediaCache();setInterval(refresh,5000);
 /* ═══ v71.2 Post Scheduler UI — v71.1 shipped a FATAL panel bug here: the
  * \' escapes were eaten by the server-side template literal, so the served
  * script had raw quotes inside a single-quoted string → SyntaxError → the
@@ -7679,20 +7790,23 @@ async function testFreeApis(){var r=$('freeApiResult');r.innerHTML='<span style=
 var brResults=[];var brIdx=0;var brTested=0;var brTotal=0;var brTesting=false;
 async function loadBrowserSites(){var sel=$('brSite');if(!sel)return;try{var r=await api('mylinks');if(!r.ok){sel.innerHTML='<option value="">Scraper offline</option>';return;}var d=r.data||{};var slots=d.links||[];var h='<option value="">-- Select site --</option>';for(var i=0;i<slots.length;i++){var s=slots[i]||{};h+='<option value="'+esc(String(s.slot))+'" data-type="'+esc(s.type||'image')+'" data-name="'+esc(s.name||'')+'">#'+esc(String(s.slot))+' '+esc(s.type||'?')+' — '+esc(s.name||'')+(s.enabled!==false?'':' [OFF]')+'</option>';}sel.innerHTML=h;}catch(e){sel.innerHTML='<option value="">Error: '+esc(e.message)+'</option>';}}
 async function browserSearch(){var sel=$('brSite');var q=$('brQuery').value.trim();var area=$('brResultArea');if(!q){area.innerHTML='<span style="color:#d29922">Type a search query first.</span>';return;}var slot=sel.value;var opt=sel.options[sel.selectedIndex];var type=opt&&opt.getAttribute('data-type')||'image';area.innerHTML='<span style="color:#d29922">Searching site #'+esc(slot)+' for "'+esc(q)+'"…</span>';try{var r=await api('scraper-test','POST',{query:q,kind:type,site:slot?parseInt(slot):undefined});brResults=r.results||[];brIdx=0;renderBrowserResult();}catch(e){area.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
-function renderBrowserResult(){var area=$('brResultArea');if(!brResults.length){area.innerHTML='<span style="color:#d29922">No results found.</span>';$('brNav').textContent='0/0';return;}var r=brResults[brIdx]||{};$('brNav').textContent=(brIdx+1)+'/'+brResults.length;var h='<div style="margin-bottom:8px">';if(r.mediaUrl){if(r.type==='video'||r.type==='gif'){h+='<video src="'+esc(r.mediaUrl)+'" controls style="max-width:100%;max-height:300px;border-radius:6px"></video>';}else{h+='<img src="'+esc(r.mediaUrl)+'" style="max-width:100%;max-height:300px;border-radius:6px" onerror="this.hidden=true">';}}h+='</div>';h+='<div style="color:#8b949e;font-size:11px">';if(r.title)h+='<b>'+esc(r.title)+'</b><br>';if(r.sizeBytes)h+='Size: '+(r.sizeBytes>1048576?((r.sizeBytes/1048576).toFixed(1)+'MB'):((r.sizeBytes/1024).toFixed(0)+'KB'))+'<br>';if(r.source)h+='Source: '+esc(r.source)+'<br>';h+='Result '+(brIdx+1)+' of '+brResults.length+'</div>';area.innerHTML=h;}
+function renderBrowserResult(){var area=$('brResultArea');if(!brResults.length){area.innerHTML='<span style="color:#d29922">No results found.</span>';$('brNav').textContent='0/0';return;}var r=brResults[brIdx]||{};$('brNav').textContent=(brIdx+1)+'/'+brResults.length;var h='<div style="margin-bottom:8px">';if(r.mediaUrl){if(r.type==='video'||r.type==='gif'){h+='<video src="'+esc(r.mediaUrl)+'" controls style="max-width:100%;max-height:300px;border-radius:6px"></video>';}else if(r.type==='music'||r.type==='audio'){h+='<audio src="'+esc(r.mediaUrl)+'" controls style="width:100%"></audio>';}else{h+='<img src="'+esc(r.mediaUrl)+'" style="max-width:100%;max-height:300px;border-radius:6px" onerror="this.hidden=true">';}}h+='</div>';h+='<div style="color:#8b949e;font-size:11px">';if(r.title)h+='<b>'+esc(r.title)+'</b><br>';if(r.sizeBytes)h+='Size: '+(r.sizeBytes>1048576?((r.sizeBytes/1048576).toFixed(1)+'MB'):((r.sizeBytes/1024).toFixed(0)+'KB'))+'<br>';if(r.source)h+='Source: '+esc(r.source)+'<br>';if(r.sourceUrl&&r.sourceUrl!==r.mediaUrl)h+='Origin: <a href="'+esc(r.sourceUrl)+'" target="_blank" style="color:#58a6ff">scraper temp copy ↗</a> (expires ~1h)<br>';h+='Result '+(brIdx+1)+' of '+brResults.length+'</div>';area.innerHTML=h;}
 function browserNext(){if(brResults.length&&brIdx<brResults.length-1){brIdx++;renderBrowserResult();}}
 function browserPrev(){if(brResults.length&&brIdx>0){brIdx--;renderBrowserResult();}}
 async function browserTestAllSites(){if(brTesting)return;brTesting=true;brTested=0;var sel=$('brSite');var q=$('brQuery').value.trim();if(!q){$('brQuery').value='test';q='test';}var total=sel.options.length-1;brTotal=total;$('brProgress').textContent='0/'+total+' tested';for(var i=1;i<sel.options.length;i++){sel.selectedIndex=i;await browserSearch();await new Promise(function(r){setTimeout(r,2000);});brTested++;$('brProgress').textContent=brTested+'/'+total+' tested';}brTesting=false;$('brProgress').textContent='Done! '+brTested+'/'+total+' sites tested';}
 async function browserTestRemaining(){if(brTesting)return;brTesting=true;var sel=$('brSite');var q=$('brQuery').value.trim()||'test';var start=sel.selectedIndex>0?sel.selectedIndex+1:1;var total=sel.options.length-1;brTotal=total;$('brProgress').textContent=(start-1)+'/'+total+' done';for(var i=start;i<sel.options.length;i++){sel.selectedIndex=i;await browserSearch();await new Promise(function(r){setTimeout(r,2000);});$('brProgress').textContent=i+'/'+total+' tested';}brTesting=false;$('brProgress').textContent='All done!';}
 
 /* ═══ v82: AI Prompt System — Perfect Blender Prompts ═══ */
-async function generatePerfectPrompt(){var topic=$('aiPromptTopic').value.trim();var r=$('aiPromptResult');if(!topic){r.innerHTML='<span style="color:#d29922">Enter a topic first.</span>';return;}r.innerHTML='<span style="color:#d29922">Generating perfect prompt for "'+esc(topic)+'"…</span>';try{var res=await fetch('/admin/generate-prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topic})});var d=await res.json();if(d.ok){r.innerHTML='<b style="color:#3fb950">Perfect Prompt Generated</b><br><br>'+d.html||esc(d.prompt||'Generated');}else{r.innerHTML='<span style="color:#f85149">Error: '+esc(d.error||'failed')+'</span>';}}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function generatePerfectPrompt(){var topic=$('aiPromptTopic').value.trim();var r=$('aiPromptResult');if(!topic){r.innerHTML='<span style="color:#d29922">Enter a topic first.</span>';return;}r.innerHTML='<span style="color:#d29922">Generating perfect prompt for "'+esc(topic)+'"…</span>';try{var res=await fetch('/admin/generate-prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topic})});var d=await res.json();if(d.ok){r.innerHTML='<b style="color:#3fb950">Perfect Prompt Generated</b><br><br>'+(d.html||esc(d.prompt||'Generated'))+(d.fileUrl?'<br><br><a href="'+esc(d.fileUrl)+'" target="_blank" style="color:#58a6ff">open prompt file ↗</a>':'')+(d.note?'<br><span style="color:#8b949e;font-size:10px">'+esc(d.note)+'</span>':'');}else{r.innerHTML='<span style="color:#f85149">Error: '+esc(d.error||'failed')+'</span>';}}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 
 /* ═══ v82: Audio Pipeline ═══ */
-async function generateAudio(){var topic=$('audioTopic').value.trim();var voice=$('audioVoice').value;var r=$('audioResult');if(!topic){r.innerHTML='<span style="color:#d29922">Enter a topic or script.</span>';return;}r.innerHTML='<span style="color:#d29922">Generating audio for "'+esc(topic)+'" with '+esc(voice)+'…</span>';try{var res=await fetch('/admin/generate-audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topic,voice:voice})});var d=await res.json();if(d.ok){r.innerHTML='<span style="color:#3fb950">✅ Audio generated</span><br>Duration: '+esc(d.duration||'?')+'s · Voice: '+esc(d.voice||voice)+'<br>'+(d.audioUrl?'<audio src="'+esc(d.audioUrl)+'" controls style="width:100%;margin-top:6px"></audio>':'')+(d.script?'<br><br><span style="color:#8b949e">Script:<br>'+esc(d.script)+'</span>':'');}else{r.innerHTML='<span style="color:#f85149">Error: '+esc(d.error||'failed')+'</span>';}}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function generateAudio(){var topic=$('audioTopic').value.trim();var voice=$('audioVoice').value;var r=$('audioResult');if(!topic){r.innerHTML='<span style="color:#d29922">Enter a topic or script.</span>';return;}r.innerHTML='<span style="color:#d29922">Generating audio for "'+esc(topic)+'" with '+esc(voice)+'…</span>';try{var res=await fetch('/admin/generate-audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topic,voice:voice})});var d=await res.json();if(d.ok){r.innerHTML='<span style="color:#3fb950">✅ Audio generated (real Edge-TTS)</span><br>Duration: ~'+esc(d.duration||'?')+'s · Voice: '+esc(d.voice||voice)+(d.bytes?' · '+Math.round(d.bytes/1024)+'KB':'')+'<br>'+(d.audioUrl?'<audio src="'+esc(d.audioUrl)+'" controls style="width:100%;margin-top:6px"></audio><br><a href="'+esc(d.audioUrl)+'" download style="color:#58a6ff;font-size:11px">open audio file ↗</a>':'')+(d.scriptUrl?' <a href="'+esc(d.scriptUrl)+'" target="_blank" style="color:#58a6ff;font-size:11px">script .txt ↗</a>':'')+(d.script?'<br><br><span style="color:#8b949e">Script:<br>'+esc(d.script)+'</span>':'');}else{r.innerHTML='<span style="color:#f85149">❌ Audio NOT generated — '+esc(d.error||'unknown error')+'</span>'+(d.script?'<br><br><span style="color:#8b949e">Script (still ready):<br>'+esc(d.script)+'</span>':'');}}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 
 /* ═══ v82: Erotic Comment Style ═══ */
 var eroticStyle='excited';
+async function loadMediaCache(){var b=$('mediaCache');if(!b)return;b.innerHTML='<span style="color:#d29922">loading…</span>';try{var r=await api('media');if(!r.ok){b.innerHTML='<span style="color:#f85149">'+esc(r.error||'failed')+'</span>';return;}if(!r.items.length){b.innerHTML='<span style="color:#8b949e">Empty — run a Scraper Test or generate audio; your openable copies will appear here (kept 24h).</span>';return;}var h='';for(var i=0;i<r.items.length;i++){var m=r.items[i];h+='<div>🔗 <a href="'+esc(m.url)+'" target="_blank" style="color:#58a6ff">'+esc(m.file)+'</a> — '+esc(m.kind)+' · '+esc(m.sizeHuman)+' · '+esc(m.ageHours)+'h old</div>';}b.innerHTML=h;}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function mediaCleanup(){try{await api('media/cleanup','POST',{});loadMediaCache();}catch(e){}}
+async function verifyLogins(){var b=$('loginVerify');if(!b)return;b.innerHTML='<span style="color:#d29922">Checking saved sessions (no platform APIs used)…</span>';try{var r=await api('verify-logins');var rep=r.report||{};var h='';var order=['whatsapp','twitter','facebook','youtube','tiktok'];for(var i=0;i<order.length;i++){var p=order[i];var x=rep[p];if(!x)continue;h+='<div>'+(String(x.status).indexOf('CONNECTED')===0||String(x.status).indexOf('VERIFIED')===0?'<span style="color:#3fb950">●</span>':(x.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'))+' <b>'+p+'</b>: '+esc(x.status||'')+(x.cookiesCount?' ('+x.cookiesCount+' cookies, '+esc(x.ageHours||'?')+'h old)':'')+'</div>';}var f=rep.youtubeFeed;if(f){h+='<div style="margin-top:4px;color:#8b949e">YT feed: '+(f.ok?'<span style="color:#3fb950">reachable</span> — '+esc(f.videoCount)+' videos, latest: '+esc((f.latestVideos&&f.latestVideos[0]&&f.latestVideos[0].title)||''):(esc(f.error||f.note||'not checked')))+'<br><span style="font-size:10px">'+esc(f.method||'')+'</span></div>';}b.innerHTML=h||'No report';}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 function setEroticStyle(style){eroticStyle=style;var names={flirty:'Flirty 😏',excited:'Excited 🔥',sensual:'Sensual 💜',bold:'Bold 🌶'};$('eroticActive').textContent=names[style]||style;try{fetch('/admin/erotic-style',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:style})});}catch(e){}}
 
 /* ═══ v82: Group Links Backup & Auto-Join ═══ */
@@ -7768,28 +7882,55 @@ app.post('/admin/generate-prompt', function(req, res) {
   prompt += '  ✅ Cinematic: proper framing, rule of thirds, depth\n';
   prompt += '  ✅ Audio: narration matches visual content precisely\n';
   var html = prompt.replace(/\n/g, '<br>').replace(/  /g, '&nbsp;&nbsp;');
-  res.json({ ok: true, prompt: prompt, html: html });
+  /* v84.2: saved as a real file — before, the prompt only flashed on the
+   * panel and nothing was on disk, so there was nothing to open. */
+  var saved = saveLocalMedia(Buffer.from(prompt, 'utf8'), 'prompt', '.txt', topic);
+  res.json({ ok: true, prompt: prompt, html: html,
+    file: saved.file, fileUrl: mediaFileUrl(req, saved.file),
+    note: 'Template prompt (deterministic — no AI behind this button). Open/download the file and feed it to your AI — it fills steps 1-6 with the real scene content.' });
 });
 
-/* Generate Audio */
-app.post('/admin/generate-audio', function(req, res) {
+/* Generate Audio — v84.2: REAL Edge-TTS. The old handler returned
+ * audioUrl:'' + a made-up duration while the panel printed "✅ Audio
+ * generated" — a lie with no file behind it. Now: Microsoft Edge
+ * neural voices via msedge-tts (free, keyless), real mp3 in the
+ * media cache, honest ok:false when TTS is unavailable. */
+app.post('/admin/generate-audio', async function(req, res) {
   var topic = (req.body && req.body.topic) || 'demo';
   var voice = (req.body && req.body.voice) || 'en-US-AriaNeural';
-  // Generate a sample script based on topic
+  // Generate a script based on topic (deterministic explainer template)
   var script = 'In this video, we explore ' + topic + '. ';
   script += 'Let us start by understanding the basics. ';
   script += topic + ' is a fascinating subject that involves multiple concepts working together. ';
   script += 'First, we examine the key components. ';
   script += 'Then, we see how they interact in real-world scenarios. ';
   script += 'Finally, we draw our conclusions and summarize what we have learned.';
-  res.json({
-    ok: true,
-    script: script,
-    voice: voice,
-    duration: Math.round(script.length / 15),
-    audioUrl: '',
-    note: 'Edge-TTS will generate audio when blender pipeline runs. Script is ready.'
-  });
+  try {
+    const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
+    const tts = new MsEdgeTTS();
+    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+    const r = await tts.toStream(script);
+    const stream = r.audioStream || r;
+    const chunks = [];
+    for await (const c of stream) chunks.push(c);
+    const buf = Buffer.concat(chunks);
+    if (!buf.length) throw new Error('empty audio stream from Edge TTS');
+    const audio = saveLocalMedia(buf, 'audio', '.mp3', topic);
+    const scriptTxt = saveLocalMedia(Buffer.from(script, 'utf8'), 'script', '.txt', topic);
+    /* 48 kbps mono mp3 ≈ 6000 bytes/second — estimate, labeled as such */
+    res.json({
+      ok: true, script: script, voice: voice,
+      duration: Math.round(buf.length / 6000),
+      durationNote: 'estimated from ' + buf.length + ' bytes @ 48kbps mp3',
+      bytes: buf.length,
+      audioUrl: mediaFileUrl(req, audio.file),
+      scriptUrl: mediaFileUrl(req, scriptTxt.file)
+    });
+  } catch (e) {
+    const missing = /Cannot find module/.test(String(e.message));
+    res.json({ ok: false, script: script, voice: voice,
+      error: 'Edge-TTS ' + (missing ? 'module not installed — run: npm install msedge-tts' : 'failed: ' + e.message) });
+  }
 });
 
 /* Erotic Style */
@@ -8475,12 +8616,87 @@ app.get('/admin/test-all', function(req,res){
  * !st WhatsApp command runs, reported as JSON for the panel card.
  * Deliberately does NOT send anything into WhatsApp — this endpoint
  * only proves the scraper pipeline (search + download) works. */
+/* ═══ v84.2: MEDIA CACHE — files you can actually open ═══
+ * Index: GET /admin/media · Serve: GET /admin/media/:file (Range OK)
+ * Sweep: POST /admin/media/cleanup · Lifetime 24h, then auto-swept. */
+app.get('/admin/media', function(req, res){
+  try {
+    const files = fs.readdirSync(MEDIA_DIR).filter(f => !f.startsWith('.'));
+    const now = Date.now();
+    const items = files.map(f => {
+      const st = fs.statSync(path.join(MEDIA_DIR, f));
+      const ext = f.slice(f.lastIndexOf('.')).toLowerCase();
+      return { file: f, url: mediaFileUrl(req, f), kind: guessMediaKind(f),
+               sizeBytes: st.size, sizeHuman: st.size > 1048576 ? (st.size/1048576).toFixed(1)+'MB' : (st.size/1024).toFixed(0)+'KB',
+               ageHours: Math.round((now - st.mtimeMs)/360000)/10,
+               mimetype: MEDIA_MIME[ext] || 'application/octet-stream' };
+    }).sort((a, b) => a.file < b.file ? 1 : -1);
+    res.json({ ok: true, count: items.length, maxAgeHours: MEDIA_MAX_AGE_MS/3600000, items });
+  } catch(e){ res.json({ ok:false, error: e.message }); }
+});
+app.get('/admin/media/:file', function(req, res){
+  const f = path.basename(String(req.params.file || ''));
+  const p = path.join(MEDIA_DIR, f);
+  if (!f || f.startsWith('.') || !fs.existsSync(p)){
+    return res.status(404).json({ error: 'not found — media-cache files live 24h; re-run the search/generation to refresh' });
+  }
+  res.sendFile(p, { dotfiles:'deny', acceptRanges:true,
+    headers: { 'Content-Disposition': 'inline; filename="' + f + '"', 'Cache-Control': 'private, max-age=300' } });
+});
+app.post('/admin/media/cleanup', function(req, res){
+  res.json({ ok: true, deleted: mediaSweep() });
+});
+
+/* ═══ v84.2: UNOFFICIAL LOGIN VERIFICATION — zero platform APIs ═══
+ * Per platform: is a saved cookie session present, how fresh, and for
+ * YouTube the API-free channel RSS feed check (free forever). */
+app.get('/admin/verify-logins', async function(req, res){
+  const report = {};
+  for (const p of ['twitter','facebook','youtube','tiktok']){
+    const cf = path.join(__dirname, 'data', p, 'cookies.json');
+    const entry = { cookiesFile: 'data/' + p + '/cookies.json', present: false };
+    try {
+      if (fs.existsSync(cf)){
+        const arr = JSON.parse(fs.readFileSync(cf, 'utf8'));
+        entry.present = Array.isArray(arr) && arr.length > 0;
+        entry.cookiesCount = Array.isArray(arr) ? arr.length : 0;
+        if (entry.present){
+          const st = fs.statSync(cf);
+          entry.lastSaved = st.mtime.toISOString();
+          entry.ageHours = Math.round((Date.now() - st.mtimeMs)/360000)/10;
+        }
+      }
+    } catch(e){ entry.error = e.message; }
+    entry.status = entry.present ? 'COOKIES PRESENT (verified on next browser action)' : 'NO SESSION';
+    report[p] = entry;
+  }
+  try {
+    report.whatsapp = { status: sock && sock.user ? 'CONNECTED (' + (sock.user.name || sock.user.id || 'account') + ')'
+                       : (sock ? 'connecting…' : 'not started — open /admin to scan QR'), unofficial: true };
+  } catch(e){ report.whatsapp = { status: 'unknown', error: e.message }; }
+  try {
+    const chFile = path.join(__dirname, 'data', 'youtube', 'channel.json');
+    if (fs.existsSync(chFile)){
+      const ch = JSON.parse(fs.readFileSync(chFile, 'utf8'));
+      if (ch.channelId && /^UC[\w-]{22}$/.test(ch.channelId)){
+        const feed = await verifyYoutubeFeed(ch.channelId);
+        report.youtubeFeed = { channelId: ch.channelId, ok: feed.ok, videoCount: feed.count || 0,
+          latestVideos: feed.latest || [], error: feed.error || null,
+          method: 'https://www.youtube.com/feeds/videos.xml?channel_id=… — no API, no quota, no key' };
+        if (feed.ok) report.youtube.status = 'VERIFIED (cookies present + channel feed reachable)';
+      } else report.youtubeFeed = { error: 'saved channelId malformed' };
+    } else report.youtubeFeed = { note: 'no channel.json yet — the channel ID is captured automatically on first Studio login/upload' };
+  } catch(e){ report.youtubeFeed = { error: e.message }; }
+  res.json({ ok: true, checkedAt: new Date().toISOString(), usesNoOfficialAPIs: true, report });
+});
+
 app.post('/admin/scraper-test', async function(req,res){
   /* v71.3: THREE test kinds from the panel — 🖼 image / 🎞 gif / 🎬 video.
    * kind=image keeps the classic search→download flow; gif runs the
    * scraper /gif channel; video runs the configured-slots /video pipeline. */
   const query = String(req.body?.query || '').trim().slice(0, 120);
-  const kind = ['image','gif','video'].includes(String(req.body?.kind)) ? String(req.body.kind) : 'image';
+  /* v84.2: 'music' added — the 🎵 button used to silently test as image */
+  const kind = ['image','gif','video','music'].includes(String(req.body?.kind)) ? String(req.body.kind) : 'image';
   if (!query) return res.json({ ok:false, error:'Empty query — type a name first.' });
   const t0 = Date.now();
   pushLog('info','scraper','Panel test [' + kind + ']: searching "' + query + '"');
@@ -8497,7 +8713,30 @@ app.post('/admin/scraper-test', async function(req,res){
       steps:{ search:{ ok:true, ms:Date.now()-t0, results:1 },
               download:{ ok:true, ms:Date.now()-t0, title:v.title || query,
                          sizeBytes:v.sizeBytes || 0, mimetype:v.mimetype || 'video/mp4', kind:'video' } },
-      mediaUrl:v.mediaUrl, totalMs: Date.now()-t0 });
+      mediaUrl:v.mediaUrl, sourceUrl:v.sourceUrl || v.mediaUrl, tempLink:!!v.tempLink,
+      results:[{ mediaUrl:v.mediaUrl, sourceUrl:v.sourceUrl || v.mediaUrl, type:'video',
+                 title:v.title || query, sizeBytes:v.sizeBytes || 0, mimetype:v.mimetype || 'video/mp4',
+                 source:v.site || 'scraper' }],
+      totalMs: Date.now()-t0 });
+  }
+
+  /* ── MUSIC (v84.2): the panel's 🎵 button used to silently test as image ── */
+  if (kind === 'music'){
+    const m = await scraperMusic(query);
+    if (!m.ok) return res.json({ ok:false, query, kind,
+      steps:{ search:{ ok:false, ms:Date.now()-t0, error:m.error } },
+      hint:'Music pipeline failed — check the panel logs for the exact error.' });
+    pushLog('info','scraper','Panel test [music] OK: "' + query + '" → ' + (m.title || query) +
+      (m.sizeBytes ? ' (' + (m.sizeBytes/1024).toFixed(0) + 'KB)' : '') + ' in ' + (Date.now()-t0) + 'ms');
+    return res.json({ ok:true, query, kind,
+      steps:{ search:{ ok:true, ms:Date.now()-t0, results:1 },
+              download:{ ok:true, ms:Date.now()-t0, title:m.title || query,
+                         sizeBytes:m.sizeBytes || 0, mimetype:m.mimetype || 'audio/mpeg', kind:'music' } },
+      mediaUrl:m.mediaUrl, sourceUrl:m.sourceUrl || m.mediaUrl, tempLink:!!m.tempLink,
+      results:[{ mediaUrl:m.mediaUrl, sourceUrl:m.sourceUrl || m.mediaUrl, type:'music',
+                 title:m.title || query, sizeBytes:m.sizeBytes || 0, mimetype:m.mimetype || 'audio/mpeg',
+                 source:'scraper' }],
+      totalMs: Date.now()-t0 });
   }
 
   /* ── IMAGE / GIF: search, then download-first-working ── */
@@ -8529,9 +8768,14 @@ app.post('/admin/scraper-test', async function(req,res){
     steps:{
       search:  { ok:true, ms:searchMs, results:urls.length, myLinks:s.myLinks||0, engines:s.engines||null },
       download:{ ok:true, ms:Date.now()-t1, title:d.title || query,
-                 sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '', kind:d.kind || kind },
-      mediaUrl:d.mediaUrl
+                 sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '', kind:d.kind || kind }
     },
+    mediaUrl:d.mediaUrl, sourceUrl:d.sourceUrl || d.mediaUrl, tempLink:!!d.tempLink,
+    /* v84.2: results[] — the panel's media browser reads this array; it was
+     * missing entirely before, so that panel ALWAYS said "No results found." */
+    results:[{ mediaUrl:d.mediaUrl, sourceUrl:d.sourceUrl || d.mediaUrl, type:(d.kind || kind),
+               title:d.title || query, sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '',
+               source:'scraper slot' }],
     totalMs: Date.now()-t0
   });
 });

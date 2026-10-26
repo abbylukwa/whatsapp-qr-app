@@ -1,3 +1,44 @@
+# BreadBot v84.2 — whatsapp-qr-app
+
+## v84.2.0 — LINKS THAT ACTUALLY OPEN + REAL AUDIO + API-FREE YOUTUBE VERIFICATION
+### WHY (owner report): "links working but not returning content — logs OK, panel shows things
+### not found / media won't open on both scrap-test panels; want to open the files."
+
+1. LOCAL MEDIA CACHE (server.js) — the root fix. The panel's "open media" links pointed at the
+   SCRAPER's /temp/<id> files, which die after 1h / 100 items / any scraper restart (the old
+   "things not found"). The bot now KEEPS ITS OWN COPY of every panel download in
+   data/media-cache/ and serves it at /admin/media/:file (Range supported → video/audio seek
+   works). Links stay openable 24h; hourly sweeper caps disk. /admin/media = index of every
+   openable file; POST /admin/media/cleanup to force a sweep.
+2. Panel "No results found." bug — /admin/scraper-test never returned the results[] array the
+   media browser reads. It always rendered zero results. Now returns results[] with mediaUrl
+   (self-hosted), sourceUrl (scraper temp copy), type/title/size/mimetype.
+3. 🎵 Music button silently tested as IMAGE (route accepted only image|gif|video). Added a real
+   music branch (search → download → local copy → audio player in the panel).
+4. generate-audio was FAKE: returned audioUrl:'' + a made-up duration while the panel printed
+   "✅ Audio generated". Now: REAL Microsoft Edge neural TTS via msedge-tts (free, keyless),
+   real mp3 + script .txt saved into the media cache, honest ok:false when TTS is unavailable.
+5. generate-prompt now SAVES the prompt as a file (openable/downloadable) and states honestly
+   that it is a deterministic template, not AI output.
+6. UNOFFICIAL YouTube verification — ZERO platform APIs:
+   - GET /admin/verify-logins: per-platform cookie-session presence/age (tw/fb/yt/tt) + live
+     WhatsApp state + YouTube channel RSS feed check (youtube.com/feeds/videos.xml?channel_id=…).
+   - platforms/youtube: checkLoginState() (cookies/browser avatar check), captureChannelId()
+     (grabs the channel ID during Studio navigation → data/youtube/channel.json),
+     verifyViaFeed() ("did my upload land" — API-free, no quota, works forever).
+7. trust proxy enabled → self-hosted URLs come out https behind Render's proxy.
+8. RENDER_EXTERNAL_URL / BASE_URL honored for absolute self-hosted media URLs (WhatsApp
+   delivery keeps working: music/video now send the bot's own copy instead of a dying temp link).
+
+### Test evidence (this run, sandbox):
+- node --check all changed files; test-all.js ALL GREEN (33 checks)
+- Real Edge-TTS: 156,528-byte mp3 (en-US-AriaNeural) generated + served back HTTP 200 audio/mpeg
+- Panel e2e via test slot: search → download → LOCAL COPY (tempLink:false) → GET mediaUrl
+  HTTP 200 image/jpeg 68,530B; Range request HTTP 206; /admin/media listed all 4 test files
+- Scraper slots return 0 results from the sandbox's datacenter IP (429/ECONNRESET/JS gates) —
+  IP reputation, not code; on the owner's connection the same slots answer (as their logs show)
+- Scraper temp pipeline proven separately: /download picsum → /temp/<id> → HTTP 200 image/jpeg
+
 # BreadBot v84.1 — whatsapp-qr-app
 
 ## v84.1.0 — THE PERFECTION PASS (fixed everything the audit found)

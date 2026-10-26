@@ -1,4 +1,35 @@
-# BreadBot v84.4 — whatsapp-qr-app
+# BreadBot v84.5 — whatsapp-qr-app
+
+## v84.5.0 — "NO SIGN-IN, JUST CONNECT" RELEASE
+### WHY (owner request): "just remove the whole sign in process i wanna start logging into
+### my twitter youtube and facebook — make sure they have what to send and can connect."
+
+1. ADMIN SIGN-IN GATE REMOVED (owner's explicit call) — the whole v84.3 auth stack is
+   gone: no ADMIN_TOKEN env, no auto-generated token/data/admin_token.txt, no /admin/login
+   page, no bb_auth cookie, no 401s, no redirects. / and every /admin route answer
+   instantly. /admin/link-check drops its internal Bearer header (it referenced the now
+   deleted ADMIN_TOKEN and would have crashed). /healthz unchanged. TRADE-OFF, stated in
+   code and here: anyone who has the URL can reach QR / save-env / session-backup routes —
+   keep the Render URL private, or ask for a lighter gate later.
+2. PLATFORM CONNECTIONS (new) — the panel-side of "log into my accounts":
+   - GET  /admin/platform-status → per platform (twitter/youtube/facebook/tiktok):
+     env creds present? cookies saved (count/age)? logged in? Chrome available? schedule
+     enabled? which scheduled tasks live? and exactly what each platform can send.
+   - POST /admin/platform-login {platform} → one-click Connect. Runs the SAME bot.login()
+     the WhatsApp commands run (!tw login / !yt login / !fb login). Honest refusals:
+     no creds in env → 400 naming the exact env labels to set; no Chrome on host → 409;
+     unknown platform → 400. First success saves data/<p>/cookies.json and every later
+     boot/action reconnects from those cookies (auto-login already in _autoPostLocked).
+3. PANEL: new "🔗 Platform Connections — log the bot in" card — per-platform status dots
+   (green logged in / amber cookies saved / red needs creds), the env labels each platform
+   needs, what it sends, and a 🔌 Connect button that calls platform-login and refreshes.
+4. WHAT THEY HAVE TO SEND (verified, unchanged): core/content/content-pipeline.js generates
+   locally for every platform with ZERO external keys — tweets (educational/engagement/
+   funFacts/motivational mix), YouTube community posts + Shorts scripts, Facebook timeline
+   posts + YT crossposts — plus rendered films in the media cache for Shorts/Twitter media.
+5. Docs: env.example already documents every credential slot (FB_EMAIL/FB_PASSWORD,
+   YOUTUBE_EMAIL/YOUTUBE_PASSWORD, TWITTER_USERNAME/TWITTER_PASSWORD, TIKTOK_USERNAME/
+   TIKTOK_PASSWORD). Boot smoke updated for the sign-in-free panel + connect routes.
 
 ## v84.4.0 — THE "MAKE EVERY AUTOMATION REAL" RELEASE
 ### WHY (owner request): "make sure everything which is automated works and makes sense —

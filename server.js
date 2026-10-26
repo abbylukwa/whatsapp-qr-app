@@ -7240,61 +7240,19 @@ const app = express();
 app.set('trust proxy', true);   /* v84.2: req.protocol=https behind Render's proxy — self-hosted media URLs come out right */
 app.use(express.json());
 
-/* ═══ v84.3: ADMIN AUTH — the panel used to be WIDE OPEN ═══
- * Hostile audit finding: every /admin route (QR hijack, message stream,
- * save-env, session backup) answered the public internet with zero
- * authentication. Now: one admin token guards / and /admin/*. Set
- * ADMIN_TOKEN in env, or one is generated at boot, printed to the log
- * and saved to data/admin_token.txt. Cookie, ?token= or Bearer all work.
- * WhatsApp delivery is unaffected — self-hosted media is delivered as
- * raw bytes now (see sendMediaUrl), so no fetch ever needs the cookie. */
-const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim() || (function(){
-  const t = MEDIA_CRYPTO.randomBytes(9).toString('base64url');
-  try { fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
-        fs.writeFileSync(path.join(__dirname, 'data', 'admin_token.txt'), t + '\n', { mode: 0o600 }); } catch(e){}
-  console.log('[AUTH] ADMIN_TOKEN not set — generated one-time token: ' + t);
-  console.log('[AUTH] saved to data/admin_token.txt — open /admin/login and paste it (or set ADMIN_TOKEN env to choose your own)');
-  return t;
-})();
-/* server-side HTML escape (the panel's esc() lives inside the browser
- * template literal — it does NOT exist in server scope). */
+/* ═══ v84.5: ADMIN SIGN-IN REMOVED (owner's call) ═══
+ * The v84.3 token gate (ADMIN_TOKEN / bb_auth cookie / /admin/login)
+ * is GONE — the panel and every /admin route answer instantly, no
+ * token, no redirect, no generated data/admin_token.txt. Trade-off is
+ * on the owner: anyone with the URL can reach QR + env + session
+ * backup routes, so keep the Render URL private. WhatsApp delivery is
+ * unaffected — self-hosted media still goes out as raw bytes.
+ * (escHtml stays — /admin/generate-prompt escapes through it.) */
 function escHtml(s){ return String(s || '').replace(/[&<>"']/g, function(c){ return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
-function adminTokenOk(a, b){
-  try { const A = Buffer.from(String(a || '')); const B = Buffer.from(String(b || ''));
-        return A.length === B.length && MEDIA_CRYPTO.timingSafeEqual(A, B); }
-  catch(e){ return false; }
-}
-function isAdminReq(req){
-  if (adminTokenOk(req.query && req.query.token, ADMIN_TOKEN)) return true;
-  const m = /(?:^|;\s*)bb_auth=([^;]+)/.exec(String(req.headers.cookie || ''));
-  if (m && adminTokenOk(decodeURIComponent(m[1]), ADMIN_TOKEN)) return true;
-  if (String(req.headers.authorization || '') === 'Bearer ' + ADMIN_TOKEN) return true;
-  return false;
-}
-app.use(function adminGate(req, res, next){
-  if (req.path === '/admin/login' || req.path === '/healthz') return next();
-  if (req.path === '/' || req.path === '/admin' || req.path.startsWith('/admin/')){
-    if (isAdminReq(req)) return next();
-    if (req.method === 'GET' && String(req.headers.accept || '').indexOf('text/html') !== -1){
-      return res.redirect('/admin/login?next=' + encodeURIComponent(req.originalUrl || '/admin'));
-    }
-    return res.status(401).json({ ok: false, error: 'auth required — open /admin/login', loginUrl: '/admin/login' });
-  }
-  next();
-});
 app.get('/healthz', function(req, res){ res.json({ ok: true, uptime: Math.round(process.uptime()), ts: new Date().toISOString() }); });
-app.get('/admin/login', function(req, res){
-  const tok = String(req.query.token || '');
-  if (tok && adminTokenOk(tok, ADMIN_TOKEN)){
-    res.setHeader('Set-Cookie', 'bb_auth=' + encodeURIComponent(tok) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000');
-    return res.redirect(String(req.query.next || '/admin'));
-  }
-  const bad = tok ? '<div style="color:#f85149;margin-top:10px;font-size:12px">Wrong token — it is printed in the boot log and saved to data/admin_token.txt (or set ADMIN_TOKEN env).</div>' : '';
-  res.status(tok ? 401 : 200).send('<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot — sign in</title></head><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:28px;max-width:440px;width:92%"><h1 style="font-size:18px;color:#58a6ff">🍞 BreadBot admin</h1><p style="font-size:12px;color:#8b949e;line-height:1.7;margin:10px 0">This panel is protected (v84.3). Enter the admin token:<br>• your <b>ADMIN_TOKEN</b> env value if you set one, or<br>• the auto-generated token printed in the boot log and saved to <b>data/admin_token.txt</b>.</p><form method="GET" action="/admin/login" style="display:flex;gap:8px;margin-top:14px"><input name="token" type="password" placeholder="admin token" autofocus style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:9px;font-family:monospace"><input type="hidden" name="next" value="' + String(req.query.next || '/admin') + '"><button style="background:#238636;color:#fff;border:0;border-radius:6px;padding:9px 14px;cursor:pointer;font-family:monospace">Open</button></form>' + bad + '</div></body></html>');
-});
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.3</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7315,7 +7273,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v84.0.0</h1>
+<h1>BreadBot v84.5.0</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -7415,6 +7373,12 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <button id="scBtnM" onclick="runScraperTest('music')">🎵 Music</button>
 </div>
 <div id="scResult" style="font-size:12px;line-height:1.8;min-height:20px;color:#8b949e">Pick a type + optional site — search → download, live.</div>
+</div>
+<div class="card"><h2>🔗 Platform Connections — log the bot in</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">One-click login for <b>Twitter / YouTube / Facebook</b> (+ TikTok). Put each platform's env creds on Render first (<b>idLabel → passLabel</b> shown per row), press <b>Connect</b> — it runs the same login the WhatsApp commands use. First success saves <b>data/&lt;p&gt;/cookies.json</b>; every boot after reconnects from those cookies. Content to send is already built in (templates + film cache), so once a platform shows <span style="color:#3fb950">logged in</span> the schedules post on their own.</div>
+<div style="margin-bottom:6px"><button class="primary" onclick="loadPlatformStatus()">🔄 Check connections</button> <span style="font-size:10px;color:#8b949e">env creds needed: TWITTER_USERNAME/PASS · YOUTUBE_EMAIL/PASS · FB_EMAIL/PASS</span></div>
+<div id="platStatus" style="font-size:11px;line-height:1.9;max-height:320px;overflow-y:auto">click Check connections…</div>
+<div id="platOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
 </div>
 <div class="card"><h2>📁 Media Cache — files you can actually open</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Every panel download (image/gif/video/music) and every generated audio/prompt lands here as <b>your own copy</b> — openable for 24h, instead of dying with the scraper's 1-hour temp links (the old "things not found" bug).</div>
@@ -7969,6 +7933,9 @@ async function shareFilm(file,target){var o=document.getElementById('filmOut');o
 async function hearBlenderPreview(){var t=$('bpTopic').value.trim()||'water cycle for kids';var o=$('bpOut');o.innerHTML='<span style="color:#d29922">Building scene…</span>';try{var r=await api('blender/preview','POST',{topic:t});if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}o.innerHTML='<span style="color:#d29922">Generating real narration (Edge-TTS)…</span>';var a=await api('generate-audio','POST',{topic:t,script:r.narration});if(a.ok){o.innerHTML='<span style="color:#3fb950">✅ Hear preview ready</span> · '+esc(a.voice||'')+'<br><audio src="'+esc(a.audioUrl)+'" controls preload="auto" style="width:100%;margin-top:6px"></audio><div style="color:#8b949e;margin-top:4px">Script: '+esc(r.narration||a.script||'')+'</div>';}else{o.innerHTML='<span style="color:#f85149">❌ TTS failed — '+esc(a.error||'unknown')+'</span>';}}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function runLinkCheck(quick){var o=$('lcOut');o.innerHTML='<span style="color:#d29922">Generating + fetching every link…</span>';try{var r=await api('link-check'+(quick?'?quick=1':''));if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}var h='';for(var i=0;i<r.results.length;i++){var x=r.results[i];h+='<div>'+(x.pass?'<span style="color:#3fb950">PASS</span>':'<span style="color:#f85149">FAIL</span>')+' '+esc(x.name)+' — HTTP '+esc(x.status)+' · '+esc(x.contentType||'-')+' · '+esc(x.bytes||0)+'B'+(x.error?' <span style="color:#f85149">'+esc(x.error)+'</span>':'')+'</div>';}h+='<div style="margin-top:5px;color:'+(r.fail?'#f85149':'#3fb950')+'"><b>'+r.pass+' pass / '+r.fail+' fail</b> in '+r.ms+'ms</div>';o.innerHTML=h;}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function verifyLogins(){var b=$('loginVerify');if(!b)return;b.innerHTML='<span style="color:#d29922">Checking saved sessions (no platform APIs used)…</span>';try{var r=await api('verify-logins');var rep=r.report||{};var h='';var order=['whatsapp','twitter','facebook','youtube','tiktok'];for(var i=0;i<order.length;i++){var p=order[i];var x=rep[p];if(!x)continue;h+='<div>'+(String(x.status).indexOf('CONNECTED')===0||String(x.status).indexOf('VERIFIED')===0?'<span style="color:#3fb950">●</span>':(x.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'))+' <b>'+p+'</b>: '+esc(x.status||'')+(x.cookiesCount?' ('+x.cookiesCount+' cookies, '+esc(x.ageHours||'?')+'h old)':'')+'</div>';}var f=rep.youtubeFeed;if(f){h+='<div style="margin-top:4px;color:#8b949e">YT feed: '+(f.ok?'<span style="color:#3fb950">reachable</span> — '+esc(f.videoCount)+' videos, latest: '+esc((f.latestVideos&&f.latestVideos[0]&&f.latestVideos[0].title)||''):(esc(f.error||f.note||'not checked')))+'<br><span style="font-size:10px">'+esc(f.method||'')+'</span></div>';}b.innerHTML=h||'No report';}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+/* v84.5 — Platform Connections: per-platform status + one-click login */
+async function loadPlatformStatus(){var el=document.getElementById('platStatus');var o=document.getElementById('platOut');if(!el)return;el.innerHTML='<span style="color:#d29922">Checking platforms…</span>';try{var r=await api('platform-status');var ps=r.platforms||{};var h='';for(var name in ps){var x=ps[name];if(x.error){h+='<div style="border-top:1px solid #21262d;padding:4px 0"><b>'+esc(name)+'</b>: <span style="color:#f85149">'+esc(x.error)+'</span></div>';continue;}var cred=x.credentialsSet||{};var dot=(!cred.id||!cred.password)?'<span style="color:#f85149">●</span>':(x.loggedIn?'<span style="color:#3fb950">●</span>':(x.cookies&&x.cookies.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'));var state=(!cred.id||!cred.password)?'NO CREDS — set '+(x.meta?x.meta.idLabel:'')+' + '+(x.meta?x.meta.passLabel:'')+' in env':(x.loggedIn?'logged in ✓':((x.cookies&&x.cookies.present)?'cookies saved ('+x.cookies.count+') — will auto-reconnect on next action':'creds set — press Connect'));h+='<div style="border-top:1px solid #21262d;padding:4px 0">'+dot+' <b>'+esc(name.toUpperCase())+'</b> — '+esc(state)+(x.chrome?'':' · <span style="color:#f85149">no Chrome on host</span>')+(x.enabled===false?' · <span style="color:#d29922">schedule OFF (!'+name+' on)</span>':'')+'<br><span style="font-size:10px;color:#8b949e">sends: '+esc((x.meta&&x.meta.sends)||'')+'</span> <a href="javascript:void(0)" data-plat="'+esc(name)+'" style="color:#58a6ff">🔌 Connect</a></div>';}el.innerHTML=h||'No platforms';el.onclick=function(ev){var a=ev.target&&ev.target.closest?ev.target.closest('[data-plat]'):null;if(a)connectPlatform(a.getAttribute('data-plat'));};}catch(e){el.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function connectPlatform(name){var o=document.getElementById('platOut');o.innerHTML='<span style="color:#d29922">Logging the bot into '+esc(name)+'… (headless browser — takes up to a minute)</span>';try{var r=await api('platform-login','POST',{platform:name});o.innerHTML=r.ok?'<span style="color:#3fb950">✅ '+esc(r.result||'logged in')+'</span>':'<span style="color:#f85149">❌ '+esc(r.error||r.result||'login failed')+'</span>';loadPlatformStatus();}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 function setEroticStyle(style){eroticStyle=style;var names={flirty:'Flirty 😏',excited:'Excited 🔥',sensual:'Sensual 💜',bold:'Bold 🌶'};$('eroticActive').textContent=names[style]||style;try{fetch('/admin/erotic-style',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:style})});}catch(e){}}
 
 /* ═══ v82: Group Links Backup & Auto-Join ═══ */
@@ -8867,6 +8834,80 @@ app.get('/admin/verify-logins', async function(req, res){
   res.json({ ok: true, checkedAt: new Date().toISOString(), usesNoOfficialAPIs: true, report });
 });
 
+/* ═══ v84.5: PLATFORM CONNECTIONS — one-click login from the panel ═══
+ * Owner wants the BOT logged into Twitter / YouTube / Facebook and
+ * posting, without hunting through WhatsApp commands first. These two
+ * routes are the panel-side of that:
+ *   GET  /admin/platform-status  → per platform: creds in env? cookies
+ *          saved? logged in? Chrome available? schedule on? what it sends?
+ *   POST /admin/platform-login   → body {platform} — runs the EXACT same
+ *          bot.login() the WhatsApp commands use (!tw login / !yt login /
+ *          !fb login). Credentials come from env (TWITTER_USERNAME +
+ *          TWITTER_PASSWORD, YOUTUBE_EMAIL + YOUTUBE_PASSWORD, FB_EMAIL +
+ *          FB_PASSWORD); first success saves data/<p>/cookies.json and
+ *          every later boot reconnects from those cookies. TikTok works
+ *          the same way if you ever want it auto-posting. */
+const PLATFORM_META = {
+  twitter:  { idLabel: 'TWITTER_USERNAME',  passLabel: 'TWITTER_PASSWORD', sends: 'tweets · replies · DMs · film media (2h tweet cadence from schedules/twitter.json)' },
+  youtube:  { idLabel: 'YOUTUBE_EMAIL',     passLabel: 'YOUTUBE_PASSWORD', sends: 'community posts · Shorts (film uploads) · likes/watches (from schedules/youtube.json)' },
+  facebook: { idLabel: 'FB_EMAIL',          passLabel: 'FB_PASSWORD',      sends: 'timeline posts · group joins · YouTube crossposts (from schedules/facebook.json)' },
+  tiktok:   { idLabel: 'TIKTOK_USERNAME',   passLabel: 'TIKTOK_PASSWORD',  sends: 'For-You warming now · posting/follows stay manual (!tt cmds)' }
+};
+app.get('/admin/platform-status', function(req, res){
+  const out = {};
+  for (const name of Object.keys(PLATFORM_META)){
+    const meta = PLATFORM_META[name];
+    const bot = multiPlatform.getPlatform(name);
+    if (!bot){ out[name] = { meta, error: 'platform module not loaded' }; continue; }
+    let st = {};
+    try { st = bot.getStatus() || {}; } catch(e){ st = { _err: e.message }; }
+    const cookies = { present: false };
+    try {
+      const cf = path.join(__dirname, 'data', name, 'cookies.json');
+      if (fs.existsSync(cf)){
+        const arr = JSON.parse(fs.readFileSync(cf, 'utf8'));
+        cookies.present = Array.isArray(arr) && arr.length > 0;
+        cookies.count = Array.isArray(arr) ? arr.length : 0;
+        cookies.lastSaved = fs.statSync(cf).mtime.toISOString();
+      }
+    } catch(e){ cookies.error = e.message; }
+    const idSet = !!String((name === 'facebook' || name === 'youtube' ? bot.email : bot.username) || '').trim();
+    const passSet = !!String(bot.password || '').trim();
+    out[name] = {
+      meta,
+      enabled: st.schedule ? !!st.schedule.enabled : null,
+      loggedIn: !!st.loggedIn,
+      chrome: bot._chromeAvailable !== false,
+      credentialsSet: { id: idSet, password: passSet },
+      cookies,
+      scheduleTasks: (bot.schedule && bot.schedule.getTasks() || []).map(function(t){ return { id: t.id, action: t.action, enabled: !!t.enabled, intervalMin: Math.round((t.interval || 0) / 60000) }; })
+    };
+  }
+  res.json({ ok: true, checkedAt: new Date().toISOString(),
+    howToConnect: '1) put each platform\u2019s env creds on Render (labels in meta) 2) hit Connect here or send !tw login / !yt login / !fb login on WhatsApp 3) first success saves cookies and every boot after reconnects from them',
+    platforms: out });
+});
+app.post('/admin/platform-login', async function(req, res){
+  const name = String((req.body && req.body.platform) || '').trim().toLowerCase();
+  if (!PLATFORM_META[name]) return res.status(400).json({ ok: false, error: 'unknown platform — use one of: ' + Object.keys(PLATFORM_META).join(', ') });
+  const bot = multiPlatform.getPlatform(name);
+  if (!bot) return res.status(500).json({ ok: false, error: name + ' module not loaded' });
+  const idVal = String(((name === 'facebook' || name === 'youtube') ? bot.email : bot.username) || '').trim();
+  if (!idVal || !String(bot.password || '').trim()){
+    const meta = PLATFORM_META[name];
+    return res.status(400).json({ ok: false, honest: true,
+      error: name + ' has no credentials in env — set ' + meta.idLabel + ' and ' + meta.passLabel + ' on Render (or in .env), redeploy, then hit Connect again' });
+  }
+  if (bot._chromeAvailable === false) return res.status(409).json({ ok: false, honest: true, error: name + ' has no Chrome/Chromium on this host — browser login impossible here' });
+  try {
+    const result = await multiPlatform.loginPlatform(name);
+    res.json({ ok: !!result.success, platform: name, loggedIn: !!bot.loggedIn,
+      result: result.success ? ('logged in — cookies saved to data/' + name + '/cookies.json') : (result.error || 'login failed — check the boot log (CAPTCHA / wrong creds / checkpoint all log there)') });
+  } catch(e){
+    res.status(500).json({ ok: false, error: name + ' login crashed: ' + e.message });
+  }
+});
+
 app.post('/admin/scraper-test', async function(req,res){
   /* v71.3: THREE test kinds from the panel — 🖼 image / 🎞 gif / 🎬 video.
    * kind=image keeps the classic search→download flow; gif runs the
@@ -9155,10 +9196,10 @@ app.post('/admin/blender/preview', function(req, res){
 app.get('/admin/link-check', async function(req, res){
   const t0 = Date.now(); const results = [];
   const base = absoluteUrl(req, '');
-  const H = { Authorization: 'Bearer ' + ADMIN_TOKEN };
+  /* v84.5: auth gate removed — probes go out without the old Bearer header */
   async function probe(name, url, expect){
     try {
-      const r = await axios.get(url, { timeout: 20000, headers: H, maxRedirects: 0, validateStatus: null, responseType: 'arraybuffer' });
+      const r = await axios.get(url, { timeout: 20000, maxRedirects: 0, validateStatus: null, responseType: 'arraybuffer' });
       const ct = String(r.headers['content-type'] || '');
       const bytes = r.data && r.data.byteLength || 0;
       let pass = r.status === 200 && bytes > 0;

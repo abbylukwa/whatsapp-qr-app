@@ -12,31 +12,31 @@
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "SAFE: 5-10/day. 2h gap. Mix: NSFW crosspost + educational + fun facts."
+      "notes": "SAFE: 5-10/day. 2h gap. Content pipeline mix + independent persona NSFW posts run separately."
     },
     {
       "id": "tw-reply",
       "name": "Reply to tweets/comments",
       "action": "reply",
-      "interval": 5400000,
+      "interval": 10800000,
       "jitter": 0.2,
       "enabled": true,
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "SAFE: 10-20/day. 1.5h gap. Contextual replies (question/positive/negative)."
+      "notes": "SAFE: 10-20/day. 3h gap. Contextual replies (question/positive/negative)."
     },
     {
-      "id": "tw-follow",
-      "name": "Follow users (risky)",
-      "action": "follow",
-      "interval": 14400000,
-      "jitter": 0.3,
+      "id": "tw-dm-check",
+      "name": "Check DMs",
+      "action": "dmCheck",
+      "interval": 2700000,
+      "jitter": 0.2,
       "enabled": true,
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "CONSERVATIVE: 1-2/day. 4h gap. X suspends mass follow/unfollow."
+      "notes": "45min gap. Reads DMs, drafts persona replies."
     }
   ]
 }

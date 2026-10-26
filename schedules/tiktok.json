@@ -3,32 +3,8 @@
   "enabled": true,
   "tasks": [
     {
-      "id": "tt-follow",
-      "name": "Follow users",
-      "action": "follow",
-      "interval": 14400000,
-      "jitter": 0.3,
-      "enabled": true,
-      "lastRun": 0,
-      "nextRun": 0,
-      "runCount": 0,
-      "notes": "VERY CONSERVATIVE: 1-3/day. 4h gap. Mobile viewport."
-    },
-    {
-      "id": "tt-comment",
-      "name": "Comment on videos",
-      "action": "comment",
-      "interval": 7200000,
-      "jitter": 0.25,
-      "enabled": true,
-      "lastRun": 0,
-      "nextRun": 0,
-      "runCount": 0,
-      "notes": "CONSERVATIVE: 2-4/day. 2h gap. Varied text."
-    },
-    {
       "id": "tt-watch",
-      "name": "Watch videos (engagement)",
+      "name": "Watch For You feed (warm-up)",
       "action": "watchVideo",
       "interval": 5400000,
       "jitter": 0.2,
@@ -36,7 +12,31 @@
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "SAFE: Passive engagement. 1.5h gap. 30s-2min watch."
+      "notes": "v84.4: the ONLY safe automated TikTok task — warmFeed() watches 3-6 For You videos with human dwell (15-45s each). Pure passive session warming."
+    },
+    {
+      "id": "tt-follow",
+      "name": "Follow users",
+      "action": "follow",
+      "interval": 14400000,
+      "jitter": 0.3,
+      "enabled": false,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "MANUAL ONLY — automation cannot pick who to follow. Use: !tt follow <username> (1-3/day max)."
+    },
+    {
+      "id": "tt-comment",
+      "name": "Comment on videos",
+      "action": "comment",
+      "interval": 7200000,
+      "jitter": 0.25,
+      "enabled": false,
+      "lastRun": 0,
+      "nextRun": 0,
+      "runCount": 0,
+      "notes": "MANUAL ONLY — automation cannot pick which video to comment on. Use: !tt comment <videoUrl> <message> (2-4/day max)."
     }
   ]
 }

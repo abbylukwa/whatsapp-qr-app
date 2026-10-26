@@ -1,3 +1,110 @@
+# BreadBot v84.4 — whatsapp-qr-app
+
+## v84.4.0 — THE "MAKE EVERY AUTOMATION REAL" RELEASE
+### WHY (owner request): "make sure everything which is automated works and makes sense —
+### facebook, tiktok, twitter, youtube, whatsapp — and how will the .bpy file change to .mp4 to share it."
+
+THE AUDIT FOUND (all real, all fixed below):
+- schedules/*.json was DECORATIVE: ScheduleManager loaded the 4 files, status displayed
+  the tasks, self-tests parsed them — but startTask() was NEVER called, so every timer
+  actually fired from hard-coded intervals inside multi-platform.js, and the JSON had
+  drifted from reality (youtube.json promised uploads/likes/watches that never ran;
+  tiktok.json promised follow/comment/watch — TikTok had ZERO automation at all).
+- The generated render.sh was INVALID BASH (`run_bpy () {{` — doubled braces left over
+  from an old f-string conversion): the .bpy → .mp4 render script could never even start.
+- Even if it started, final.mp4 was ALWAYS SILENT: the video step computed an ffmpeg
+  adelay+amix narration graph, printed it, and threw it away — the final mux had no
+  audio input at all (and fed adelay raw frame numbers as milliseconds).
+- There was NO LAST MILE: nothing brought a rendered out/final.mp4 back into the bot,
+  and nothing shared it (panel text even claimed SheepIt render farm + moviepy +
+  YouTube Data API v3 stages that do not exist anywhere in the codebase).
+
+FIXES (v84.4.0):
+1. SCHEDULES ARE LIVE CONFIG — startAutoPosting() now reads every platform's
+   schedules/<platform>.json and schedules the ENABLED tasks whose action has a real
+   handler (per-task interval + jitter). Defaults only fill gaps. Tasks with no
+   automated handler are refused LOUDLY at boot ("run it manually via commands") —
+   never silently ignored again. All 4 JSONs rewritten to match reality exactly.
+2. TIKTOK IS AUTOMATED NOW — warmFeed(): opens the For You feed, watches 3-6 videos
+   with human dwell (15-45s each), passive session warming only. Wired as the live
+   watchVideo task (1.5h ± 20%). Follow/comment stay manual-only (no target source
+   exists) — stated in the schedule notes instead of promised.
+3. RENDER.SH FIXED TWICE — valid bash now (run_bpy function + ${} defaults); the
+   narration mux actually happens: python writes audio/inputs.txt + a REAL adelay
+   graph (start_f/fps*1000 ms — correct units), bash passes it to ffmpeg, subtitles
+   burn into the video graph, amix combines narration at exact beats. No audio →
+   honest "final.mp4 will be SILENT" warning. (Verified end-to-end with real ffmpeg.)
+4. FILM LAST MILE (new) — POST /admin/film/upload (raw .mp4 bytes → 24h media cache,
+   FILM_MAX_MB cap default 200), GET /admin/film/list (newest first + shared flags),
+   POST /admin/film/share {file, targets:[whatsapp|youtube|twitter], jid?, title?,
+   caption?} → WhatsApp = video BYTES to main group (Baileys buffer path), YouTube =
+   real Studio upload via the existing uploadVideo(), Twitter = tweet with media
+   attached. Facebook target answers honestly: text-only module, no native video path.
+   Panel: 🎥 Film Last Mile card (upload button, film list, share buttons, ✓ markers).
+5. !film WHATSAPP COMMAND — !film lists cached films, !film <n> sends film #n into
+   the current chat as video bytes. Added to !commands help.
+6. AUTOSHORT IS REAL — youtube autoShort() now checks the media cache for the newest
+   film .mp4 not yet used and uploads it via Studio as an actual Short; falls back to
+   a community text post labeled "📚 EDUCATIONAL" (the old code labeled text as "🎬 SHORT").
+7. PANEL HONESTY — the "Blender → Render → YouTube" card no longer claims SheepIt /
+   moviepy / YouTube Data API v3 stages that never existed. It now documents the REAL
+   chain: plan here → render on your PC/GitHub Action → mux (v84.4) → upload → share.
+
+REGRESSION: node --check on all touched files; test-all.js suite green; film mux proven
+with real ffmpeg (audio stream present in final.mp4, beats aligned); schedules-liveness
+check proves every enabled task maps to a handler.
+
+---
+
+# BreadBot v84.3 — whatsapp-qr-app
+
+## v84.3.0 — THE "ALL LINKS KINDA OFF" FIX + ADMIN LOCK + BLENDER VIEW & HEAR PREVIEW
+### WHY (owner report): "the links are kinda off like all of them — recheck all the pipeline";
+### + "add that i test the actual blender file view preview and hear preview"; + hostile-audit fixes.
+
+1. ABSOLUTE URL FIX (the root cause of "all links off") — media file URLs were born RELATIVE
+   (/admin/media/...) whenever RENDER_EXTERNAL_URL/BASE_URL was unset. A browser <img> tolerates
+   that, but Baileys/WhatsApp delivery and any programmatic fetch cannot parse a relative URL —
+   every such link died. New absoluteUrl() is the single gate every URL passes through:
+   request host (proxy-aware) → env base → http://127.0.0.1:PORT self-fallback.
+   scraper-test responses now always return ABSOLUTE mediaUrl (verified by live audit).
+2. WHATSAPP DELIVERY HARDENING — self-hosted media is now delivered as BYTES: sendMediaUrl reads
+   its own media-cache file and hands the buffer straight to Baileys. No URL fetch can break,
+   no auth interplay, works even with every env unset.
+3. ADMIN AUTH (hostile-audit P0: /admin had ZERO authentication) — one token now guards / and
+   every /admin route: set ADMIN_TOKEN env, or one is auto-generated at boot, printed to the
+   log and saved to data/admin_token.txt. Login page at /admin/login sets an HttpOnly cookie;
+   ?token= and Authorization: Bearer also work. /healthz stays public for Render health checks.
+   Media links you open in the browser keep working (cookie); WhatsApp is unaffected (bytes).
+4. BLENDER VIEW PREVIEW (new) — POST /admin/blender/preview + a 🎬 panel card. Type a topic:
+   get a deterministic SVG mock render of the scene (theme-aware: water/fire/forest/space/
+   desert/city palettes, 4-6 primitives, three-point lighting, labeled "MOCK — not a Blender
+   render") PLUS the real .bpy Blender script of that exact scene (run: blender --background
+   --python file.py → renders preview.png 1920x1080). Same topic → byte-identical scene.
+5. BLENDER HEAR PREVIEW (new) — generate-audio now accepts a full script; the Blender card
+   builds narration from the scene spec and speaks it with real Edge-TTS. 🔊 button in the card.
+6. PIPELINE LINK CHECK (new) — GET /admin/link-check + a 🔗 panel card: generates one of
+   everything (prompt file, blender view+script, audio, media index, scraper health), then
+   FETCHES EVERY LINK BACK over real HTTP and verifies status 200 + content-type + bytes.
+   This is the one-click answer to "recheck all the pipeline" — it names the exact link that
+   is off, and why. ⚡ quick variant skips TTS.
+7. XSS FIX (hostile audit) — generate-prompt reflected the topic unescaped into html, which the
+   panel dropped into innerHTML. The whole prompt is HTML-escaped server-side now (escHtml).
+   Verified: <script> in topic comes out escaped.
+8. MIME FIX — /admin/media/:file served .bpy as application/octet-stream (express's mime db
+   does not know .bpy) → browsers downloaded instead of opening. Serving now uses the bot's
+   own MEDIA_MIME map (.bpy = text/plain, .svg = image/svg+xml, …).
+9. ENV VALIDATION — MEDIA_MAX_MB=-5 used to become a silent 1-byte media cap. Garbage values
+   now fall back to the default, >200 clamps, and the override is announced at boot.
+10. CRASH HYGIENE — the log-only uncaughtException handler (swallowed real crashes, left the
+    bot in an undefined state) is REMOVED; crash-recovery owns that event. Double-boot no longer
+    crash-loops: EADDRINUSE prints "[BOOT] Port ... already in use — another BreadBot instance
+    is answering there" and exits cleanly.
+11. LIVE PROOF (this sandbox): 32/32 link-audit checks green — auth 401s, panel, prompt file,
+    blender .svg/.bpy (text/plain), determinism (byte-identical), HEAR mp3 182,736B, audio mp3
+    155,376B, media index items, scraper mediaUrl ABSOLUTE + opens (image/jpeg 116KB),
+    verify-logins, link-check endpoint, scraper /health + /my-links. test-all.js ALL GREEN.
+
 # BreadBot v84.2 — whatsapp-qr-app
 
 ## v84.2.0 — LINKS THAT ACTUALLY OPEN + REAL AUDIO + API-FREE YOUTUBE VERIFICATION

@@ -7,48 +7,36 @@
       "name": "Timeline post",
       "action": "timelinePost",
       "interval": 28800000,
-      "jitter": 0.3,
+      "jitter": 0.2,
       "enabled": true,
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "HALF of YouTube. 8h gap = 3/day max. Adapted content, never YT links."
+      "notes": "HALF of YouTube. 8h gap = ~3/day max. Adapted pipeline content, never YT links. Skips midnight-6AM and rest days."
     },
     {
-      "id": "fb-post-groups",
-      "name": "Post in groups",
-      "action": "postInGroup",
-      "interval": 14400000,
+      "id": "fb-crosspost",
+      "name": "Cross-post from YouTube",
+      "action": "crosspost",
+      "interval": 43200000,
       "jitter": 0.25,
       "enabled": true,
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "4h gap. NEVER identical to 5+ groups. Jaccard <30% similarity."
+      "notes": "12h gap. Adapts YouTube community content to Facebook tone (40-50% rewrite, no external links)."
     },
     {
       "id": "fb-join-groups",
-      "name": "Join groups from WhatsApp links",
+      "name": "Join groups queued from WhatsApp",
       "action": "joinGroup",
-      "interval": 7200000,
+      "interval": 14400000,
       "jitter": 0.2,
       "enabled": true,
       "lastRun": 0,
       "nextRun": 0,
       "runCount": 0,
-      "notes": "2h gap. Max 5 per cycle. New accounts: 1-2/day only."
-    },
-    {
-      "id": "fb-comment",
-      "name": "Comment on posts",
-      "action": "comment",
-      "interval": 7200000,
-      "jitter": 0.2,
-      "enabled": true,
-      "lastRun": 0,
-      "nextRun": 0,
-      "runCount": 0,
-      "notes": "2h gap. Varied content. No midnight-6AM. Rest days: Sun+Wed."
+      "notes": "4h gap. Joins groups collected from WhatsApp links (max 5/cycle). New accounts: 1-2/day."
     }
   ]
 }

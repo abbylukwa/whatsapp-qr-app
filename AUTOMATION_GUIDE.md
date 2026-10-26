@@ -21,14 +21,23 @@
 
 **Link policy (your Task-3 requirement):** every endpoint resolves media EXCLUSIVELY from (1) `my_links.json` hot-reloaded, (2) `MYLINKS` env, (3) per-request `myLinks`. There is no other source in the codebase — the dead `gif.js` that had hardcoded sites was deleted in v4.1. Twitter additionally strips any non-owner URL from captions.
 
-### whatsapp-qr-app (v84.1) — the automation brain
+### whatsapp-qr-app (v84.4) — the automation brain
 - **WhatsApp core (Baileys):** QR login, session restore from `SESSION_B64_GROUPS`, reconnect matrix per disconnect code, flood gating, anti-pattern send delays (Fibonacci), send lanes with dedup.
-- **AI brain:** every group message → `aiDecide()` (rate-limited, cached, confidence-gated) → executes scraper actions or chat. 56 whitelisted admin commands (`!menu`, `!sched`, `!tw on`…).
+- **AI brain:** every group message → `aiDecide()` (rate-limited, cached, confidence-gated) → executes scraper actions or chat. Admin commands (`!menu`, `!sched`, `!tw on`…, `!film [n]`).
 - **Circadian orchestrator:** sleep 23-06, morning peak 9-12 (60%), lunch dip, 5-hour afternoon rest at 4%, evening peak, rest days, 90-min ultradian micro-rests, skip/delay/distraction life events. **All auto-posting is gated by this** — the bot behaves like a person with a schedule.
-- **Auto-posters (each ±20% jitter per fire, circadian-gated, platform-mutexed):**
-  - YouTube: community 8h · short 4h · engage 2h
-  - Facebook: timeline 8h · crosspost 12h · join groups 4h
-  - Twitter: tweet 2h · reply 3h · DM check 45min · independent persona post 1-3h mood-based
+- **Auto-posters — `schedules/<platform>.json` is LIVE config (v84.4):**
+  every ENABLED task whose action has a real handler IS the schedule
+  (edit the interval, restart, done). Tasks with no automated handler
+  are refused loudly at boot instead of being silently ignored.
+
+  | Platform | Live tasks (from schedules/*.json) | Manual-only |
+  |---|---|---|
+  | YouTube | community text post 8h · REAL Short upload 4h (uploads a cached film .mp4 when one exists, else honest text post) · engage (watch+like+comment) 2h | full video upload without a cached film |
+  | Facebook | timeline 8h · YT crosspost (rewritten, no links) 12h · join queued groups 4h | native video upload (no implementation — honest) |
+  | Twitter | tweet 2h · reply 3h · DM check 45min + independent persona posting | auto-follow (X ban risk) |
+  | TikTok | watch For You feed (warmFeed, passive) 1.5h | follow / comment (no target source — use `!tt follow <user>` / `!tt comment <url> <msg>`) |
+
+  All auto-posters run ±jitter per fire, circadian-gated, per-platform mutexed.
 - **videoScheduler:** drops n videos at Harare 00/04/08/12/16/20 with MD5 dedup + per-user 3/hour cap (OFF by default — `!sched on`).
 - **Keep-alives:** bot self-pings `/health` every 4 min; pings the scraper every 5 min.
 - **Blender film factory:** `POST /admin/blender/plan {topic, grade}` → full .bpy project; render anywhere with Blender (see §4).
@@ -73,13 +82,26 @@ Already built in — and hardened in v84.1:
 
 ## 4. THE BLENDER FILM PIPELINE (your Task 2 — the star)
 
-**Where it runs:** the server only PLANS (writes .bpy text — no Blender needed). You render on your PC or free GitHub Actions CI.
+**Where it runs:** the server only PLANS (writes .bpy text — no Blender needed). You render on your PC or free GitHub Actions CI. v84.4 completed the **last mile**: the rendered .mp4 goes back INTO the bot and out to your channels.
 
 ```bash
-# on your machine (Blender installed):
+# 1) plan (on the Render server or locally):
 python -m blender_pipeline all --topic "The San people of the Kalahari" --grade 10 --workdir work/san
-bash work/san/render.sh          # builds GLBs, assembles film, renders frames, makes out/final.mp4
+
+# 2) render (a machine with Blender + ffmpeg):
+bash work/san/render.sh          # objects → assemble → frames → MUX → out/final.mp4
+
+# 3) share: upload out/final.mp4 in the panel (🎥 Film Last Mile card)
+#    then: 📲 WhatsApp (video bytes to main group) · ▶️ YouTube (Studio)
+#          🐦 Twitter (tweet + media). Or from WhatsApp: !film list, !film 1
 ```
+
+**v84.4 mux fix (this was broken):** the generated render.sh used to (a) have invalid
+bash — `run_bpy () {{` doubled braces, the script could not even start, and (b) compute
+an ffmpeg narration-mix graph and then throw it away, so final.mp4 was always SILENT.
+Both fixed: render.sh is valid bash, and narration mp3s are mixed at their EXACT
+narration-beat offsets (`start_f / fps * 1000` ms adelay graph, actually passed to
+ffmpeg) with subtitles burned in. No audio → honest "silent" warning instead of a fake success.
 
 **What it produces for that topic (verified in the demo run):**
 - 12 `.bpy` files: dune terrain (displacement+ripples+grass+acacias+rigid rocks), hunting spear (bend modifier, knapped flint head via voronoi displacement, sinew bindings, leather grip), recurve bow + 3 fletched arrows, **3 humans** (anatomical proportions per sex/age, subsurface skin with pores, individual fingernails + toenails, 3 hair systems: 4500-strand coily scalp ×8 children ≈ 36k strands + brows + lashes, hide apron with cloth sim, 26-bead ostrich-shell necklace, idle breathing keyframes), campfire (flicker-animated emission + firelight + rigid stone ring), grass hut (sapling arcs + displaced thatch), eland (spiral-horn quadruped with fur system), rock-art panel (ochre wave-shader), ostrich-egg flasks + digging stick

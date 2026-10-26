@@ -18,13 +18,13 @@ RENDER_SH = r'''#!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
 set -e
 cd "$(dirname "$0")"
-BLENDER=${{BLENDER:-blender}}
-STEP="${{1:-all}}"
+BLENDER=${BLENDER:-blender}
+STEP="${1:-all}"
 
-run_bpy () {{  # $1 = file
+run_bpy () {  # $1 = file
   echo "▶ $1"
   "$BLENDER" --background --python "$1" -- --out "$(pwd)/bpy" 2>&1 | tail -n 3
-}}
+}
 
 if [[ "$STEP" == "all" || "$STEP" == "objects" ]]; then
   for f in bpy/1*.bpy bpy/2*.bpy bpy/3*.bpy bpy/4*.bpy; do
@@ -48,29 +48,60 @@ if [[ "$STEP" == "all" || "$STEP" == "video" ]]; then
   # 1. silent film from frames
   ffmpeg -y -framerate @@FPS@@ -pattern_type glob -i 'frames/f_*.png' \
          -c:v libx264 -pix_fmt yuv420p -crf 18 out/film_silent.mp4
-  # 2. narration audio (per-scene mp3s at their exact offsets)
-  if ls audio/*.mp3 >/dev/null 2>&1; then
-    printf '' > audio/concat_list.txt
+
+  # 2. v84.4 FIX: narration audio is now ACTUALLY muxed in.
+  #    (The old step computed an adelay+amix graph, printed it, and threw
+  #    it away — final.mp4 came out silent. It also fed adelay raw frame
+  #    numbers as milliseconds, so even a wired graph would have been
+  #    minutes off. Now python writes the input list + a REAL graph with
+  #    start_f/fps*1000 ms delays, and bash runs ffmpeg with it.)
+  AUDARGS=()
+  if compgen -G "audio/narration_*.mp3" > /dev/null && [[ -f alignment.json ]]; then
     python3 - <<'PY'
 import json, os
-rows = json.load(open('alignment.json'))['beats']
-# build an ffmpeg adelay+amix filter for sample-accurate alignment
-inputs, delays = [], []
-for i, b in enumerate(rows):
-    f = f"audio/narration_{i:02d}_{b['scene']}.mp3"
-    if not os.path.exists(f): continue
-    inputs += ['-i', f]
-    delays.append(f"[{len(delays)}:a]adelay={int(b['start_f']*1000)}:all=1[a{len(delays)}]")
-if delays:
-    print(' '.join(inputs), end='')
-    filt = ';'.join(delays) + ';' + ''.join(f'[a{i}]' for i in range(len(delays))) + f"amix=inputs={len(delays)}:normalize=0[aout]"
-    print(filt)
+cfg = json.load(open('alignment.json'))
+fps = float(cfg.get('fps', 24)) or 24.0
+inputs, parts = [], []
+for i, b in enumerate(cfg.get('beats', [])):
+    f = "audio/narration_%02d_%s.mp3" % (i, b['scene'])
+    if not os.path.exists(f):
+        continue
+    inputs.append(f)
+    ms = int(round(int(b['start_f']) / fps * 1000))
+    # ffmpeg input 0 = the silent film (video, no audio) — narration
+    # files are inputs 1..N, so the audio stream specifier is i+1
+    parts.append("[%d:a]adelay=%d:all=1[a%d]" % (len(inputs), ms, len(inputs) - 1))
+open('audio/inputs.txt', 'w').write('\n'.join(inputs) + '\n')  # trailing newline: bash `while read` drops the last line without it
+if inputs:
+    # per-input delay chains, THEN a fresh segment whose input labels
+    # feed amix:  [0:a]adelay=..[a0];[1:a]adelay=..[a1];[a0][a1]amix=..
+    # (gluing the labels onto the previous filter = "No such filter: ''")
+    graph = ';'.join(parts)
+    graph += ';' + ''.join('[a%d]' % i for i in range(len(inputs)))
+    graph += 'amix=inputs=%d:normalize=0[aout]' % len(inputs)
+else:
+    graph = ''
+open('audio/filter.txt', 'w').write(graph)
 PY
+    while IFS= read -r f || [[ -n "$f" ]]; do [[ -n "$f" ]] && AUDARGS+=("-i" "$f"); done < audio/inputs.txt
   fi
-  # 3. mux + subtitles
-  SUBS=""
-  [[ -f subtitles.srt ]] && SUBS="-vf subtitles=subtitles.srt"
-  ffmpeg -y -i out/film_silent.mp4 $SUBS -c:v libx264 -c:a aac out/final.mp4 && echo "✔ out/final.mp4"
+
+  # 3. mux: burn subtitles into the video graph, mix narration in
+  VGRAPH='[0:v]null[vout]'
+  [[ -f subtitles.srt ]] && VGRAPH='[0:v]subtitles=subtitles.srt[vout]'
+  if [[ ${#AUDARGS[@]} -gt 0 ]]; then
+    GRAPH="$(cat audio/filter.txt)"
+    ffmpeg -y -i out/film_silent.mp4 "${AUDARGS[@]}" \
+      -filter_complex "$VGRAPH;$GRAPH" \
+      -map "[vout]" -map "[aout]" \
+      -c:v libx264 -pix_fmt yuv420p -crf 18 -c:a aac -shortest out/final.mp4 \
+      && echo "✔ out/final.mp4 (narration + subtitles muxed)"
+  else
+    echo "⚠ no narration audio found (audio/narration_*.mp3) — final.mp4 will be SILENT"
+    ffmpeg -y -i out/film_silent.mp4 -filter_complex "$VGRAPH" -map "[vout]" \
+      -c:v libx264 -pix_fmt yuv420p -crf 18 out/final.mp4 \
+      && echo "✔ out/final.mp4 (silent, subtitles only)"
+  fi
 fi
 echo "DONE — see $(pwd)/out/"
 '''

@@ -57,6 +57,7 @@ class TikTokBot {
     this.rateLimiter.setActionLimits('comment', { hourly: 6, daily: 25, cooldown: 20000 });
     this.rateLimiter.setActionLimits('like', { hourly: 8, daily: 30, cooldown: 12000 });
     this.rateLimiter.setActionLimits('post', { hourly: 1, daily: 5, cooldown: 120000 });
+    this.rateLimiter.setActionLimits('watch', { hourly: 10, daily: 60, cooldown: 60000 });  // v84.4 warmFeed
   }
 
   /* ── Initialize with mobile viewport ───────────────────────── */
@@ -361,6 +362,50 @@ class TikTokBot {
       this.health.errorCount++;
       this.health.lastError = e.message;
       this.log('error', 'tiktok', 'Watch error: ' + e.message);
+      return { success: false, error: e.message };
+    }
+  }
+
+  /* ═══ v84.4: warmFeed — the automated "watch" task ═══════════
+   * schedules/tiktok.json always promised a watchVideo task, but it
+   * needed a videoUrl nobody supplies on a schedule, so TikTok had
+   * ZERO automation. warmFeed is the schedule-safe version: open the
+   * For You feed and watch 3-6 videos with human dwell time (15-45s
+   * each). No likes, comments or follows — pure passive engagement
+   * and session warming, driven by multi-platform's scheduler. */
+  async warmFeed() {
+    if (!await this.ensureReady()) return { success: false, error: 'Not logged in' };
+    if (!this.rateLimiter.canAct('watch')) return { success: false, error: 'Rate limited' };
+
+    try {
+      this.health.lastActionAt = Date.now();
+      await this.page.goto('https://www.tiktok.com/foryou', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await humanDelay(3000, 6000);
+
+      const captcha = await detectCaptcha(this.page);
+      if (captcha.detected) {
+        this.log('warn', 'tiktok', 'CAPTCHA on For You feed — aborting warmFeed');
+        return { success: false, error: 'CAPTCHA detected' };
+      }
+
+      const videos = 3 + Math.floor(Math.random() * 4);   // 3-6 videos
+      let watched = 0;
+      for (let i = 0; i < videos; i++) {
+        await sleep(15000 + Math.floor(Math.random() * 30000));   // dwell 15-45s
+        await humanScroll(this.page, 'down', 1);                  // next video
+        await humanDelay(800, 2000);
+        watched++;
+      }
+
+      this.rateLimiter.record('watch');
+      this.health.successCount++;
+      this.data.addToHistory('watch', { videos: watched });
+      this.log('info', 'tiktok', 'warmFeed: watched ' + watched + ' videos (passive engagement)');
+      return { success: true, watched };
+    } catch (e) {
+      this.health.errorCount++;
+      this.health.lastError = e.message;
+      this.log('error', 'tiktok', 'warmFeed error: ' + e.message);
       return { success: false, error: e.message };
     }
   }

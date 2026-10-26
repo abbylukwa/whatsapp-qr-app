@@ -146,20 +146,46 @@ class YouTubeBot {
     if (!this.contentPipeline) {
       return { success: false, error: 'Content pipeline not wired' };
     }
-    
+
     const content = this.contentPipeline.getYouTubeShortContent();
     if (!content || !content.text) {
       return { success: false, error: 'No short content generated' };
     }
-    
+
     this.log('info', 'youtube', 'Auto Short: ' + content.type + ' (' + (content.subject || '') + ')');
-    
-    // If there's a video file, upload it. Otherwise create a community post as text-only short.
-    // For now, post as community (text) since we need Blender/TTS for video
+
+    /* v84.4: if a rendered FILM (.mp4) is sitting in the media cache and
+     * has not been uploaded as a Short yet, upload the REAL video via
+     * Studio. Otherwise fall back to a community text post (honestly
+     * labeled — the old code called a text post a "SHORT" with no video
+     * behind it, because there was no way to get a video in. Now the
+     * Film Last Mile card / !film upload puts real films in the cache
+     * and this task turns them into actual Shorts automatically). */
+    const film = this._nextFilmForShort();
+    if (film) {
+      const title = (content.title || content.subject || 'Educational short').slice(0, 90);
+      this.log('info', 'youtube', 'Film in cache — uploading REAL Short: ' + film.file);
+      const up = await this.uploadVideo({
+        videoPath: film.path,
+        title,
+        description: (content.text || '').slice(0, 4000),
+        visibility: 'public'
+      });
+      if (up.success) {
+        this._markFilmShorted(film.file);
+        this.contentPipeline._recordPost('youtube', title, {
+          type: 'short_film', subject: content.subject, template: content.template
+        });
+        return { ...up, contentType: 'short_film', film: film.file };
+      }
+      this.log('warn', 'youtube', 'Film Short upload failed (' + (up.error || '?') + ') — falling back to community text post');
+    }
+
+    // Fallback: text-only community post (honest label, no fake "SHORT")
     const result = await this.communityPost({
-      text: '🎬 SHORT: ' + content.title + '\n\n' + content.text
+      text: '📚 EDUCATIONAL: ' + content.title + '\n\n' + content.text
     });
-    
+
     if (result.success) {
       this.contentPipeline._recordPost('youtube', content.text, {
         type: content.type,
@@ -167,8 +193,25 @@ class YouTubeBot {
         template: content.template
       });
     }
-    
+
     return { ...result, contentType: content.type, subject: content.subject };
+  }
+
+  /* ── v84.4: newest cached film not yet used as a Short ─────── */
+  _nextFilmForShort() {
+    try {
+      const mediaDir = path.join(this.dataDir, 'media-cache');
+      const files = fs.readdirSync(mediaDir)
+        .filter(f => /_film_.*\.mp4$/i.test(f))
+        .map(f => { const st = fs.statSync(path.join(mediaDir, f)); return { file: f, path: path.join(mediaDir, f), mtime: st.mtimeMs }; })
+        .sort((a, b) => b.mtime - a.mtime);
+      const used = new Set((this.data.getList('filmShorts') || []));
+      return files.find(f => !used.has(f.file)) || null;
+    } catch (e) { return null; }
+  }
+
+  _markFilmShorted(file) {
+    try { this.data.addToList('filmShorts', { file, at: Date.now() }); } catch (e) {}
   }
 
   /* ── Auto-engage: watch + like + comment on a video ────────── */

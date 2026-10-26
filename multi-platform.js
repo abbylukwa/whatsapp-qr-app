@@ -350,11 +350,12 @@ class MultiPlatformManager {
     if (this._autoPostRunning) return;
     this._autoPostRunning = true;
 
-    // per-fire human jitter: ±20% of the base interval, min ±1min
-    const schedule = (key, platform, action, intervalMs) => {
+    // per-fire human jitter: interval ± jitter%, min wait 1 minute
+    const schedule = (key, platform, action, intervalMs, jitter) => {
       const arm = () => {
         if (!this._autoPostRunning) return;            // don't re-arm after stop
-        const jitterFactor = 1 + (Math.random() * 2 - 1) * 0.20;
+        const j = (typeof jitter === 'number') ? jitter : 0.20;
+        const jitterFactor = 1 + (Math.random() * 2 - 1) * j;
         const wait = Math.max(60000, Math.round(intervalMs * jitterFactor));
         const t = setTimeout(async () => {
           try {
@@ -370,23 +371,72 @@ class MultiPlatformManager {
       arm();
     };
 
-    // ── YouTube ──────────────────────────────────────────
-    schedule('ytCommunity', 'youtube', 'community', 8 * 3600000);   // 1-2/day SAFE
-    schedule('ytShort',     'youtube', 'short',     4 * 3600000);   // 2-5/day SAFE
-    schedule('ytEngage',    'youtube', 'engage',    2 * 3600000);
+    /* ═══ v84.4 FIX: schedules/<platform>.json is now LIVE CONFIG ═══
+     * It used to be decorative — ScheduleManager loaded it, status
+     * showed the tasks, self-tests parsed it, but startTask() was
+     * NEVER called, so every timer actually fired from the hard-coded
+     * defaults below and the JSON intervals quietly drifted from
+     * reality (youtube.json promised uploads/likes/watches that never
+     * ran; tiktok.json promised follow/comment/watch that never ran).
+     * NOW: every ENABLED task whose action has a real handler IS the
+     * schedule. Edit the interval in the JSON, restart, done. Tasks
+     * whose action has no automated handler are refused LOUDLY at boot
+     * (they stay manual-only via WhatsApp commands). */
+    const ACTION_KEY = {   // schedules/<p>.json action -> _autoPost action
+      communityPost: 'community', uploadShort: 'short', engage: 'engage',
+      timelinePost: 'timeline', crosspost: 'crosspost', joinGroup: 'joinGroups',
+      tweet: 'tweet', reply: 'reply', dmCheck: 'dm', watchVideo: 'watch'
+    };
+    const DEFAULTS = {     // fill gaps when the JSON task is missing
+      youtube:  [
+        { key: 'ytCommunity', action: 'community', interval: 8 * 3600000 },
+        { key: 'ytShort',     action: 'short',     interval: 4 * 3600000 },
+        { key: 'ytEngage',    action: 'engage',    interval: 2 * 3600000 }
+      ],
+      facebook: [
+        { key: 'fbTimeline',   action: 'timeline',   interval: 8 * 3600000 },
+        { key: 'fbCrosspost',  action: 'crosspost',  interval: 12 * 3600000 },
+        { key: 'fbJoinGroups', action: 'joinGroups', interval: 4 * 3600000 }
+      ],
+      twitter:  [
+        { key: 'tweet',     action: 'tweet', interval: 2 * 3600000 },
+        { key: 'twReply',   action: 'reply', interval: 3 * 3600000 },
+        { key: 'twDMCheck', action: 'dm',    interval: 45 * 60000 }
+      ],
+      tiktok:   [
+        { key: 'ttWatch',   action: 'watch', interval: 90 * 60000 }
+      ]
+    };
 
-    // ── Facebook ─────────────────────────────────────────
-    schedule('fbTimeline',   'facebook', 'timeline',   8 * 3600000);  // half YT
-    schedule('fbCrosspost',  'facebook', 'crosspost', 12 * 3600000);
-    schedule('fbJoinGroups', 'facebook', 'joinGroups', 4 * 3600000);
+    for (const [platform, defaults] of Object.entries(DEFAULTS)) {
+      const bot = this.platforms[platform];
+      if (!bot || !bot.schedule || !bot.schedule.isEnabled()) continue;
+      if (bot._chromeAvailable === false) continue;
 
-    // ── Twitter ──────────────────────────────────────────
-    schedule('tweet',     'twitter', 'tweet', 2 * 3600000);          // 5-10/day
-    schedule('twReply',   'twitter', 'reply', 3 * 3600000);
-    // Process NSFW queue: REMOVED — Twitter posts independently
-    schedule('twDMCheck', 'twitter', 'dm',   45 * 60000);
+      const usedActions = new Set();
+      for (const t of (bot.schedule.getTasks() || [])) {
+        if (!t || !t.enabled) continue;
+        const actionKey = ACTION_KEY[t.action];
+        if (!actionKey) {
+          this.log('warn', 'multi-platform', platform + ' schedule task "' + t.id +
+            '" (action: ' + t.action + ') has NO automated handler — not scheduled. Run it manually via WhatsApp commands.');
+          continue;
+        }
+        usedActions.add(actionKey);
+        const jit = (typeof t.jitter === 'number') ? t.jitter : undefined;
+        schedule(t.id, platform, actionKey, t.interval || 3600000, jit);
+        this.log('info', 'multi-platform', platform + ' scheduled "' + t.id + '" every ' +
+          Math.round((t.interval || 3600000) / 60000) + 'min ±' +
+          Math.round(((typeof t.jitter === 'number') ? t.jitter : 0.20) * 100) +
+          '% (from schedules/' + platform + '.json)');
+      }
+      for (const d of defaults) {
+        if (usedActions.has(d.action)) continue;
+        schedule(d.key, platform, d.action, d.interval);
+      }
+    }
 
-    this.log('info', 'multi-platform', 'Auto-posting started (per-fire jitter, platform mutex, circadian-gated)');
+    this.log('info', 'multi-platform', 'Auto-posting started (per-fire jitter, platform mutex, circadian-gated, schedules/*.json LIVE)');
   }
 
   stopAutoPosting() {
@@ -534,6 +584,12 @@ class MultiPlatformManager {
           break;
         case 'twitter:dm':
           result = await bot.handleDMs();
+          break;
+
+        // TikTok (v84.4: watch is the ONLY safe automated action —
+        // follow/comment need targets only the operator can provide)
+        case 'tiktok:watch':
+          result = await bot.warmFeed();
           break;
         
         // DEPRECATED: nsfwQueue no longer used — Twitter is independent

@@ -1,5 +1,20 @@
 {
-  "crashes": [],
-  "restartCount": 0,
-  "lastSave": 1793044167099
+  "crashes": [
+    {
+      "type": "uncaughtException",
+      "message": "listen EADDRINUSE: address already in use :::4201",
+      "stack": "Error: listen EADDRINUSE: address already in use :::4201\n    at Server.setupListenHandle [as _listen2] (node:net:2328:16)\n    at listenInCluster (node:net:2437:12)\n    at Server.listen (node:net:2562:7)\n    at app.listen (/home/z/my-project/unified_stack/whatsapp-qr-app/node_modules/express/lib/application.js:635:24)\n    at Object.<anonymous> (/home/z/my-project/unified_stack/whatsapp-qr-app/server.js:8995:5)\n    at Module._compile (node:internal/modules/cjs/loader:1929:14)\n    at Object..js (node:internal/modules/cjs/loader:2060:10)\n    at Module.load (node:internal/modules/cjs/loader:1651:32)\n    at Module._load (node:internal/modules/cjs/loader:1443:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)",
+      "timestamp": 1793044798985,
+      "pid": 3431,
+      "memory": {
+        "rss": 132071424,
+        "heapTotal": 73842688,
+        "heapUsed": 52716864,
+        "external": 4182848,
+        "arrayBuffers": 151197
+      }
+    }
+  ],
+  "restartCount": 1,
+  "lastSave": 1793047050374
 }

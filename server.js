@@ -245,7 +245,13 @@ const TZ_OFFSET_HOURS    = parseInt(process.env.TZ_OFFSET_HOURS || '2', 10);
 /* v73: MEDIA_MAX_MB — max media size the bot will download & send.
  * Default 40MB so 34MB videos download with headroom (scraper-side
  * cap: SCRAPER_MAX_MB, same default). Override via env if needed. */
-const MEDIA_MAX_BYTES    = Math.max(1, parseInt(process.env.MEDIA_MAX_MB || '40', 10)) * 1024 * 1024;
+const MEDIA_MAX_MB_ENV = parseInt(process.env.MEDIA_MAX_MB || '40', 10);
+/* v84.3: garbage env used to pass straight through (MEDIA_MAX_MB=-5 → a
+ * 1-byte media cap, silently). Now: non-numeric/zero/negative → default,
+ * anything over 200MB clamped, and the override is announced. */
+const MEDIA_MAX_MB = (Number.isFinite(MEDIA_MAX_MB_ENV) && MEDIA_MAX_MB_ENV > 0) ? Math.min(MEDIA_MAX_MB_ENV, 200) : 40;
+if (process.env.MEDIA_MAX_MB !== undefined && String(MEDIA_MAX_MB) !== String(process.env.MEDIA_MAX_MB)) console.log('[ENV] MEDIA_MAX_MB="' + process.env.MEDIA_MAX_MB + '" is not a sane size — using ' + MEDIA_MAX_MB + 'MB instead (1–200 allowed)');
+const MEDIA_MAX_BYTES    = MEDIA_MAX_MB * 1024 * 1024;
 
 /* ─── v66: dual-host mode + reports + broadcast cap ────────────
  * BOT_MODE=manager (default): full group-management bot.
@@ -1663,6 +1669,30 @@ async function sendMediaUrl(jid, mediaUrl, opts = {}){
     priority = 2, lane = 'slow', taskType = 'group', typing = false, account
   } = opts;
 
+  /* v84.3: relative URLs never leave the box — absolutize first. */
+  mediaUrl = absoluteUrl(null, mediaUrl);
+
+  /* v84.3: self-hosted media goes out as BYTES, not a URL — no network
+   * round-trip to break, and no auth interplay: the bot reads its own
+   * media-cache file directly and hands the buffer to Baileys. */
+  try {
+    if (mediaUrl.indexOf('/admin/media/') !== -1){
+      const selfName = path.basename(decodeURIComponent(mediaUrl.split('/admin/media/')[1].split('?')[0]));
+      const selfPath = path.join(MEDIA_DIR, selfName);
+      if (fs.existsSync(selfPath)){
+        const buf = fs.readFileSync(selfPath);
+        const isAudioB = kind === 'audio' || (mimetype && mimetype.startsWith('audio/'));
+        const isVideoB = kind === 'video' || (mimetype && mimetype.startsWith('video/'));
+        const isImageB = kind === 'image' || (mimetype && mimetype.startsWith('image/'));
+        const contentB = isAudioB ? { audio: buf, mimetype: mimetype || 'audio/mpeg', caption }
+          : isVideoB ? { video: buf, mimetype: mimetype || 'video/mp4', caption }
+          : isImageB ? { image: buf, mimetype: mimetype || 'image/jpeg', caption }
+          : { document: buf, mimetype: mimetype || 'application/octet-stream', caption, fileName: selfName };
+        return sendBuffer(jid, contentB, priority, lane, taskType, typing, account ? { account } : undefined);
+      }
+    }
+  } catch (_selfErr) { /* fall through to URL delivery below */ }
+
   const isAudio = kind === 'audio' || (mimetype && mimetype.startsWith('audio/'));
   const isVideo = kind === 'video' || (mimetype && mimetype.startsWith('video/'));
   const isImage = kind === 'image' || (mimetype && mimetype.startsWith('image/'));
@@ -2338,11 +2368,27 @@ const MEDIA_CACHE_MAX_BYTES = 60 * 1024 * 1024;
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 const MEDIA_CRYPTO = require('crypto');
 const SELF_BASE = (process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL || '').replace(/\/$/, '');
+const SELF_PORT = Math.max(1, parseInt(process.env.PORT || '3000', 10) || 3000);
+/* v84.3 — THE "all links kinda off" FIX. Links were born relative
+ * (/admin/media/…) whenever RENDER_EXTERNAL_URL/BASE_URL was unset.
+ * A browser <img> tolerates that, but Baileys, WhatsApp delivery and
+ * any programmatic fetch cannot parse a relative URL at all — every
+ * such link died. absoluteUrl() is now the ONLY way a link leaves
+ * this process: req host → env base → self-on-localhost fallback
+ * (Baileys downloads from itself, so localhost always works). */
+function absoluteUrl(req, rel){
+  rel = String(rel || '');
+  if (/^https?:\/\//i.test(rel)) return rel;   /* already absolute */
+  if (req && req.get && req.get('host')) return req.protocol + '://' + req.get('host') + rel;
+  if (SELF_BASE) return SELF_BASE + rel;
+  return 'http://127.0.0.1:' + SELF_PORT + rel;  /* self-download fallback */
+}
 const MEDIA_MIME = {
   '.mp4':'video/mp4', '.webm':'video/webm', '.mov':'video/quicktime',
   '.mp3':'audio/mpeg', '.m4a':'audio/mp4', '.ogg':'audio/ogg', '.wav':'audio/wav', '.aac':'audio/aac',
   '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.webp':'image/webp', '.gif':'image/gif',
-  '.txt':'text/plain; charset=utf-8', '.json':'application/json'
+  '.txt':'text/plain; charset=utf-8', '.json':'application/json',
+  '.svg':'image/svg+xml', '.bpy':'text/plain; charset=utf-8'
 };
 function mediaFileUrl(req, file){
   const rel = '/admin/media/' + encodeURIComponent(file);
@@ -2374,6 +2420,27 @@ async function downloadToLocalMedia(mediaUrl, kind){
     return saved;
   } catch(e){ pushLog('warn','media','local copy failed (' + kind + '): ' + e.message); return null; }
 }
+/* ═══ v84.4 FILM LAST MILE — .bpy → (render on your PC/CI) → .mp4 → HERE ═══
+ * Blender is NEVER on the Render box: the pipeline only PLANS (.bpy text).
+ * render.sh turns that kit into out/final.mp4 on any Blender machine (or
+ * the included GitHub Action). These helpers + routes below are the
+ * missing last mile: upload the finished .mp4, then actually share it. */
+function filmsIndexPath(){ return path.join(__dirname, 'data', 'films.json'); }
+function loadFilmsIndex(){
+  try { const j = JSON.parse(fs.readFileSync(filmsIndexPath(), 'utf8')); return (j && typeof j === 'object' && !Array.isArray(j)) ? j : {}; }
+  catch(e){ return {}; }
+}
+function saveFilmsIndex(idx){
+  try { const tmp = filmsIndexPath() + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(idx, null, 2)); fs.renameSync(tmp, filmsIndexPath()); } catch(e){}
+}
+function listFilmFiles(){
+  try {
+    return fs.readdirSync(MEDIA_DIR)
+      .filter(f => /_film_.*\.(mp4|webm|mov)$/i.test(f))
+      .map(f => { const st = fs.statSync(path.join(MEDIA_DIR, f)); return { file: f, size: st.size, mtime: st.mtimeMs }; })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch(e){ return []; }
+}
 function mediaSweep(){
   try {
     const files = fs.readdirSync(MEDIA_DIR); const now = Date.now(); let deleted = 0;
@@ -2387,7 +2454,7 @@ function mediaSweep(){
 }
 setInterval(mediaSweep, 3600 * 1000).unref();
 function guessMediaKind(file){
-  const m = /_(video|audio|music|image|gif|prompt|script)_/.exec(file);
+  const m = /_(video|audio|music|image|gif|prompt|script|blender|scene|film)_/.exec(file);
   if (m) return m[1] === 'music' ? 'audio' : m[1];
   return /\.(mp4|webm|mov)$/i.test(file) ? 'video' : /\.(mp3|m4a|ogg|wav|aac)$/i.test(file) ? 'audio'
        : /\.(jpe?g|png|webp|gif)$/i.test(file) ? 'image' : 'file';
@@ -4329,6 +4396,7 @@ VIDEO DROPS (v72)
 MESSAGING (cap ${BROADCAST_BATCH_MAX}/run, rotation)
 !broadcast <msg> / !bcgroup <msg> / !bcdm <msg> / !all <msg>
 !ad <title> | <body> | <cta> — build the ad · !bcad — send it
+!film [n] — list rendered films · send #n into this chat
 !send <jid> <msg>
 
 GROUP MANAGEMENT (main group only)
@@ -4779,6 +4847,24 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'cleantemp': {
       try { await axios.post(SCRAPER_URL + '/cleanup', {}, { timeout: 15000 }); await reply('🧹 Scraper temp cleaned — storage freed.'); }
       catch(e){ await reply('Cleanup failed: ' + e.message); }
+      break;
+    }
+    case 'film': {
+      /* ═══ v84.4 FILM LAST MILE — share a rendered film from WhatsApp ═══
+       * !film         → list the films sitting in the media cache
+       * !film <n>     → send film #n into THIS chat as video bytes
+       * (the films arrive here from the panel's Film Last Mile card —
+       *  rendered out/final.mp4 from your PC or the GitHub Action) ═══ */
+      const films = listFilmFiles();
+      if (!films.length){ await reply('No films in the media cache. Render the .bpy kit with bash render.sh (your PC or the GitHub Action), then upload out/final.mp4 via the panel Film Last Mile card.'); break; }
+      const pick = parseInt(args[1], 10);
+      if (!pick || pick < 1 || pick > films.length){
+        await reply('🎬 Films in cache:' + films.map((f, i) => '\n' + (i + 1) + '. ' + f.file.replace(/^\d{14}_film_/, '').replace(/\.(mp4|webm|mov)$/i, '') + ' (' + (f.size / 1048576).toFixed(1) + 'MB)').join('') + '\n\nSend one here: !film <number>');
+        break;
+      }
+      const f = films[pick - 1];
+      await reply('🎬 Sending film ' + pick + '/' + films.length + ' (' + (f.size / 1048576).toFixed(1) + 'MB)…');
+      await sendMediaUrl(chatJid, mediaFileUrl(null, f.file), { kind:'video', mimetype:'video/mp4', caption: '🎬 ' + f.file.replace(/^\d{14}_film_/, '').replace(/\.(mp4|webm|mov)$/i, '') });
       break;
     }
     case 'pause': botPaused = true; await reply('Paused.'); break;
@@ -7154,8 +7240,61 @@ const app = express();
 app.set('trust proxy', true);   /* v84.2: req.protocol=https behind Render's proxy — self-hosted media URLs come out right */
 app.use(express.json());
 
+/* ═══ v84.3: ADMIN AUTH — the panel used to be WIDE OPEN ═══
+ * Hostile audit finding: every /admin route (QR hijack, message stream,
+ * save-env, session backup) answered the public internet with zero
+ * authentication. Now: one admin token guards / and /admin/*. Set
+ * ADMIN_TOKEN in env, or one is generated at boot, printed to the log
+ * and saved to data/admin_token.txt. Cookie, ?token= or Bearer all work.
+ * WhatsApp delivery is unaffected — self-hosted media is delivered as
+ * raw bytes now (see sendMediaUrl), so no fetch ever needs the cookie. */
+const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim() || (function(){
+  const t = MEDIA_CRYPTO.randomBytes(9).toString('base64url');
+  try { fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+        fs.writeFileSync(path.join(__dirname, 'data', 'admin_token.txt'), t + '\n', { mode: 0o600 }); } catch(e){}
+  console.log('[AUTH] ADMIN_TOKEN not set — generated one-time token: ' + t);
+  console.log('[AUTH] saved to data/admin_token.txt — open /admin/login and paste it (or set ADMIN_TOKEN env to choose your own)');
+  return t;
+})();
+/* server-side HTML escape (the panel's esc() lives inside the browser
+ * template literal — it does NOT exist in server scope). */
+function escHtml(s){ return String(s || '').replace(/[&<>"']/g, function(c){ return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
+function adminTokenOk(a, b){
+  try { const A = Buffer.from(String(a || '')); const B = Buffer.from(String(b || ''));
+        return A.length === B.length && MEDIA_CRYPTO.timingSafeEqual(A, B); }
+  catch(e){ return false; }
+}
+function isAdminReq(req){
+  if (adminTokenOk(req.query && req.query.token, ADMIN_TOKEN)) return true;
+  const m = /(?:^|;\s*)bb_auth=([^;]+)/.exec(String(req.headers.cookie || ''));
+  if (m && adminTokenOk(decodeURIComponent(m[1]), ADMIN_TOKEN)) return true;
+  if (String(req.headers.authorization || '') === 'Bearer ' + ADMIN_TOKEN) return true;
+  return false;
+}
+app.use(function adminGate(req, res, next){
+  if (req.path === '/admin/login' || req.path === '/healthz') return next();
+  if (req.path === '/' || req.path === '/admin' || req.path.startsWith('/admin/')){
+    if (isAdminReq(req)) return next();
+    if (req.method === 'GET' && String(req.headers.accept || '').indexOf('text/html') !== -1){
+      return res.redirect('/admin/login?next=' + encodeURIComponent(req.originalUrl || '/admin'));
+    }
+    return res.status(401).json({ ok: false, error: 'auth required — open /admin/login', loginUrl: '/admin/login' });
+  }
+  next();
+});
+app.get('/healthz', function(req, res){ res.json({ ok: true, uptime: Math.round(process.uptime()), ts: new Date().toISOString() }); });
+app.get('/admin/login', function(req, res){
+  const tok = String(req.query.token || '');
+  if (tok && adminTokenOk(tok, ADMIN_TOKEN)){
+    res.setHeader('Set-Cookie', 'bb_auth=' + encodeURIComponent(tok) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000');
+    return res.redirect(String(req.query.next || '/admin'));
+  }
+  const bad = tok ? '<div style="color:#f85149;margin-top:10px;font-size:12px">Wrong token — it is printed in the boot log and saved to data/admin_token.txt (or set ADMIN_TOKEN env).</div>' : '';
+  res.status(tok ? 401 : 200).send('<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot — sign in</title></head><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:28px;max-width:440px;width:92%"><h1 style="font-size:18px;color:#58a6ff">🍞 BreadBot admin</h1><p style="font-size:12px;color:#8b949e;line-height:1.7;margin:10px 0">This panel is protected (v84.3). Enter the admin token:<br>• your <b>ADMIN_TOKEN</b> env value if you set one, or<br>• the auto-generated token printed in the boot log and saved to <b>data/admin_token.txt</b>.</p><form method="GET" action="/admin/login" style="display:flex;gap:8px;margin-top:14px"><input name="token" type="password" placeholder="admin token" autofocus style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:9px;font-family:monospace"><input type="hidden" name="next" value="' + String(req.query.next || '/admin') + '"><button style="background:#238636;color:#fff;border:0;border-radius:6px;padding:9px 14px;cursor:pointer;font-family:monospace">Open</button></form>' + bad + '</div></body></html>');
+});
+
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.2</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.3</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7283,6 +7422,23 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div id="mediaCache" style="font-size:11px;line-height:1.8;max-height:260px;overflow-y:auto">click Refresh…</div>
 <div id="loginVerify" style="font-size:11px;line-height:1.7;max-height:220px;overflow-y:auto;margin-top:6px;color:#8b949e"></div>
 </div>
+<div class="card"><h2>🎬 Blender Preview — see & hear the scene</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Type a topic → get a <b>VIEW preview</b> (deterministic mock layout of the exact scene), the <b>real .bpy Blender script</b> of that scene, and a <b>HEAR preview</b> (real Edge-TTS narration). The mock image is an approximate layout — the .bpy is what Blender actually renders.</div>
+<input id="bpTopic" placeholder="scene topic — e.g. water cycle for kids" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;margin-bottom:6px">
+<button class="primary" onclick="renderBlenderPreview()">🖼 View preview</button> <button onclick="hearBlenderPreview()">🔊 Hear preview</button>
+<div id="bpOut" style="font-size:11px;line-height:1.7;margin-top:8px;color:#8b949e">pick a topic and press View preview…</div>
+</div>
+<div class="card"><h2>🎥 Film Last Mile — .bpy → .mp4 → share it</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.6;margin-bottom:6px">The bot <b>plans</b> the film (.bpy kit) but Blender is NOT on this server. Run <code>bash render.sh</code> on your PC (or the included GitHub Action) → it renders the frames, mixes the <b>narration at its exact beats</b> and burns the subtitles into <code>out/final.mp4</code>. Upload that .mp4 here, then share it: <b>📲 WhatsApp</b> = video bytes to your main group, <b>▶️ YouTube</b> = real Studio upload, <b>🐦 Twitter</b> = tweet with the media attached. Films live 24h in the cache — share soon.</div>
+<div style="margin-bottom:6px"><input id="filmFile" type="file" accept=".mp4,.webm,.mov,video/mp4" style="font-size:11px;color:#c9d1d9"> <button class="primary" onclick="uploadFilm()">⬆️ Upload film</button> <button onclick="loadFilms()">🔄 Refresh</button></div>
+<div id="filmList" style="font-size:11px;line-height:1.9;max-height:260px;overflow-y:auto">click Refresh…</div>
+<div id="filmOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
+</div>
+<div class="card"><h2>🔗 Pipeline Link Check — recheck ALL the links</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Generates one of everything (prompt file, blender view + script, audio, media index, scraper health) then <b>fetches every link back over real HTTP</b> and verifies status 200 + content-type + real bytes. Run this before blaming a slot — it tells you exactly which link is off and why.</div>
+<button class="primary" onclick="runLinkCheck()">🔗 Check all links</button> <button onclick="runLinkCheck(1)" style="font-size:10px">⚡ quick (skip TTS)</button>
+<div id="lcOut" style="font-size:11px;line-height:1.7;margin-top:8px;max-height:260px;overflow-y:auto;color:#8b949e">press Check all links…</div>
+</div>
 <div class="card"><h2>🧪 Test All — Truthful Full System Test</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Runs <b>test-all.js</b> — loads and exercises every core module, platform, content pipeline, schedule, config, and existing test suites. No simulation. Reports what <b>actually works vs crashes</b>.</div>
 <div style="margin-bottom:8px"><button class="primary" onclick="runTestAll()">▶ Test Everything</button><span id="taStatus" style="font-size:11px;color:#8b949e;margin-left:8px"></span></div>
@@ -7369,13 +7525,13 @@ Assign 2-20 API keys. <b style="color:#d29922">60% must go to video_pipeline</b>
 <div style="margin-top:8px"><button onclick="runCrapTest('apikeys')" style="font-size:10px">🧪 Test API Keys</button></div>
 </div>
 
-<div class="card"><h2>🎬 Blender → Render → YouTube Pipeline</h2>
+<div class="card"><h2>🎬 Blender → Render → Share Pipeline (the REAL chain)</h2>
 <div style="font-size:11px;line-height:1.65;color:#8b949e">
-<b>Stage 1:</b> AI Brain (this bot) decides what to create, deep-researches the topic, writes Blender Python script.<br>
-<b>Stage 2:</b> Blender headless (<code>blender -b -P script.py</code>) generates 3D scene with real dimensions + cinematic camera + lighting.<br>
-<b>Stage 3:</b> SheepIt render farm (FREE, crowdsourced) renders frames on volunteer machines worldwide.<br>
-<b>Stage 4:</b> moviepy + Edge-TTS composites voice narration + royalty-free music at low volume.<br>
-<b>Stage 5:</b> YouTube Data API v3 uploads the finished .mp4 (6 uploads/day free).
+<b>Stage 1 — Plan (this server):</b> AI brain / knowledge dossier turns topic + grade into the film plan and emits the .bpy kit (panel button below or <code>python3 -m blender_pipeline all</code>).<br>
+<b>Stage 2 — Render (your PC or the GitHub Action — never this server, no Blender here):</b> <code>bash render.sh</code> runs Blender headless per object → GLBs → film assemble → frames → ffmpeg.<br>
+<b>Stage 3 — Mux (fixed in v84.4):</b> narration mp3s are mixed at their EXACT narration-beat offsets, subtitles burned in → <code>out/final.mp4</code>.<br>
+<b>Stage 4 — Upload (Film Last Mile card below):</b> drop final.mp4 into the bot (24h media cache).<br>
+<b>Stage 5 — Share:</b> WhatsApp video bytes · YouTube Studio upload · Tweet with media. Facebook stays text-only — stated, not faked.
 </div>
 <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;font-size:11px">
 <span style="color:#58a6ff">Research</span><span style="color:#8b949e">→</span>
@@ -7389,10 +7545,10 @@ Assign 2-20 API keys. <b style="color:#d29922">60% must go to video_pipeline</b>
 </div>
 <div style="margin-top:8px">
 <div class="row"><span>Render engine</span><span class="val">EEVEE (fast) / Cycles (realistic)</span></div>
-<div class="row"><span>Render farm</span><span class="val" style="color:#3fb950">SheepIt (FREE)</span></div>
-<div class="row"><span>Voice</span><span class="val" style="color:#3fb950">Edge-TTS (FREE unlimited)</span></div>
-<div class="row"><span>Music</span><span class="val" style="color:#3fb950">FreeToUse.com (royalty-free)</span></div>
-<div class="row"><span>Upload</span><span class="val" style="color:#3fb950">YouTube API (6/day free)</span></div>
+<div class="row"><span>Where rendering runs</span><span class="val" style="color:#d29922">Your PC or GitHub Actions (NOT this server)</span></div>
+<div class="row"><span>Voice</span><span class="val" style="color:#3fb950">Edge-TTS (FREE, keyless)</span></div>
+<div class="row"><span>Mux v84.4</span><span class="val" style="color:#3fb950">narration at exact beats + burned subtitles</span></div>
+<div class="row"><span>Share</span><span class="val" style="color:#3fb950">WhatsApp bytes · YT Studio · Tweet+media</span></div>
 </div>
 <div style="margin-top:8px"><button onclick="runCrapTest('video')" style="font-size:10px">🧪 Test Video Pipeline</button></div>
 </div>
@@ -7806,6 +7962,12 @@ async function generateAudio(){var topic=$('audioTopic').value.trim();var voice=
 var eroticStyle='excited';
 async function loadMediaCache(){var b=$('mediaCache');if(!b)return;b.innerHTML='<span style="color:#d29922">loading…</span>';try{var r=await api('media');if(!r.ok){b.innerHTML='<span style="color:#f85149">'+esc(r.error||'failed')+'</span>';return;}if(!r.items.length){b.innerHTML='<span style="color:#8b949e">Empty — run a Scraper Test or generate audio; your openable copies will appear here (kept 24h).</span>';return;}var h='';for(var i=0;i<r.items.length;i++){var m=r.items[i];h+='<div>🔗 <a href="'+esc(m.url)+'" target="_blank" style="color:#58a6ff">'+esc(m.file)+'</a> — '+esc(m.kind)+' · '+esc(m.sizeHuman)+' · '+esc(m.ageHours)+'h old</div>';}b.innerHTML=h;}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function mediaCleanup(){try{await api('media/cleanup','POST',{});loadMediaCache();}catch(e){}}
+async function renderBlenderPreview(){var t=$('bpTopic').value.trim()||'water cycle for kids';var o=$('bpOut');o.innerHTML='<span style="color:#d29922">Rendering view preview…</span>';try{var r=await api('blender/preview','POST',{topic:t});if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}o.innerHTML='<img src="'+esc(r.previewUrl)+'" alt="scene preview" style="max-width:100%;border-radius:6px"><div style="margin-top:5px">Objects: '+esc((r.objects||[]).join(', '))+' · theme: '+esc(r.theme||'')+'</div><div><a href="'+esc(r.bpyUrl)+'" target="_blank" style="color:#58a6ff">open the real .bpy Blender script ↗</a> <a href="'+esc(r.previewUrl)+'" target="_blank" style="color:#58a6ff;margin-left:8px">full size ↗</a></div><div style="color:#8b949e">'+esc(r.note||'')+'</div>';}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function uploadFilm(){var inp=document.getElementById('filmFile');var o=document.getElementById('filmOut');var f=inp&&inp.files&&inp.files[0];if(!f){o.innerHTML='<span style="color:#d29922">Choose an .mp4 first.</span>';return;}o.innerHTML='<span style="color:#d29922">Uploading '+esc(f.name)+' ('+Math.round(f.size/1048576)+'MB)…</span>';try{var r=await fetch('/admin/film/upload?name='+encodeURIComponent(f.name),{method:'POST',headers:{'Content-Type':'video/mp4'},body:f});var d=await r.json();if(d.ok){o.innerHTML='<span style="color:#3fb950">✅ Film in the cache: '+esc(d.file)+' ('+Math.round(d.size/1048576)+'MB)</span>';loadFilms();}else{o.innerHTML='<span style="color:#f85149">❌ '+esc(d.error||'upload failed')+'</span>';}}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function loadFilms(){var el=document.getElementById('filmList');if(!el)return;try{var r=await api('film/list');var fs=r.films||[];el.innerHTML=fs.length?fs.map(function(x){return '<div style="border-top:1px solid #21262d;padding:4px 0"><b>'+esc(x.title)+'</b> · '+x.mb+'MB · '+x.ageHours+'h old'+(x.shared.whatsapp?' · <span style="color:#3fb950">WA ✓</span>':'')+(x.shared.youtube?' · <span style="color:#3fb950">YT ✓</span>':'')+(x.shared.twitter?' · <span style="color:#3fb950">TW ✓</span>':'')+'<br><a href="javascript:void(0)" data-share="whatsapp" data-file="'+esc(x.file)+'" style="color:#58a6ff">📲 WhatsApp</a> <a href="javascript:void(0)" data-share="youtube" data-file="'+esc(x.file)+'" style="color:#58a6ff">▶️ YouTube</a> <a href="javascript:void(0)" data-share="twitter" data-file="'+esc(x.file)+'" style="color:#58a6ff">🐦 Tweet</a> <a href="'+esc(x.url)+'" target="_blank" style="color:#8b949e">open ↗</a></div>';}).join(''):'<span style="color:#8b949e">No films in the cache — upload a rendered out/final.mp4.</span>';el.onclick=function(ev){var a=ev.target&&ev.target.closest?ev.target.closest('[data-share]'):null;if(a)shareFilm(a.getAttribute('data-file'),a.getAttribute('data-share'));};}catch(e){el.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function shareFilm(file,target){var o=document.getElementById('filmOut');o.innerHTML='<span style="color:#d29922">Sharing '+esc(file)+' → '+esc(target)+'…</span>';try{var r=await api('film/share','POST',{file:file,targets:[target]});var res=(r.results&&r.results[0])||{};if(res.ok){o.innerHTML='<span style="color:#3fb950">✅ '+esc(res.detail||'shared')+'</span>';loadFilms();}else{o.innerHTML='<span style="color:#f85149">❌ '+esc(res.error||'failed')+'</span>';}}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function hearBlenderPreview(){var t=$('bpTopic').value.trim()||'water cycle for kids';var o=$('bpOut');o.innerHTML='<span style="color:#d29922">Building scene…</span>';try{var r=await api('blender/preview','POST',{topic:t});if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}o.innerHTML='<span style="color:#d29922">Generating real narration (Edge-TTS)…</span>';var a=await api('generate-audio','POST',{topic:t,script:r.narration});if(a.ok){o.innerHTML='<span style="color:#3fb950">✅ Hear preview ready</span> · '+esc(a.voice||'')+'<br><audio src="'+esc(a.audioUrl)+'" controls preload="auto" style="width:100%;margin-top:6px"></audio><div style="color:#8b949e;margin-top:4px">Script: '+esc(r.narration||a.script||'')+'</div>';}else{o.innerHTML='<span style="color:#f85149">❌ TTS failed — '+esc(a.error||'unknown')+'</span>';}}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function runLinkCheck(quick){var o=$('lcOut');o.innerHTML='<span style="color:#d29922">Generating + fetching every link…</span>';try{var r=await api('link-check'+(quick?'?quick=1':''));if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}var h='';for(var i=0;i<r.results.length;i++){var x=r.results[i];h+='<div>'+(x.pass?'<span style="color:#3fb950">PASS</span>':'<span style="color:#f85149">FAIL</span>')+' '+esc(x.name)+' — HTTP '+esc(x.status)+' · '+esc(x.contentType||'-')+' · '+esc(x.bytes||0)+'B'+(x.error?' <span style="color:#f85149">'+esc(x.error)+'</span>':'')+'</div>';}h+='<div style="margin-top:5px;color:'+(r.fail?'#f85149':'#3fb950')+'"><b>'+r.pass+' pass / '+r.fail+' fail</b> in '+r.ms+'ms</div>';o.innerHTML=h;}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function verifyLogins(){var b=$('loginVerify');if(!b)return;b.innerHTML='<span style="color:#d29922">Checking saved sessions (no platform APIs used)…</span>';try{var r=await api('verify-logins');var rep=r.report||{};var h='';var order=['whatsapp','twitter','facebook','youtube','tiktok'];for(var i=0;i<order.length;i++){var p=order[i];var x=rep[p];if(!x)continue;h+='<div>'+(String(x.status).indexOf('CONNECTED')===0||String(x.status).indexOf('VERIFIED')===0?'<span style="color:#3fb950">●</span>':(x.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'))+' <b>'+p+'</b>: '+esc(x.status||'')+(x.cookiesCount?' ('+x.cookiesCount+' cookies, '+esc(x.ageHours||'?')+'h old)':'')+'</div>';}var f=rep.youtubeFeed;if(f){h+='<div style="margin-top:4px;color:#8b949e">YT feed: '+(f.ok?'<span style="color:#3fb950">reachable</span> — '+esc(f.videoCount)+' videos, latest: '+esc((f.latestVideos&&f.latestVideos[0]&&f.latestVideos[0].title)||''):(esc(f.error||f.note||'not checked')))+'<br><span style="font-size:10px">'+esc(f.method||'')+'</span></div>';}b.innerHTML=h||'No report';}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 function setEroticStyle(style){eroticStyle=style;var names={flirty:'Flirty 😏',excited:'Excited 🔥',sensual:'Sensual 💜',bold:'Bold 🌶'};$('eroticActive').textContent=names[style]||style;try{fetch('/admin/erotic-style',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:style})});}catch(e){}}
 
@@ -7837,7 +7999,7 @@ loadBrowserSites();loadGroupLinks();loadEditableSchedules();setInterval(loadGrou
 
 /* Generate Perfect AI Prompt for Blender */
 app.post('/admin/generate-prompt', function(req, res) {
-  var topic = (req.body && req.body.topic) || 'untitled';
+  var topic = String((req.body && req.body.topic) || 'untitled').trim().slice(0, 200);
   var prompt = '=== PERFECT BLENDER PROMPT: ' + topic + ' ===\n\n';
   prompt += 'STEP 1 — RESEARCH & OBJECT LIST\n';
   prompt += 'Topic: ' + topic + '\n';
@@ -7881,7 +8043,10 @@ app.post('/admin/generate-prompt', function(req, res) {
   prompt += '  ✅ Dimensions: all objects match real-world sizes\n';
   prompt += '  ✅ Cinematic: proper framing, rule of thirds, depth\n';
   prompt += '  ✅ Audio: narration matches visual content precisely\n';
-  var html = prompt.replace(/\n/g, '<br>').replace(/  /g, '&nbsp;&nbsp;');
+  /* v84.3 XSS FIX: the topic used to be reflected unescaped into the
+   * html field, which the panel dropped into innerHTML — stored-type
+   * XSS in the admin panel. The WHOLE prompt is escaped now. */
+  var html = escHtml(prompt).replace(/\n/g, '<br>').replace(/ {2}/g, '&nbsp;&nbsp;');
   /* v84.2: saved as a real file — before, the prompt only flashed on the
    * panel and nothing was on disk, so there was nothing to open. */
   var saved = saveLocalMedia(Buffer.from(prompt, 'utf8'), 'prompt', '.txt', topic);
@@ -7898,13 +8063,20 @@ app.post('/admin/generate-prompt', function(req, res) {
 app.post('/admin/generate-audio', async function(req, res) {
   var topic = (req.body && req.body.topic) || 'demo';
   var voice = (req.body && req.body.voice) || 'en-US-AriaNeural';
-  // Generate a script based on topic (deterministic explainer template)
-  var script = 'In this video, we explore ' + topic + '. ';
+  /* v84.3: callers may pass a full script (Blender preview narration,
+   * lesson text, …). Without one, the deterministic explainer template
+   * is used as before. */
+  var script = String((req.body && req.body.script) || '').trim().slice(0, 3000);
+  if (script){
+    /* caller-provided narration used verbatim */
+  } else {
+  script = 'In this video, we explore ' + topic + '. ';
   script += 'Let us start by understanding the basics. ';
   script += topic + ' is a fascinating subject that involves multiple concepts working together. ';
   script += 'First, we examine the key components. ';
   script += 'Then, we see how they interact in real-world scenarios. ';
   script += 'Finally, we draw our conclusions and summarize what we have learned.';
+  }
   try {
     const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
     const tts = new MsEdgeTTS();
@@ -8640,6 +8812,11 @@ app.get('/admin/media/:file', function(req, res){
   if (!f || f.startsWith('.') || !fs.existsSync(p)){
     return res.status(404).json({ error: 'not found — media-cache files live 24h; re-run the search/generation to refresh' });
   }
+  /* v84.3: serve with OUR mime map — express's built-in mime db does not
+   * know .bpy (came out application/octet-stream → browsers downloaded
+   * instead of opening the script). Same fix protects future extensions. */
+  const mime = MEDIA_MIME[path.extname(f).toLowerCase()];
+  if (mime) res.setHeader('Content-Type', mime);
   res.sendFile(p, { dotfiles:'deny', acceptRanges:true,
     headers: { 'Content-Disposition': 'inline; filename="' + f + '"', 'Cache-Control': 'private, max-age=300' } });
 });
@@ -8713,8 +8890,8 @@ app.post('/admin/scraper-test', async function(req,res){
       steps:{ search:{ ok:true, ms:Date.now()-t0, results:1 },
               download:{ ok:true, ms:Date.now()-t0, title:v.title || query,
                          sizeBytes:v.sizeBytes || 0, mimetype:v.mimetype || 'video/mp4', kind:'video' } },
-      mediaUrl:v.mediaUrl, sourceUrl:v.sourceUrl || v.mediaUrl, tempLink:!!v.tempLink,
-      results:[{ mediaUrl:v.mediaUrl, sourceUrl:v.sourceUrl || v.mediaUrl, type:'video',
+      mediaUrl:absoluteUrl(req, v.mediaUrl), sourceUrl:v.sourceUrl || v.mediaUrl, tempLink:!!v.tempLink,
+      results:[{ mediaUrl:absoluteUrl(req, v.mediaUrl), sourceUrl:v.sourceUrl || v.mediaUrl, type:'video',
                  title:v.title || query, sizeBytes:v.sizeBytes || 0, mimetype:v.mimetype || 'video/mp4',
                  source:v.site || 'scraper' }],
       totalMs: Date.now()-t0 });
@@ -8732,8 +8909,8 @@ app.post('/admin/scraper-test', async function(req,res){
       steps:{ search:{ ok:true, ms:Date.now()-t0, results:1 },
               download:{ ok:true, ms:Date.now()-t0, title:m.title || query,
                          sizeBytes:m.sizeBytes || 0, mimetype:m.mimetype || 'audio/mpeg', kind:'music' } },
-      mediaUrl:m.mediaUrl, sourceUrl:m.sourceUrl || m.mediaUrl, tempLink:!!m.tempLink,
-      results:[{ mediaUrl:m.mediaUrl, sourceUrl:m.sourceUrl || m.mediaUrl, type:'music',
+      mediaUrl:absoluteUrl(req, m.mediaUrl), sourceUrl:m.sourceUrl || m.mediaUrl, tempLink:!!m.tempLink,
+      results:[{ mediaUrl:absoluteUrl(req, m.mediaUrl), sourceUrl:m.sourceUrl || m.mediaUrl, type:'music',
                  title:m.title || query, sizeBytes:m.sizeBytes || 0, mimetype:m.mimetype || 'audio/mpeg',
                  source:'scraper' }],
       totalMs: Date.now()-t0 });
@@ -8770,14 +8947,255 @@ app.post('/admin/scraper-test', async function(req,res){
       download:{ ok:true, ms:Date.now()-t1, title:d.title || query,
                  sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '', kind:d.kind || kind }
     },
-    mediaUrl:d.mediaUrl, sourceUrl:d.sourceUrl || d.mediaUrl, tempLink:!!d.tempLink,
+    mediaUrl:absoluteUrl(req, d.mediaUrl), sourceUrl:d.sourceUrl || d.mediaUrl, tempLink:!!d.tempLink,
     /* v84.2: results[] — the panel's media browser reads this array; it was
      * missing entirely before, so that panel ALWAYS said "No results found." */
-    results:[{ mediaUrl:d.mediaUrl, sourceUrl:d.sourceUrl || d.mediaUrl, type:(d.kind || kind),
+    results:[{ mediaUrl:absoluteUrl(req, d.mediaUrl), sourceUrl:d.sourceUrl || d.mediaUrl, type:(d.kind || kind),
                title:d.title || query, sizeBytes:d.sizeBytes || 0, mimetype:d.mimetype || '',
                source:'scraper slot' }],
     totalMs: Date.now()-t0
   });
+});
+
+/* ═══ v84.3: BLENDER VIEW + HEAR PREVIEW ═══
+ * The old flow produced only a TEXT prompt — you could never SEE the
+ * scene or HEAR the narration before Blender ran. Two honest additions:
+ *  • VIEW  — deterministic mock render (SVG, zero dependencies) of the
+ *    scene the topic implies + the real .bpy Blender script of THAT
+ *    scene. Labeled as an approximate layout, never as a Blender render.
+ *  • HEAR  — real Edge-TTS narration describing exactly that scene.
+ * Same topic in → same scene out (seeded PRNG). */
+function bbHashStr(s){ var h = 2166136261; for (var i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function bbMulberry32(a){ return function(){ a |= 0; a = (a + 0x6D2B79F5) | 0; var t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function sceneTheme(topic){
+  var t = topic.toLowerCase();
+  if (/water|sea|ocean|rain|river|cycle|cloud|evapor/.test(t)) return { name:'water', sky:['#bfe8ff','#5db8e8'], ground:'#3f7fae', palette:['#2f86d6','#7fd4f2','#1b5e9e','#a9e6ff','#4aa3df'] };
+  if (/fire|volcan|lava|heat|energy/.test(t)) return { name:'fire', sky:['#ffd9a0','#e86a3a'], ground:'#7a3b24', palette:['#e8531f','#ff9d3f','#8c2f14','#ffc86b','#d94f2b'] };
+  if (/forest|tree|plant|jungle|leaf|nature|grow|seed/.test(t)) return { name:'forest', sky:['#d8f2c8','#79b76a'], ground:'#3f6d33', palette:['#2f7d32','#66b04b','#1b4d22','#8fd06a','#4c9a3f'] };
+  if (/space|star|planet|moon|solar|galax|universe/.test(t)) return { name:'space', sky:['#101528','#05070f'], ground:'#1a2138', palette:['#8fa8ff','#c9d4ff','#5c6fd4','#e8ecff','#7a8ae0'] };
+  if (/desert|sand|kalahari|\bsan\b|dune/.test(t)) return { name:'desert', sky:['#ffe6b8','#e8b46a'], ground:'#c08a4a', palette:['#d9a05b','#f2c98a','#a06a35','#ffdf9e','#c98f52'] };
+  if (/city|town|building|street|car|traffic/.test(t)) return { name:'city', sky:['#d5dbe4','#8d99ab'], ground:'#5a6270', palette:['#7d8aa0','#a8b4c8','#4a5468','#c8d2e2','#6b7890'] };
+  return { name:'classic', sky:['#ffeedd','#d9c8b8'], ground:'#8a7460', palette:['#c98850','#e8b98a','#8a5a3a','#f2d7b0','#b07848'] };
+}
+function buildSceneSpec(topic){
+  const theme = sceneTheme(topic);
+  const rnd = bbMulberry32(bbHashStr(topic));
+  const prims = ['sphere','cube','cylinder','cone','torus'];
+  const roles = ['hero','support','detail','context','accent'];
+  const count = 4 + Math.floor(rnd() * 3);   /* 4-6 objects */
+  const objects = [];
+  for (let i = 0; i < count; i++){
+    const prim = prims[Math.floor(rnd() * prims.length)];
+    const r = 0.35 + rnd() * 0.75;
+    const lx = -2.6 + (4.2 * (i + rnd() * 0.6) / count);
+    const lz = -1.2 + rnd() * 2.0;
+    const safe = String(prim).replace(/[^a-z0-9_]/gi, '');
+    objects.push({ name: (i === 0 ? 'hero_' : 'prop' + (i + 1) + '_') + safe,
+      prim: safe, radius: Math.round(r * 100) / 100,
+      x: Math.round(lx * 100) / 100, y: r, z: Math.round(lz * 100) / 100,
+      color: theme.palette[i % theme.palette.length], role: roles[Math.min(i, roles.length - 1)] });
+  }
+  return { topic, theme, objects,
+    lights: { key:{ type:'SUN', energy:4.5, rot:[50, 12, 28], temp:'5600K daylight' },
+              fill:{ type:'AREA', energy:180, size:3, rot:[-35, -20, 0] },
+              rim:{ type:'AREA', energy:120, size:2, rot:[20, 160, 0] } },
+    camera: { pos:[0, 1.7, 6.4], lens: 50, focusDistance: 6.4, fstop: 2.2 } };
+}
+function svgShade(hex, amt){
+  const n = parseInt(String(hex).slice(1), 16);
+  const r = Math.max(0, Math.min(255, ((n >> 16) & 255) + Math.round(255 * amt)));
+  const g = Math.max(0, Math.min(255, ((n >> 8) & 255) + Math.round(255 * amt)));
+  const b = Math.max(0, Math.min(255, (n & 255) + Math.round(255 * amt)));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+function svgEsc(s){ return String(s).replace(/[&<>"]/g, function(c){ return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]; }); }
+function svgDrawPrim(o, GY){
+  const sx = Math.round(400 + o.x * 58);
+  const sy = Math.round(GY + 14 + o.z * 16);
+  const rr = Math.max(10, Math.round(o.radius * 54 * (1 - o.z * 0.05)));
+  const dark = svgShade(o.color, -0.22), lite = svgShade(o.color, 0.25);
+  let s = '<ellipse cx="' + sx + '" cy="' + (sy + 4) + '" rx="' + Math.round(rr * 1.15) + '" ry="' + Math.max(3, Math.round(rr * 0.26)) + '" fill="#000" opacity="0.28"/>';
+  if (o.prim === 'sphere'){
+    s += '<circle cx="' + sx + '" cy="' + (sy - rr) + '" r="' + rr + '" fill="' + o.color + '"/>';
+    s += '<circle cx="' + Math.round(sx - rr * 0.3) + '" cy="' + Math.round(sy - rr * 1.3) + '" r="' + Math.round(rr * 0.4) + '" fill="' + lite + '" opacity="0.75"/>';
+  } else if (o.prim === 'cube'){
+    const w = Math.round(rr * 1.5), h = Math.round(rr * 1.7), dx = Math.round(rr * 0.5), dy = Math.round(rr * 0.35);
+    const x0 = sx - Math.round(w / 2);
+    s += '<rect x="' + x0 + '" y="' + (sy - h) + '" width="' + w + '" height="' + h + '" fill="' + o.color + '"/>';
+    s += '<polygon points="' + x0 + ',' + (sy - h) + ' ' + (x0 + dx) + ',' + (sy - h - dy) + ' ' + (x0 + w + dx) + ',' + (sy - h - dy) + ' ' + (x0 + w) + ',' + (sy - h) + '" fill="' + lite + '"/>';
+    s += '<polygon points="' + (x0 + w) + ',' + (sy - h) + ' ' + (x0 + w + dx) + ',' + (sy - h - dy) + ' ' + (x0 + w + dx) + ',' + (sy - dy) + ' ' + (x0 + w) + ',' + sy + '" fill="' + dark + '"/>';
+  } else if (o.prim === 'cylinder'){
+    const cw = Math.round(rr * 0.8), ch = Math.round(rr * 2.1);
+    s += '<rect x="' + (sx - cw) + '" y="' + (sy - ch) + '" width="' + cw * 2 + '" height="' + ch + '" fill="' + o.color + '"/>';
+    s += '<ellipse cx="' + sx + '" cy="' + (sy - ch) + '" rx="' + cw + '" ry="' + Math.round(cw * 0.32) + '" fill="' + lite + '"/>';
+    s += '<ellipse cx="' + sx + '" cy="' + sy + '" rx="' + cw + '" ry="' + Math.round(cw * 0.32) + '" fill="' + dark + '"/>';
+  } else if (o.prim === 'cone'){
+    const bw = Math.round(rr * 1.1), chh = Math.round(rr * 2.4);
+    s += '<polygon points="' + sx + ',' + (sy - chh) + ' ' + (sx - bw) + ',' + sy + ' ' + (sx + bw) + ',' + sy + '" fill="' + o.color + '"/>';
+    s += '<ellipse cx="' + sx + '" cy="' + sy + '" rx="' + bw + '" ry="' + Math.round(bw * 0.3) + '" fill="' + dark + '"/>';
+  } else {
+    s += '<circle cx="' + sx + '" cy="' + (sy - rr) + '" r="' + Math.round(rr * 0.8) + '" fill="none" stroke="' + o.color + '" stroke-width="' + Math.max(5, Math.round(rr * 0.4)) + '"/>';
+    s += '<circle cx="' + sx + '" cy="' + (sy - rr) + '" r="' + Math.round(rr * 0.8) + '" fill="none" stroke="' + lite + '" stroke-width="3" opacity="0.5"/>';
+  }
+  return s;
+}
+function renderSceneSvg(spec){
+  const GY = 330, th = spec.theme;
+  const sorted = spec.objects.slice().sort(function(a, b){ return b.z - a.z; });
+  let s = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">';
+  s += '<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + th.sky[0] + '"/><stop offset="1" stop-color="' + th.sky[1] + '"/></linearGradient>';
+  s += '<radialGradient id="sun" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#fff8e0" stop-opacity="0.95"/><stop offset="1" stop-color="#fff8e0" stop-opacity="0"/></radialGradient></defs>';
+  s += '<rect width="800" height="450" fill="url(#sky)"/>';
+  s += '<circle cx="620" cy="96" r="150" fill="url(#sun)"/>';
+  s += '<rect y="330" width="800" height="120" fill="' + svgShade(th.ground, -0.18) + '"/>';
+  s += '<ellipse cx="400" cy="345" rx="480" ry="42" fill="' + th.ground + '"/>';
+  for (let i = 0; i < sorted.length; i++) s += svgDrawPrim(sorted[i], GY);
+  s += '<rect x="14" y="396" width="772" height="40" rx="6" fill="#000000" opacity="0.55"/>';
+  s += '<text x="26" y="413" font-family="monospace" font-size="13" fill="#cfe3ff">' + svgEsc(spec.topic) + ' — ' + sorted.length + ' objects · SUN key + AREA fill/rim · 50mm</text>';
+  s += '<text x="26" y="430" font-family="monospace" font-size="10" fill="#9fb3d1">MOCK VIEW PREVIEW — approximate layout, not a Blender render. Open the .bpy for the real scene.</text>';
+  s += '</svg>';
+  return s;
+}
+function buildBpyScript(spec){
+  const th = spec.theme, L = [];
+  L.push('# ' + spec.topic + ' — BreadBot v84.3 scene preview script');
+  L.push('# Deterministic: the same topic always regenerates this exact scene.');
+  L.push('# Run inside Blender:   blender --background --python THIS_FILE.py');
+  L.push('# It renders preview.png (1920x1080) next to the script.');
+  L.push('import bpy, math, os');
+  L.push('');
+  L.push('bpy.ops.wm.read_factory_settings(use_empty=True)');
+  L.push('scn = bpy.context.scene');
+  L.push('scn.render.resolution_x, scn.render.resolution_y = 1920, 1080');
+  L.push('try: scn.render.engine = "BLENDER_EEVEE_NEXT"');
+  L.push('except Exception: scn.render.engine = "BLENDER_EEVEE"');
+  L.push('');
+  L.push('def hexcol(h):');
+  L.push('    return tuple(pow(int(h[i:i+2], 16) / 255.0, 2.2) for i in (1, 3, 5)) + (1.0,)');
+  L.push('');
+  L.push('def material(name, hexstr):');
+  L.push('    m = bpy.data.materials.new(name)');
+  L.push('    m.use_nodes = True');
+  L.push('    m.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = hexcol(hexstr)');
+  L.push('    return m');
+  L.push('');
+  L.push('# ground plane (theme: ' + th.name + ')');
+  L.push('bpy.ops.mesh.primitive_plane_add(size=40, location=(0, 0, 0))');
+  L.push('ground = bpy.context.object');
+  L.push('ground.data.materials.append(material("ground", "' + th.ground + '"))');
+  L.push('');
+  L.push('# objects (Blender is Z-up; spec y = up axis)');
+  for (const o of spec.objects){
+    const vname = 'm_' + o.name.replace(/[^a-z0-9_]/gi, '');
+    const loc = '(' + o.x + ', ' + o.z + ', ' + o.y + ')';
+    L.push(vname + ' = material("' + o.name + '", "' + o.color + '")');
+    if (o.prim === 'sphere')        L.push('bpy.ops.mesh.primitive_uv_sphere_add(radius=' + o.radius + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
+    else if (o.prim === 'cube')     L.push('bpy.ops.mesh.primitive_cube_add(size=' + (Math.round(o.radius * 1.8 * 100) / 100) + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
+    else if (o.prim === 'cylinder') L.push('bpy.ops.mesh.primitive_cylinder_add(radius=' + (Math.round(o.radius * 0.8 * 100) / 100) + ', depth=' + (Math.round(o.radius * 2.1 * 100) / 100) + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
+    else if (o.prim === 'cone')     L.push('bpy.ops.mesh.primitive_cone_add(radius1=' + (Math.round(o.radius * 1.1 * 100) / 100) + ', depth=' + (Math.round(o.radius * 2.4 * 100) / 100) + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
+    else                            L.push('bpy.ops.mesh.primitive_torus_add(major_radius=' + o.radius + ', minor_radius=' + (Math.round(o.radius * 0.35 * 100) / 100) + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
+  }
+  L.push('');
+  L.push('# three-point lighting');
+  L.push('def light(name, type_, energy, loc, rot, size=None):');
+  L.push('    ld = bpy.data.lights.new(name, type_); ld.energy = energy');
+  L.push('    if size is not None: ld.size = size');
+  L.push('    lo = bpy.data.objects.new(name, ld); scn.collection.objects.link(lo)');
+  L.push('    lo.location = loc; lo.rotation_euler = [math.radians(a) for a in rot]');
+  L.push('    return lo');
+  L.push('light("key_sun", "SUN", 4.5, (4, -6, 9), (50, 12, 28))');
+  L.push('light("fill_area", "AREA", 180, (-5, -3, 4), (-35, -20, 0), size=3)');
+  L.push('light("rim_area", "AREA", 120, (2, 6, 5), (20, 160, 0), size=2)');
+  L.push('');
+  L.push('# world + camera');
+  L.push('world = bpy.data.worlds.new("World"); scn.world = world; world.use_nodes = True');
+  L.push('world.node_tree.nodes["Background"].inputs[0].default_value = hexcol("' + th.sky[1] + '")');
+  L.push('world.node_tree.nodes["Background"].inputs[1].default_value = 0.6');
+  L.push('cam_data = bpy.data.cameras.new("Camera")');
+  L.push('cam = bpy.data.objects.new("Camera", cam_data); scn.collection.objects.link(cam)');
+  L.push('cam.location = (0, 6.4, 1.7); scn.camera = cam; cam_data.lens = 50');
+  L.push('cam_data.dof.use_dof = True; cam_data.dof.focus_distance = 6.4; cam_data.dof.aperture_fstop = 2.2');
+  L.push('bpy.ops.object.empty_add(location=(0, 0, 0.8)); aim = bpy.context.object');
+  L.push('con = cam.constraints.new(type="TRACK_TO"); con.target = aim');
+  L.push('');
+  L.push('scn.render.filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview")');
+  L.push('bpy.ops.render.render(write_still=True)');
+  L.push('print("preview rendered ->", scn.render.filepath + ".png")');
+  return L.join('\n') + '\n';
+}
+function sceneNarration(spec){
+  const objs = spec.objects, hero = objs[0];
+  const rest = objs.slice(1, 4).map(function(o){ return o.prim; }).join(', ');
+  return 'Here is a preview of our scene: ' + spec.topic + '. ' +
+    'The hero of the frame is a ' + hero.prim + ', about ' + (hero.radius * 2).toFixed(1) + ' meters across, resting on the ground plane. ' +
+    (objs.length > 1 ? 'Around it, the scene contains ' + (objs.length - 1) + ' supporting objects, including a ' + rest + '. ' : '') +
+    'Lighting uses a key sun at five thousand six hundred kelvin, with a soft area fill and a rim light for separation. ' +
+    'The camera frames the scene at fifty millimeters, ready for the full Blender render.';
+}
+app.post('/admin/blender/preview', function(req, res){
+  try {
+    const topic = String((req.body && req.body.topic) || '').trim().slice(0, 120) || 'untitled scene';
+    const spec = buildSceneSpec(topic);
+    const saved = saveLocalMedia(Buffer.from(renderSceneSvg(spec), 'utf8'), 'blender', '.svg', null);
+    const bpySaved = saveLocalMedia(Buffer.from(buildBpyScript(spec), 'utf8'), 'blender', '.bpy', null);
+    res.json({ ok: true, topic, theme: spec.theme.name,
+      previewUrl: mediaFileUrl(req, saved.file),
+      bpyFile: bpySaved.file, bpyUrl: mediaFileUrl(req, bpySaved.file),
+      objects: spec.objects.map(function(o){ return o.name; }),
+      narration: sceneNarration(spec),
+      note: 'VIEW = deterministic mock layout (SVG — approximate, not a Blender render) · .bpy = the real Blender script of this exact scene · HEAR = real Edge-TTS narration' });
+  } catch(e){ res.json({ ok: false, error: e.message }); }
+});
+
+/* ═══ v84.3: PIPELINE LINK CHECK — one click that "rechecks all the
+ * pipeline": generates one of everything, then FETCHES EVERY LINK back
+ * over real HTTP and verifies status 200 + content-type + bytes. This
+ * is the honest answer to "the links are kinda off" — run it and it
+ * tells you exactly which link is off, and why. */
+app.get('/admin/link-check', async function(req, res){
+  const t0 = Date.now(); const results = [];
+  const base = absoluteUrl(req, '');
+  const H = { Authorization: 'Bearer ' + ADMIN_TOKEN };
+  async function probe(name, url, expect){
+    try {
+      const r = await axios.get(url, { timeout: 20000, headers: H, maxRedirects: 0, validateStatus: null, responseType: 'arraybuffer' });
+      const ct = String(r.headers['content-type'] || '');
+      const bytes = r.data && r.data.byteLength || 0;
+      let pass = r.status === 200 && bytes > 0;
+      if (expect && pass) pass = ct.indexOf(expect) !== -1;
+      results.push({ name, url, status: r.status, contentType: ct, bytes, pass, error: pass ? null : ('expected HTTP 200 + "' + expect + '", got ' + r.status + ' ' + (ct || 'no type')) });
+    } catch(e){ results.push({ name, url, status: 0, contentType: '', bytes: 0, pass: false, error: e.message }); }
+  }
+  await probe('panel /admin (html)', base + '/admin', 'text/html');
+  try {
+    const gp = await axios.post(base + '/admin/generate-prompt', { topic: 'water cycle for kids' }, { headers: H, timeout: 15000 });
+    if (gp.data && gp.data.ok) await probe('prompt .txt file', gp.data.fileUrl, 'text/plain');
+    else results.push({ name: 'generate-prompt', url: base + '/admin/generate-prompt', status: 200, contentType: '', bytes: 0, pass: false, error: 'ok:false' });
+  } catch(e){ results.push({ name: 'generate-prompt', url: '', status: 0, contentType: '', bytes: 0, pass: false, error: e.message }); }
+  try {
+    const bp = await axios.post(base + '/admin/blender/preview', { topic: 'water cycle for kids' }, { headers: H, timeout: 15000 });
+    if (bp.data && bp.data.ok){
+      await probe('blender VIEW preview (.svg)', bp.data.previewUrl, 'image/svg');
+      await probe('blender .bpy script', bp.data.bpyUrl, 'text/plain');
+    } else results.push({ name: 'blender preview', url: '', status: 0, contentType: '', bytes: 0, pass: false, error: 'ok:false' });
+  } catch(e){ results.push({ name: 'blender preview', url: '', status: 0, contentType: '', bytes: 0, pass: false, error: e.message }); }
+  if (String(req.query.quick || '') !== '1'){
+    try {
+      const ga = await axios.post(base + '/admin/generate-audio', { topic: 'water cycle for kids' }, { headers: H, timeout: 90000 });
+      if (ga.data && ga.data.ok) await probe('audio .mp3 (real Edge-TTS)', ga.data.audioUrl, 'audio/mpeg');
+      else results.push({ name: 'generate-audio', url: '', status: 0, contentType: '', bytes: 0, pass: false, error: (ga.data && ga.data.error) || 'ok:false' });
+    } catch(e){ results.push({ name: 'generate-audio', url: '', status: 0, contentType: '', bytes: 0, pass: false, error: e.message }); }
+  }
+  try {
+    const mi = await axios.get(base + '/admin/media', { headers: H, timeout: 15000 });
+    results.push({ name: 'media index', url: base + '/admin/media', status: mi.status, contentType: String(mi.headers['content-type'] || ''), bytes: String(mi.data).length, pass: mi.status === 200 && mi.data && mi.data.ok === true, error: null });
+  } catch(e){ results.push({ name: 'media index', url: base + '/admin/media', status: 0, contentType: '', bytes: 0, pass: false, error: e.message }); }
+  try {
+    const sh = await axios.get(SCRAPER_URL + '/health', { timeout: 15000 });
+    results.push({ name: 'scraper /health', url: SCRAPER_URL + '/health', status: sh.status, contentType: String(sh.headers['content-type'] || ''), bytes: String(sh.data).length, pass: sh.status === 200, error: null });
+  } catch(e){ results.push({ name: 'scraper /health', url: SCRAPER_URL + '/health', status: 0, contentType: '', bytes: 0, pass: false, error: e.message + ' — is the scraper awake? (Render free tier sleeps)' }); }
+  const nPass = results.filter(function(r){ return r.pass; }).length;
+  res.json({ ok: true, base, pass: nPass, fail: results.length - nPass, ms: Date.now() - t0, results });
 });
 
 app.get('/admin/flow', function(req,res){
@@ -8880,6 +9298,92 @@ app.get('/admin/blender/files', function(req, res) {
     }));
     res.json({ ok: true, workdir, files });
   } catch (e) { res.json({ ok: false, error: 'no workdir yet — POST /admin/blender/plan first' }); }
+});
+
+/* ═══ v84.4 FILM LAST MILE ROUTES ═══
+ * POST /admin/film/upload — raw .mp4 bytes (Content-Type: video/mp4,
+ *   ?name=my-film.mp4). Express.json never touches video/mp4, so the
+ *   route-level express.raw parses the body. Junk + size gates apply.
+ * GET  /admin/film/list — newest films + what has been shared already.
+ * POST /admin/film/share — { file, targets:[whatsapp|youtube|twitter],
+ *   jid?, title?, caption?, visibility? } → real deliveries, honest
+ *   per-target errors (facebook is text-only — stated, not faked). */
+app.post('/admin/film/upload', express.raw({ type: '*/*', limit: '300mb' }), function(req, res){
+  const buf = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!buf || !buf.length) return res.json({ ok:false, error:'empty body — POST the raw .mp4 bytes with Content-Type: video/mp4' });
+  const maxMb = Math.max(1, parseInt(process.env.FILM_MAX_MB || '200', 10) || 200);
+  if (buf.length > maxMb * 1024 * 1024) return res.json({ ok:false, error:'film too large (' + Math.round(buf.length/1048576) + 'MB > ' + maxMb + 'MB cap — raise FILM_MAX_MB env)' });
+  if (buf.length < 10240) return res.json({ ok:false, error:'file too small to be a film (' + buf.length + 'B) — junk gate' });
+  let ext = '.mp4';
+  const nm = String(req.query.name || '');
+  const em = /\.(mp4|webm|mov)$/i.exec(nm);
+  if (em) ext = '.' + em[1].toLowerCase();
+  const saved = saveLocalMedia(buf, 'film', ext, null);
+  const idx = loadFilmsIndex();
+  idx[saved.file] = { title: (nm || saved.file).replace(/\.(mp4|webm|mov)$/i, ''), size: saved.size, ts: Date.now() };
+  saveFilmsIndex(idx);
+  res.json({ ok:true, file: saved.file, size: saved.size, url: mediaFileUrl(req, saved.file),
+    note: 'Saved to the media cache — the 24h sweep applies, so share it soon.' });
+});
+app.get('/admin/film/list', function(req, res){
+  const idx = loadFilmsIndex();
+  const films = listFilmFiles().map(f => {
+    const meta = idx[f.file] || {};
+    return { file: f.file, title: meta.title || f.file, size: f.size,
+      mb: Math.round(f.size / 1048576 * 10) / 10,
+      ageHours: Math.round((Date.now() - f.mtime) / 3600000 * 10) / 10,
+      shared: meta.shared || {}, url: mediaFileUrl(req, f.file) };
+  });
+  res.json({ ok:true, films, note: 'media cache sweeps files after 24h — share or re-upload' });
+});
+app.post('/admin/film/share', async function(req, res){
+  const body = req.body || {};
+  const file = path.basename(String(body.file || ''));
+  const filePath = path.join(MEDIA_DIR, file);
+  if (!/_film_.*\.(mp4|webm|mov)$/i.test(file) || !fs.existsSync(filePath))
+    return res.json({ ok:false, error:'unknown film file — GET /admin/film/list first' });
+  const targets = Array.isArray(body.targets) && body.targets.length
+    ? body.targets.map(t => String(t).toLowerCase()) : [];
+  if (!targets.length) return res.json({ ok:false, error:'no targets — real ones: whatsapp, youtube, twitter' });
+  const title = String(body.title || '').trim().slice(0, 100) || file.replace(/_film_[a-f0-9]+/i, '').replace(/\.(mp4|webm|mov)$/i, '');
+  const caption = String(body.caption || '').trim().slice(0, 900);
+  const idx = loadFilmsIndex();
+  idx[file] = idx[file] || { title, size: fs.statSync(filePath).size, ts: Date.now() };
+  idx[file].shared = idx[file].shared || {};
+  const results = [];
+  for (const t of targets) {
+    if (t === 'whatsapp') {
+      const jid = String(body.jid || videoScheduler.getGroup() || '');
+      if (!jid) { results.push({ target:t, ok:false, error:'no WhatsApp target — pass jid or set the main group first (!sched here)' }); continue; }
+      try {
+        await sendMediaUrl(jid, mediaFileUrl(req, file), { kind:'video', mimetype:'video/mp4', caption: caption || ('🎬 ' + title) });
+        idx[file].shared.whatsapp = Date.now();
+        results.push({ target:t, ok:true, detail:'video bytes sent to ' + jid });
+      } catch(e){ results.push({ target:t, ok:false, error:e.message }); }
+    } else if (t === 'youtube') {
+      try {
+        const yt = multiPlatform.platforms.youtube;
+        const r = await yt.uploadVideo({ videoPath: filePath, title,
+          description: caption || ('Educational film: ' + title),
+          visibility: String(body.visibility || 'public') });
+        if (r && r.success) { idx[file].shared.youtube = Date.now(); results.push({ target:t, ok:true, detail:'Studio upload done — check YouTube Studio to publish/verify' }); }
+        else results.push({ target:t, ok:false, error:(r && r.error) || 'upload failed' });
+      } catch(e){ results.push({ target:t, ok:false, error:e.message }); }
+    } else if (t === 'twitter') {
+      try {
+        const tw = multiPlatform.platforms.twitter;
+        const r = await tw.tweet(caption || ('🎬 ' + title), filePath);
+        if (r && r.success) { idx[file].shared.twitter = Date.now(); results.push({ target:t, ok:true, detail:'tweet posted with the film attached' }); }
+        else results.push({ target:t, ok:false, error:(r && r.error) || 'tweet failed' });
+      } catch(e){ results.push({ target:t, ok:false, error:e.message }); }
+    } else if (t === 'facebook') {
+      results.push({ target:t, ok:false, error:'honest limitation: the Facebook module posts TEXT only (no native video upload path) — share via WhatsApp/YouTube/Twitter' });
+    } else {
+      results.push({ target:t, ok:false, error:'unknown target — whatsapp, youtube, twitter' });
+    }
+  }
+  saveFilmsIndex(idx);
+  res.json({ ok: results.some(r => r.ok), file, results });
 });
 
 /* ═══ v81: Free API Keys — no signup needed ═══ */
@@ -8992,7 +9496,7 @@ loadGroupRegistry();   /* v66 */
 loadDmHistories();     /* v66 */
 loadSchoolData();      /* v66 */
 
-app.listen(PORT, async function(){
+const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);
   console.log('Mode: '+BOT_MODE.toUpperCase()+(SCHOOL_MODE ? ' (read-only monitor + reports)' : ' (group management)'));
   console.log('Admin: '+ADMIN_PHONE);
@@ -9078,6 +9582,17 @@ app.listen(PORT, async function(){
     }
   }
 });
+/* v84.3: double-boot used to crash-loop (EADDRINUSE → exit 1 → your
+ * process manager restarts → forever). Now: detect the sibling, say so,
+ * exit cleanly. Other server errors exit 1 with a clear line. */
+HTTP_SERVER.on('error', function(e){
+  if (e && e.code === 'EADDRINUSE'){
+    console.error('[BOOT] Port ' + PORT + ' is already in use — another BreadBot instance is answering there. Exiting cleanly (no crash loop).');
+    process.exit(0);
+  }
+  console.error('[BOOT] HTTP server error: ' + ((e && e.message) || e));
+  process.exit(1);
+});
 
 process.on('SIGINT', async function(){
   pushLog('warn','system','SIGINT');
@@ -9093,5 +9608,8 @@ process.on('SIGTERM', async function(){
   try { if (schoolSock) schoolSock.end(undefined); } catch(e){}
   process.exit(0);
 });
-process.on('uncaughtException', function(e){ pushLog('error','uncaught', e.message); });
+/* v84.3: the log-only uncaughtException handler that used to live here
+ * is GONE — it swallowed real crashes and left the bot running in an
+ * undefined state. crash-recovery.js owns this event (restart with
+ * backoff), which is the correct behavior. */
 process.on('unhandledRejection', function(e){ pushLog('error','unhandled', String(e)); });

@@ -83,19 +83,19 @@ LOG_TO_ADMIN=false
 # ══════════════════════════════════════════════════════════════
 
 # ── Facebook ──
-FB_EMAIL=
-FB_PASSWORD=
+FB_EMAIL=ebenezerlukwa@gmail.com
+FB_PASSWORD=Abner0121
 
 # ── YouTube (browser automation — unofficial, no API key needed) ──
-YOUTUBE_EMAIL=
-YOUTUBE_PASSWORD=
+YOUTUBE_EMAIL=abbylukwa@gmail.com
+YOUTUBE_PASSWORD=Abner0121
 
 # ── Twitter/X ──
-TWITTER_USERNAME=
-TWITTER_PASSWORD=
+TWITTER_USERNAME=ebenezerlukwa@gmail.com
+TWITTER_PASSWORD=Abner0121
 
 # ── TikTok ──
-TIKTOK_USERNAME=
-TIKTOK_PASSWORD=
+TIKTOK_USERNAME=abbylukwa@gmail.com
+TIKTOK_PASSWORD=Abner0121
 
 

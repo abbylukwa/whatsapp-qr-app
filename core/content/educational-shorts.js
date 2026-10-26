@@ -21,6 +21,7 @@
  * ══════════════════════════════════════════════════════════════ */
 
 const fs = require('fs');
+const { writeJSONAtomic } = require('../atomic');
 const path = require('path');
 
 // ── Curriculum Database ──────────────────────────────────────
@@ -316,7 +317,7 @@ class EducationalShortsGenerator {
   saveCalendar(filePath) {
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, JSON.stringify(this.calendar, null, 2));
+      writeJSONAtomic(filePath, this.calendar);
       this.log('info', 'content', `Calendar saved: ${this.calendar.length} shorts to ${filePath}`);
     } catch (e) {
       this.log('error', 'content', `Calendar save failed: ${e.message}`);

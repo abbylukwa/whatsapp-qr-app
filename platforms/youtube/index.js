@@ -31,6 +31,7 @@ const { launchStealthBrowser, warmSession, detectCaptcha, rotateFingerprint } = 
 const { humanType, humanClick, humanDelay, humanScroll, sleep, browseRandomly, randomizeActionOrder } = require('../../core/human-behavior');
 const RateLimiter = require('../../core/rate-limiter');
 const DataManager = require('../../core/data-manager');
+const { writeJSONAtomic } = require('../../core/atomic');
 const ScheduleManager = require('../../core/schedule-manager');
 
 class YouTubeBot {
@@ -269,7 +270,7 @@ class YouTubeBot {
     try {
       const cookies = await this.page.cookies();
       fs.mkdirSync(path.dirname(this.cookieFile), { recursive: true });
-      fs.writeFileSync(this.cookieFile, JSON.stringify(cookies, null, 2));
+      writeJSONAtomic(this.cookieFile, cookies);
       this.log('info', 'youtube', 'Cookies saved (' + cookies.length + ')');
     } catch (e) {
       this.log('warn', 'youtube', 'Cookie save failed: ' + e.message);

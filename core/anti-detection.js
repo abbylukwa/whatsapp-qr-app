@@ -120,8 +120,12 @@ const USER_AGENTS = [
     platform: 'MacIntel'
   },
   {
-    name: 'firefox-127-win',
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+    // v84.1 FIX: was 'firefox-127-win' with a Firefox UA — but this is a
+    // CHROME engine. A UA claiming Firefox while window.chrome,
+    // userAgentData and the plugin array scream Chrome is a giant
+    // detection signal. Replaced with a matching Chrome UA.
+    name: 'chrome-120-win',
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1366, height: 768 },
     platform: 'Win32'
   },
@@ -168,8 +172,10 @@ async function launchStealthBrowser(options = {}) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-web-security',
+      // v84.1 FIX: removed '--disable-features=IsolateOrigins,site-per-process'
+      // and '--disable-web-security' — these WEAKEN the browser sandbox and
+      // produce flag combinations real browsers never ship (major detection
+      // signal + real security risk). Nothing in the codebase needs them.
       '--disable-extensions',
       '--disable-infobars',
       '--disable-component-extensions-with-background-pages',
@@ -626,7 +632,13 @@ async function rotateFingerprint(browser, options = {}) {
     try {
       await page.setViewport(agent.viewport);
       await page.setUserAgent(agent.ua);
-      await applyEvasions(page);
+      // v84.1 FIX: applyEvasions was re-run on every rotation, STACKING
+      // evaluateOnNewDocument scripts unboundedly (WebGL patch wrapping
+      // itself every 3-6h). Evasions are now applied once per page.
+      if (!page._evasionsApplied) {
+        await applyEvasions(page);
+        page._evasionsApplied = true;
+      }
     } catch (e) {
       // Page may have closed
     }

@@ -2,11 +2,19 @@ services:
   - type: web
     name: whatsapp-bot
     env: node
+    plan: free
     buildCommand: npm install
     startCommand: npm start
-    plan: free
+    healthCheckPath: /health
     envVars:
       - key: PUPPETEER_CACHE_DIR
         value: /opt/render/project/src/.cache/puppeteer
       - key: NODE_OPTIONS
         value: --max-old-space-size=400
+      # v84.1: pin the runtime so p-limit/ESM semantics never drift
+      - key: NODE_VERSION
+        value: 22.11.0
+      # NOTE (free plan): disk is EPHEMERAL — every deploy wipes
+      # data/*.json. Back up sessions (panel → Session Backup) into
+      # SESSION_B64_GROUPS and accept that analytics reset per deploy.
+      # cron-job.org should ping /health every 10 min (see AUTOMATION_GUIDE).

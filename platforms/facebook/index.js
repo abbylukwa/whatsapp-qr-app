@@ -29,6 +29,7 @@ const { launchStealthBrowser, warmSession, detectCaptcha } = require('../../core
 const { humanType, humanClick, humanDelay, humanScroll, sleep, randomizeActionOrder } = require('../../core/human-behavior');
 const RateLimiter = require('../../core/rate-limiter');
 const DataManager = require('../../core/data-manager');
+const { writeJSONAtomic } = require('../../core/atomic');
 const ScheduleManager = require('../../core/schedule-manager');
 
 class FacebookBot {
@@ -369,7 +370,7 @@ class FacebookBot {
     try {
       const cookies = await this.page.cookies();
       fs.mkdirSync(path.dirname(this.cookieFile), { recursive: true });
-      fs.writeFileSync(this.cookieFile, JSON.stringify(cookies, null, 2));
+      writeJSONAtomic(this.cookieFile, cookies);
       this.log('info', 'facebook', 'Cookies saved (' + cookies.length + ')');
     } catch (e) {
       this.log('warn', 'facebook', 'Cookie save failed: ' + e.message);
@@ -496,11 +497,15 @@ class FacebookBot {
       await humanScroll(this.page, 'down', 2);
 
       // Look for join button
+      // v84.1 FIX: ':has-text()' is a PLAYWRIGHT pseudo-class — Puppeteer's
+      // page.$() throws on it, and the try/catch swallowed the error so
+      // these two selectors NEVER matched. Puppeteer ≥20 supports
+      // 'xpath/' prefixed selectors — use those instead.
       const joinSelectors = [
         '[aria-label="Join"]',
         '[aria-label="Join Group"]',
-        'div[role="button"]:has-text("Join")',
-        'span:has-text("Join Group")'
+        'xpath/.//div[@role="button"][.//span[contains(text(), "Join")]]',
+        'xpath/.//span[contains(text(), "Join Group")]'
       ];
 
       for (const selector of joinSelectors) {
@@ -570,9 +575,10 @@ class FacebookBot {
             await humanDelay(1000, 3000);
 
             // Find and click post button
+            // v84.1 FIX: :has-text() was Playwright-only (never matched)
             const postBtnSelectors = [
               '[aria-label="Post"]',
-              'div[role="button"]:has-text("Post")'
+              'xpath/.//div[@role="button"][.//span[contains(text(), "Post")]]'
             ];
 
             for (const btnSelector of postBtnSelectors) {

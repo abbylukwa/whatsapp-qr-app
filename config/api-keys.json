@@ -278,7 +278,7 @@
       "provider": "rewind",
       "freeLimit": "varies",
       "costInfo": "free tier",
-      "description": "Rewind AI \u2014 primary uncensored (sk-rewind-4333d7)"
+      "description": "Rewind AI \u2014 primary uncensored (sk-rewind-XXXXXX)"
     },
     {
       "name": "rewind_2",
@@ -290,7 +290,7 @@
       "provider": "rewind",
       "freeLimit": "varies",
       "costInfo": "free tier",
-      "description": "Rewind AI \u2014 Twitter caption gen (sk-rewind-f15c84)"
+      "description": "Rewind AI \u2014 Twitter caption gen (sk-rewind-XXXXXX)"
     },
     {
       "name": "rewind_3",
@@ -303,7 +303,7 @@
       "provider": "rewind",
       "freeLimit": "varies",
       "costInfo": "free tier",
-      "description": "Rewind AI \u2014 video script (sk-rewind-07354d)"
+      "description": "Rewind AI \u2014 video script (sk-rewind-XXXXXX)"
     },
     {
       "name": "rewind_4",
@@ -315,7 +315,7 @@
       "provider": "rewind",
       "freeLimit": "varies",
       "costInfo": "free tier",
-      "description": "Rewind AI \u2014 WhatsApp brain backup (sk-rewind-3aa655)"
+      "description": "Rewind AI \u2014 WhatsApp brain backup (sk-rewind-XXXXXX)"
     },
     {
       "name": "gemini_1",
@@ -354,7 +354,7 @@
       "provider": "groq",
       "freeLimit": "30 RPM, 14.4K RPD",
       "costInfo": "free",
-      "description": "Groq \u2014 fast inference llama-3.1-8b-instant (gsk_GomjO0)"
+      "description": "Groq \u2014 fast inference llama-3.1-8b-instant (gsk_XXXX)"
     },
     {
       "name": "groq_2",
@@ -367,7 +367,7 @@
       "provider": "groq",
       "freeLimit": "30 RPM",
       "costInfo": "free",
-      "description": "Groq \u2014 Twitter replies (gsk_SgHJ4D)"
+      "description": "Groq \u2014 Twitter replies (gsk_XXXX)"
     }
   ],
   "apis": {

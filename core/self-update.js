@@ -18,6 +18,7 @@
 const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { writeJSONAtomic } = require('./atomic');
 const crypto = require('crypto');
 
 class SelfUpdate {
@@ -61,7 +62,7 @@ class SelfUpdate {
 
   saveVersionInfo(info) {
     try {
-      fs.writeFileSync(this.versionFile, JSON.stringify(info, null, 2));
+      writeJSONAtomic(this.versionFile, info);
     } catch (e) {
       this.log('error', 'self-update', 'Version file save failed: ' + e.message);
     }
@@ -101,10 +102,10 @@ class SelfUpdate {
     }
 
     try {
-      fs.writeFileSync(this.lockFile, JSON.stringify({
+      writeJSONAtomic(this.lockFile, {
         pid: process.pid,
         timestamp: Date.now()
-      }));
+      });
       return true;
     } catch (e) {
       return false;
@@ -271,10 +272,10 @@ class SelfUpdate {
       // Install dependencies
       this.log('info', 'self-update', 'Installing dependencies...');
       try {
-        execSync('npm install --production', {
+        execSync('npm install --omit=dev', {
           cwd: this.appDir,
           encoding: 'utf8',
-          timeout: 120000
+          timeout: 600000
         });
       } catch (e) {
         this.log('warn', 'self-update', 'npm install failed: ' + e.message);
@@ -327,16 +328,30 @@ class SelfUpdate {
       }
 
       const lastUpdate = history[history.length - 1];
-      const backupBranch = 'pre-update-' + lastUpdate.from;
+      /* v84.1 FIX: createBackup() names the branch
+       * 'pre-update-<commit>-<timestamp>' but rollback searched for
+       * 'pre-update-<from>' (no timestamp) → checkout ALWAYS failed.
+       * List the actual branches and pick the newest matching one. */
+      let backupBranch = 'pre-update-' + lastUpdate.from;
+      try {
+        const branches = execSync('git branch --list "pre-update-*"', {
+          cwd: this.appDir, encoding: 'utf8'
+        }).split('\n').map(b => b.replace(/^\*?\s*/, '').trim()).filter(Boolean);
+        if (branches.length > 0) backupBranch = branches[branches.length - 1];
+      } catch (e) {}
 
-      this.log('info', 'self-update', 'Rolling back to: ' + lastUpdate.from);
+      this.log('info', 'self-update', 'Rolling back to: ' + backupBranch);
 
       execSync('git checkout ' + backupBranch, {
         cwd: this.appDir, encoding: 'utf8', timeout: 30000
       });
 
-      execSync('npm install --production', {
-        cwd: this.appDir, encoding: 'utf8', timeout: 120000
+      /* v84.1 FIX: npm timeout raised 120s → 600s — installing
+       * puppeteer/chromium-class deps routinely exceeds 2 minutes, and
+       * the swallowed timeout used to leave a HALF-INSTALLED
+       * node_modules that broke the next boot. */
+      execSync('npm install --omit=dev', {
+        cwd: this.appDir, encoding: 'utf8', timeout: 600000
       });
 
       this.versionInfo.version = this.getCurrentVersion();

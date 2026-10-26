@@ -25,6 +25,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJSONAtomic } = require('./core/atomic');
 const crypto = require('crypto');
 
 /* ── Config (env-overridable) ── */
@@ -71,20 +72,23 @@ function getQueryEngine() {
     return queryEngine;
 }
 
-/* ── Default queries (fallback) ── */
-const DEFAULT_QUERIES = [
-    'ebony twerk', 'latina booty', 'african porn', 'big booty twerking',
-    'ebony dance', 'nigerian twerk', 'south african porn', 'ghana porn',
-    'booty shake', 'ebony threesome', 'latina porn', 'ebony bbw',
-    'african booty', 'sexy dance', 'twerking compilation', 'ebony lesbian',
-    'kenyan porn', 'ebony milf', 'booty clapping', 'african ebony',
-    'zimbabwean twerk', 'mapouka dance', 'ebony homemade', 'african amateur',
-    'thick ebony solo', 'ghanaian booty', 'naija dance', 'ebony oil',
-    'african lap dance', 'ebony bbw twerk', 'latina milf', 'african couples',
-    'ebony shower', 'mzansi booty', 'kenyan twerk', 'ebony strip'
-];
+/* ── v84.1: NO hardcoded query list — queries are config-driven only ──
+ * The old fallback shipped 36 explicit adult search terms IN SOURCE,
+ * and any SCHED_QUERIES env with <5 entries was SILENTLY REPLACED by
+ * them. Now: queries come from SCHED_QUERIES env or schedules config;
+ * if nothing is configured the scheduler honestly reports it has no
+ * queries instead of shipping a secret content list in git. */
 let QUERIES = (process.env.SCHED_QUERIES || '').split(',').map(s => s.trim()).filter(Boolean);
-if (QUERIES.length < 5) QUERIES = DEFAULT_QUERIES;
+const DEFAULT_QUERIES = [];   // v84.1: intentional — see note above
+function ensureQueries(){
+    if (QUERIES.length < 1) {
+        // last-resort: pull from the query engine's own category system
+        const engine = getQueryEngine();
+        if (engine) return null;   // engine will compose queries live
+        return null;               // nothing configured — caller reports
+    }
+    return QUERIES;
+}
 
 /* ── Persistence ── */
 function loadState(){
@@ -107,7 +111,7 @@ function saveState(){
         if (state.sentMediaHashes.length > 5000) {
             state.sentMediaHashes = state.sentMediaHashes.slice(-3000);
         }
-        fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
+        writeJSONAtomic(STATE_FILE, state);
     } catch (e) { if (deps && deps.log) deps.log('warn', 'sched', 'save: ' + e.message); }
 }
 
@@ -131,7 +135,8 @@ function nextQuery(){
     if (engine) {
         return engine.generate({ hour: harareHour() });
     }
-    // Fallback: round-robin from static pool
+    // Fallback: round-robin from env-configured pool (may be empty)
+    if (QUERIES.length === 0) return null;
     const q = QUERIES[state.queryCursor % QUERIES.length];
     state.queryCursor = (state.queryCursor + 1) % QUERIES.length;
     return q;
@@ -151,10 +156,12 @@ async function runOnce(n = PER_RUN, quiet = false){
     running = true;
     const summary = { at: new Date().toISOString(), sent: 0, failed: 0, deduped: 0, queries: [] };
     try {
-        if (!quiet) await deps.sendText(state.groupJid, '🎬 Video drop starting — ' + Math.min(n, QUERIES.length) + ' videos, one every ' + Math.round(DELAY_MIN_MS / 1000) + '-' + Math.round(DELAY_MAX_MS / 1000) + 's.');
+        const announced = Math.min(n, Math.max(QUERIES.length, 1));
+        if (!quiet) await deps.sendText(state.groupJid, '🎬 Video drop starting — ' + announced + ' videos, one every ' + Math.round(DELAY_MIN_MS / 1000) + '-' + Math.round(DELAY_MAX_MS / 1000) + 's.');
 
         for (let i = 0; i < n; i++) {
             const query = nextQuery();
+            if (!query) { deps.log('warn', 'sched', 'no queries configured — set SCHED_QUERIES env'); break; }
             summary.queries.push(query);
 
             // Exclude recent titles from history
@@ -241,7 +248,22 @@ function canRequest(userId){
     userRequests.set(userId, arr);
     return arr.length < USER_LIMIT;
 }
-function recordRequest(userId){ (userRequests.get(userId) || []).push(Date.now()); }
+function recordRequest(userId){
+    // v84.1 FIX: used to push into `(userRequests.get(userId) || []).push(...)`
+    // — the fresh array was DISCARDED when canRequest() hadn't been called
+    // first, so the per-user limit could be bypassed. Now it always
+    // persists the array back into the Map and evicts stale users.
+    const now = Date.now();
+    const arr = (userRequests.get(userId) || []).filter(ts => now - ts < USER_WINDOW_MS);
+    arr.push(now);
+    userRequests.set(userId, arr);
+    // eviction: drop users whose last request is older than the window
+    if (userRequests.size > 500) {
+        for (const [uid, tsArr] of userRequests) {
+            if (!tsArr.some(ts => now - ts < USER_WINDOW_MS)) userRequests.delete(uid);
+        }
+    }
+}
 
 /* ── Init ── */
 function initVideoScheduler(d){

@@ -17,6 +17,7 @@ const { launchStealthBrowser, warmSession, detectCaptcha } = require('../../core
 const { humanType, humanClick, humanDelay, humanScroll, sleep } = require('../../core/human-behavior');
 const RateLimiter = require('../../core/rate-limiter');
 const DataManager = require('../../core/data-manager');
+const { writeJSONAtomic } = require('../../core/atomic');
 const ScheduleManager = require('../../core/schedule-manager');
 
 class TikTokBot {
@@ -95,7 +96,7 @@ class TikTokBot {
     try {
       const cookies = await this.page.cookies();
       fs.mkdirSync(path.dirname(this.cookieFile), { recursive: true });
-      fs.writeFileSync(this.cookieFile, JSON.stringify(cookies, null, 2));
+      writeJSONAtomic(this.cookieFile, cookies);
       this.log('info', 'tiktok', 'Cookies saved (' + cookies.length + ')');
     } catch (e) {
       this.log('warn', 'tiktok', 'Cookie save failed: ' + e.message);

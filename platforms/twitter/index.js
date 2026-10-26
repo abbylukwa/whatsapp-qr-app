@@ -1,3 +1,4 @@
+const { writeJSONAtomic } = require('../../core/atomic');
 'use strict';
 /* ══════════════════════════════════════════════════════════════
  *  platforms/twitter/index.js — Twitter/X Automation (v3.0)
@@ -150,6 +151,68 @@ class TwitterBot {
 
     // ═══ SCRAPER REF (set by orchestrator) ══════════════════════
     this.scraper = null;
+
+    // ═══ v84.1 OWN-LINKS-ONLY POLICY ═════════════════════════
+    // Every URL in a tweet/reply/DM must belong to the OWNER. Allowed
+    // hosts = OWNER_LINKS env (comma list) + hosts of the scraper's
+    // my_links slots. Everything else is STRIPPED before posting.
+    this._allowedLinks = (process.env.OWNER_LINKS || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    this._allowedLinkHosts = new Set(
+      this._allowedLinks.map(u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return null; } }).filter(Boolean)
+    );
+    this._linkPolicyLoaded = false;
+  }
+
+  /* v84.1: pull the owner's slot hosts from the scraper (cached 1h) */
+  async _loadAllowedLinks() {
+    if (this._linkPolicyLoaded) return;
+    this._linkPolicyLoaded = true;
+    try {
+      if (this.scraper && this.scraper.getSlots) {
+        const slots = await this.scraper.getSlots();
+        if (slots && Array.isArray(slots.links)) {
+          for (const slot of slots.links) {
+            try {
+              const host = new URL(slot.url).hostname.replace(/^www\./, '');
+              this._allowedLinkHosts.add(host);
+            } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+    // x.com / twitter.com are always allowed (self links)
+    this._allowedLinkHosts.add('x.com');
+    this._allowedLinkHosts.add('twitter.com');
+    this.log('info', 'twitter', 'Link policy loaded — allowed hosts: ' + [...this._allowedLinkHosts].join(', '));
+  }
+
+  /* v84.1: strip ANY url whose host is not the owner's. Returns
+   * { text, removedCount } — the tweet still posts, just without
+   * foreign links. Text WITHOUT urls is untouched. */
+  async enforceLinkPolicy(text) {
+    await this._loadAllowedLinks();
+    const urlRe = /https?:\/\/[^\s"'<>)\]]+/gi;
+    let removed = 0;
+    const out = String(text || '').replace(urlRe, (u) => {
+      try {
+        const host = new URL(u).hostname.replace(/^www\./, '');
+        if (this._allowedLinkHosts.has(host)) return u;   // owner's link — keep
+        removed++;
+        return '';                                        // foreign link — strip
+      } catch (e) { removed++; return ''; }
+    }).replace(/\s{2,}/g, ' ').trim();
+    if (removed > 0) this.log('warn', 'twitter', `Link policy: stripped ${removed} non-owner link(s) before posting`);
+    return { text: out, removedCount: removed };
+  }
+
+  /* v84.1: human post-task inactivity — after finishing a task the
+   * account goes QUIET for a random while (what a human does), instead
+   * of machine-gunning actions back-to-back. Cheap, non-blocking. */
+  async _postTaskInactivity(minMs = 90000, maxMs = 420000) {
+    const wait = minMs + Math.random() * (maxMs - minMs);
+    this.log('info', 'twitter', `Going inactive for ${Math.round(wait / 1000)}s (human post-task pause)`);
+    await sleep(wait);
   }
 
   /* ── Wire content pipeline ─────────────────────────────────── */
@@ -230,7 +293,7 @@ class TwitterBot {
       }
 
       // Generate caption using excited girl persona
-      const caption = this.persona.generateCaption({
+      let caption = this.persona.generateCaption({
         query,
         hasMedia: !!(mediaData && mediaData.ok),
         moodLevel: this._moodLevel,
@@ -238,8 +301,15 @@ class TwitterBot {
         lastPostAgo: Date.now() - this._lastIndependentPost
       });
 
-      // Post the tweet
-      const result = await this.tweet(caption);
+      // Post the tweet — v84.1: WITH media when the scraper delivered
+      const result = await this.tweet(caption, mediaData && mediaData.ok ? mediaData.filePath : null);
+
+      // v84.1: record the media hash for cross-cycle dedup
+      if (result.success && mediaData && mediaData.ok) {
+        const h = crypto.createHash('md5').update(mediaData.filePath + '|' + mediaData.source).digest('hex').substring(0, 16);
+        this._postedMediaHashes.add(h);
+        this._savePostedMedia();
+      }
 
       if (result.success) {
         this._independentPostCount++;
@@ -493,13 +563,21 @@ class TwitterBot {
 
   /* ════════════════════════════════════════════════════════════
    *  TWEET: Post a tweet with human-like behavior
+   *  v84.1: optional mediaPath — uploads an image/video via the
+   *  composer's file input (the missing piece that made every tweet
+   *  text-only). Text passes through enforceLinkPolicy() first.
    * ════════════════════════════════════════════════════════════ */
-  async tweet(text) {
+  async tweet(text, mediaPath = null) {
     if (!await this.ensureReady()) return { success: false, error: 'Not logged in' };
     if (!this.rateLimiter.canAct('tweet')) return { success: false, error: 'Rate limited' };
 
     try {
-      this.log('info', 'twitter', 'Posting tweet (' + text.length + ' chars)...');
+      // OWN-LINKS-ONLY: strip foreign URLs before typing anything
+      const policy = await this.enforceLinkPolicy(text);
+      text = policy.text;
+      if (!text || text.length === 0) return { success: false, error: 'Empty tweet after link policy' };
+
+      this.log('info', 'twitter', 'Posting tweet (' + text.length + ' chars' + (mediaPath ? ', +media' : '') + ')...');
       this.health.lastActionAt = Date.now();
 
       // Browse randomly first (session warming)
@@ -508,6 +586,27 @@ class TwitterBot {
       // Navigate to compose
       await this.page.goto('https://x.com/compose/post', { waitUntil: 'networkidle2', timeout: 30000 });
       await humanDelay(2000, 4000);
+
+      // v84.1: attach media FIRST (like a human picking the pic then
+      // writing) — via the file input the composer always renders.
+      if (mediaPath && fs.existsSync(mediaPath)) {
+        try {
+          const fileInput = await this.page.$('input[data-testid="fileInput"][type="file"]')
+            || await this.page.$('input[type="file"][accept*="video"]')
+            || await this.page.$('input[type="file"]');
+          if (fileInput) {
+            await fileInput.uploadFile(mediaPath);
+            // wait for the upload preview to render (video encodes server-side)
+            await this.page.waitForSelector('[data-testid="attachments"]', { timeout: 60000 }).catch(() => {});
+            await humanDelay(2000, 5000);
+            this.log('info', 'twitter', 'Media attached: ' + path.basename(mediaPath));
+          } else {
+            this.log('warn', 'twitter', 'File input not found — posting text-only');
+          }
+        } catch (me) {
+          this.log('warn', 'twitter', 'Media attach failed, posting text-only: ' + me.message);
+        }
+      }
 
       // Find the tweet editor
       const editor = await this.page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 10000 });
@@ -526,8 +625,10 @@ class TwitterBot {
       // Verify tweet was posted (URL should change or composer disappear)
       this.rateLimiter.record('tweet');
       this.health.successCount++;
-      this.data.addToHistory('tweet', { text: text.slice(0, 80), success: true, ts: Date.now() });
+      this.data.addToHistory('tweet', { text: text.slice(0, 80), hasMedia: !!mediaPath, success: true, ts: Date.now() });
       this.log('info', 'twitter', 'Tweet posted successfully');
+      // v84.1: go quiet like a human after posting
+      await this._postTaskInactivity(60000, 240000);
       return { success: true };
     } catch (e) {
       this.health.errorCount++;
@@ -547,6 +648,11 @@ class TwitterBot {
     try {
       this.log('info', 'twitter', 'Replying to: ' + tweetUrl);
       this.health.lastActionAt = Date.now();
+
+      // v84.1: OWN-LINKS-ONLY applies to replies too
+      const policy = await this.enforceLinkPolicy(text);
+      text = policy.text;
+      if (!text) return { success: false, error: 'Empty reply after link policy' };
 
       // Navigate to tweet
       await this.page.goto(tweetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -582,6 +688,8 @@ class TwitterBot {
       this._saveRepliedTo();
       this.data.addToHistory('reply', { tweetUrl, text: text.slice(0, 50), success: true, ts: Date.now() });
       this.log('info', 'twitter', 'Replied to: ' + tweetUrl);
+      // v84.1: human post-task quiet period
+      await this._postTaskInactivity(30000, 150000);
       return { success: true };
     } catch (e) {
       this.health.errorCount++;
@@ -896,7 +1004,7 @@ class TwitterBot {
       const file = path.join(dir, 'posted-media.json');
       // Keep only last 5000 hashes to avoid unbounded growth
       const hashes = [...this._postedMediaHashes].slice(-5000);
-      fs.writeFileSync(file, JSON.stringify({ hashes, count: hashes.length, lastSaved: Date.now() }));
+      writeJSONAtomic(file, { hashes, count: hashes.length, lastSaved: Date.now() });
     } catch (e) {}
   }
 
@@ -925,7 +1033,7 @@ class TwitterBot {
     try {
       const cookies = await this.page.cookies();
       fs.mkdirSync(path.dirname(this.cookieFile), { recursive: true });
-      fs.writeFileSync(this.cookieFile, JSON.stringify(cookies, null, 2));
+      writeJSONAtomic(this.cookieFile, cookies);
     } catch (e) {
       this.log('warn', 'twitter', 'Save cookies: ' + e.message);
     }

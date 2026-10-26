@@ -181,7 +181,26 @@ class MultiPlatformManager {
 
     // Auto-posting state
     this._autoPostTimers = {};
+    this._circadianDelayTimers = new Set();   // v84.1: tracked re-delay timers
+    this._platformLocks = new Map();          // v84.1: per-platform action mutex
     this._autoPostRunning = false;
+  }
+
+  /* v84.1: serialize all browser actions per platform.
+   * Overlapping timers (e.g. twitter 'dm' 45min vs 'tweet' 2h) used to
+   * run bot.login()/post CONCURRENTLY on the same page — a real race.
+   * Every action now chains through its platform's lock. */
+  async _withPlatformLock(platform, fn) {
+    const prev = this._platformLocks.get(platform) || Promise.resolve();
+    let release;
+    const gate = new Promise(r => { release = r; });
+    this._platformLocks.set(platform, prev.then(() => gate));
+    await prev.catch(() => {});   // wait for prior action (ignore its errors)
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   /* ── Validate environment ───────────────────────────────────── */
@@ -263,6 +282,36 @@ class MultiPlatformManager {
       });
     }, 300000);
 
+    // ═══ v84.1 FIX: the three dead subsystems are now ALIVE ═══
+    // (they were constructed but never started — advertised but inert)
+    try {
+      this.healthMonitor.startMonitoring();   // 60s checks + auto-recovery
+      this.log('info', 'multi-platform', 'HealthMonitor started (60s interval)');
+    } catch (e) {
+      this.log('warn', 'multi-platform', 'HealthMonitor start failed: ' + e.message);
+    }
+    try {
+      this.internetMonitor.start();           // 5min connectivity checks
+      this.log('info', 'multi-platform', 'InternetMonitor started (5min interval)');
+    } catch (e) {
+      this.log('warn', 'multi-platform', 'InternetMonitor start failed: ' + e.message);
+    }
+    if (process.env.AUTO_UPDATE === 'true') {
+      // self-update is OPT-IN ONLY: it pulls & runs origin/main, which is
+      // an arbitrary-code-execution channel. Never on by default.
+      try {
+        this.selfUpdate.startAutoCheck();
+        this.log('info', 'multi-platform', 'SelfUpdate auto-check started (AUTO_UPDATE=true)');
+      } catch (e) {
+        this.log('warn', 'multi-platform', 'SelfUpdate start failed: ' + e.message);
+      }
+    }
+    // InteractionTracker: periodic flush (saves were unthrottled before)
+    this._interactionFlushInterval = setInterval(() => {
+      try { this.interactionTracker.flush(); } catch (e) {}
+    }, 60000);
+    this._interactionFlushInterval.unref?.();
+
     // Start auto-posting scheduler (circadian-aware)
     const anyChromeAvailable = Object.values(this.platforms).some(b => b._chromeAvailable !== false && b.schedule && b.schedule.isEnabled());
     if (anyChromeAvailable) {
@@ -291,85 +340,65 @@ class MultiPlatformManager {
 
   /* ════════════════════════════════════════════════════════════
    *  AUTO-POSTING SCHEDULER
-   *  Runs on timers to post content from the pipeline:
-   *    - YouTube: community post every 8h, short every 4h, engage every 2h
-   *    - Facebook: timeline post every 8h, cross-post every 12h, join groups every 4h
-   *    - Twitter: tweet every 2h, reply to comments every 3h
-   *  All with jitter for anti-detection
+ *  v84.1 REWRITE: intervals are now SELF-RESCHEDULING with a FRESH
+   * random offset every cycle. The old code baked `+ jitter()` into a
+   * fixed setInterval — every "jittered" interval was perfectly
+   * constant (CV=0), scoring DANGER (20/100) on our own anti-detect
+   * meter's timing-entropy check. Now no two cycles repeat.
    * ════════════════════════════════════════════════════════════ */
   startAutoPosting() {
     if (this._autoPostRunning) return;
     this._autoPostRunning = true;
-    
-    const jitter = () => Math.random() * 600000; // 0-10 min jitter
-    
-    // ── YouTube ──────────────────────────────────────────────
-    // Community post: every 8h (SAFE: 1-2/day)
-    this._autoPostTimers.ytCommunity = setInterval(() => {
-      this._autoPost('youtube', 'community').catch(e =>
-        this.log('error', 'multi-platform', 'YT auto community error: ' + e.message));
-    }, 8 * 3600000 + jitter());
-    
-    // Short: every 4h (SAFE: 2-5/day)
-    this._autoPostTimers.ytShort = setInterval(() => {
-      this._autoPost('youtube', 'short').catch(e =>
-        this.log('error', 'multi-platform', 'YT auto short error: ' + e.message));
-    }, 4 * 3600000 + jitter());
-    
-    // Engage (watch/like/comment): every 2h
-    this._autoPostTimers.ytEngage = setInterval(() => {
-      this._autoPost('youtube', 'engage').catch(e =>
-        this.log('error', 'multi-platform', 'YT auto engage error: ' + e.message));
-    }, 2 * 3600000 + jitter());
-    
-    // ── Facebook ─────────────────────────────────────────────
-    // Timeline post: every 8h (HALF YouTube: 2-3/day)
-    this._autoPostTimers.fbTimeline = setInterval(() => {
-      this._autoPost('facebook', 'timeline').catch(e =>
-        this.log('error', 'multi-platform', 'FB auto timeline error: ' + e.message));
-    }, 8 * 3600000 + jitter());
-    
-    // Cross-post from YouTube: every 12h
-    this._autoPostTimers.fbCrosspost = setInterval(() => {
-      this._autoPost('facebook', 'crosspost').catch(e =>
-        this.log('error', 'multi-platform', 'FB auto crosspost error: ' + e.message));
-    }, 12 * 3600000 + jitter());
-    
-    // Join queued groups: every 4h
-    this._autoPostTimers.fbJoinGroups = setInterval(() => {
-      this._autoPost('facebook', 'joinGroups').catch(e =>
-        this.log('error', 'multi-platform', 'FB auto join groups error: ' + e.message));
-    }, 4 * 3600000 + jitter());
-    
-    // ── Twitter ──────────────────────────────────────────────
-    // Tweet: every 2h (5-10/day)
-    this._autoPostTimers.tweet = setInterval(() => {
-      this._autoPost('twitter', 'tweet').catch(e =>
-        this.log('error', 'multi-platform', 'TW auto tweet error: ' + e.message));
-    }, 2 * 3600000 + jitter());
-    
-    // Reply to comments: every 3h
-    this._autoPostTimers.twReply = setInterval(() => {
-      this._autoPost('twitter', 'reply').catch(e =>
-        this.log('error', 'multi-platform', 'TW auto reply error: ' + e.message));
-    }, 3 * 3600000 + jitter());
-    
-    // Process NSFW queue: REMOVED — Twitter is now independent
-    // Twitter posts NSFW on its own schedule using startIndependentNSFW()
-    this._autoPostTimers.twDMCheck = setInterval(() => {
-      this._autoPost('twitter', 'dm').catch(e =>
-        this.log('error', 'multi-platform', 'TW DM check error: ' + e.message));
-    }, 45 * 60000 + jitter());
-    
-    this.log('info', 'multi-platform', 'Auto-posting started (YT: community/short/engage, FB: timeline/crosspost/join, TW: tweet/reply/dm/INDEPENDENT_NSF)');
+
+    // per-fire human jitter: ±20% of the base interval, min ±1min
+    const schedule = (key, platform, action, intervalMs) => {
+      const arm = () => {
+        if (!this._autoPostRunning) return;            // don't re-arm after stop
+        const jitterFactor = 1 + (Math.random() * 2 - 1) * 0.20;
+        const wait = Math.max(60000, Math.round(intervalMs * jitterFactor));
+        const t = setTimeout(async () => {
+          try {
+            await this._autoPost(platform, action);
+          } catch (e) {
+            this.log('error', 'multi-platform', platform + ' auto ' + action + ' error: ' + e.message);
+          }
+          arm();                                        // fresh jitter next cycle
+        }, wait);
+        t.unref?.();
+        this._autoPostTimers[key] = t;                  // clearTimeout-able
+      };
+      arm();
+    };
+
+    // ── YouTube ──────────────────────────────────────────
+    schedule('ytCommunity', 'youtube', 'community', 8 * 3600000);   // 1-2/day SAFE
+    schedule('ytShort',     'youtube', 'short',     4 * 3600000);   // 2-5/day SAFE
+    schedule('ytEngage',    'youtube', 'engage',    2 * 3600000);
+
+    // ── Facebook ─────────────────────────────────────────
+    schedule('fbTimeline',   'facebook', 'timeline',   8 * 3600000);  // half YT
+    schedule('fbCrosspost',  'facebook', 'crosspost', 12 * 3600000);
+    schedule('fbJoinGroups', 'facebook', 'joinGroups', 4 * 3600000);
+
+    // ── Twitter ──────────────────────────────────────────
+    schedule('tweet',     'twitter', 'tweet', 2 * 3600000);          // 5-10/day
+    schedule('twReply',   'twitter', 'reply', 3 * 3600000);
+    // Process NSFW queue: REMOVED — Twitter posts independently
+    schedule('twDMCheck', 'twitter', 'dm',   45 * 60000);
+
+    this.log('info', 'multi-platform', 'Auto-posting started (per-fire jitter, platform mutex, circadian-gated)');
   }
 
   stopAutoPosting() {
     this._autoPostRunning = false;
     for (const [name, timer] of Object.entries(this._autoPostTimers)) {
-      clearInterval(timer);
+      clearTimeout(timer);          // v84.1: timers are setTimeouts now
     }
     this._autoPostTimers = {};
+    // v84.1: also cancel pending circadian re-delays so no action can
+    // fire after shutdown (they used to leak and fire post-close)
+    for (const t of this._circadianDelayTimers) clearTimeout(t);
+    this._circadianDelayTimers.clear();
     this.log('info', 'multi-platform', 'Auto-posting stopped');
   }
 
@@ -392,9 +421,14 @@ class MultiPlatformManager {
     const scheduleNext = () => {
       const interval = (3 + Math.random() * 3) * 3600000; // 3-6 hours
       this._fingerprintTimer = setTimeout(async () => {
-        await rotateAll();
+        // v84.1 FIX: an unexpected rejection used to kill this chain
+        // forever (async callback with no catch). Now it always re-arms.
+        try { await rotateAll(); } catch (e) {
+          this.log('warn', 'multi-platform', 'fingerprint rotation cycle failed: ' + e.message);
+        }
         scheduleNext();
       }, interval);
+      this._fingerprintTimer.unref?.();
     };
     scheduleNext();
   }
@@ -410,14 +444,29 @@ class MultiPlatformManager {
       return;
     }
 
+    // v84.1: serialize per-platform browser actions (login/post race fix)
+    return this._withPlatformLock(platform, () => this._autoPostLocked(platform, action, bot));
+  }
+
+  async _autoPostLocked(platform, action, bot) {
     // ═══ CIRCADIAN GATE — Ask the circadian engine if we should act ═══
     const actionCategory = (action === 'engage' || action === 'reply' || action === 'joinGroups') ? 'passive' : 'full';
     const circadianDecision = this.circadian.shouldAct(actionCategory);
     if (!circadianDecision.shouldAct) {
       if (circadianDecision.delay > 0) {
         this.log('info', 'multi-platform', 'Circadian: delaying ' + platform + '/' + action + ' by ' + Math.round(circadianDecision.delay / 60000) + 'min (' + circadianDecision.reason + ')');
-        // Re-schedule after delay
-        setTimeout(() => this._autoPost(platform, action), circadianDecision.delay);
+        // Re-schedule after delay — v84.1: timer is now TRACKED and
+        // cancelled on stopAutoPosting()/close() (used to leak and
+        // could fire long after shutdown)
+        if (this._autoPostRunning) {
+          const t = setTimeout(() => {
+            this._circadianDelayTimers.delete(t);
+            this._autoPost(platform, action).catch(e =>
+              this.log('error', 'multi-platform', platform + ' re-delay error: ' + e.message));
+          }, circadianDecision.delay);
+          t.unref?.();
+          this._circadianDelayTimers.add(t);
+        }
       } else {
         this.log('info', 'multi-platform', 'Circadian: skipping ' + platform + '/' + action + ' (' + circadianDecision.reason + ')');
       }
@@ -929,12 +978,17 @@ class MultiPlatformManager {
     this.log('info', 'multi-platform', 'Shutting down all platforms...');
     
     this.stopAutoPosting();
-    
+
     if (this.healthMonitorInterval) {
       clearInterval(this.healthMonitorInterval);
     }
+    if (this._interactionFlushInterval) {
+      clearInterval(this._interactionFlushInterval);
+    }
 
     // Close modern systems
+    if (this.internetMonitor) { try { this.internetMonitor.stop(); } catch (e) {} }
+    if (this.interactionTracker) { try { this.interactionTracker.flush(); } catch (e) {} }
     if (this.healthMonitor) this.healthMonitor.close();
     if (this.selfUpdate) this.selfUpdate.close();
     if (this.crashRecovery) this.crashRecovery.close();

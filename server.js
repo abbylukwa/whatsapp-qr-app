@@ -388,7 +388,10 @@ const NSFW_START = 21, NSFW_END = 8;
 let nsfwWindowOverride = null;   /* v72.3: null = follow clock · true/false = !nsfw on|off */
 const DM_AI_START_HOUR = 21, DM_AI_END_HOUR = 8;
 
-const SCRAPER_URL       = (process.env.SCRAPER_URL || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
+// v84.1: honor BOTH SCRAPER_URL and the legacy SCRAPER var (the shipped
+// env file used SCRAPER=, which only one panel route ever read — the
+// main client silently ignored it)
+const SCRAPER_URL       = (process.env.SCRAPER_URL || process.env.SCRAPER || 'https://intelligent-scraper.onrender.com').replace(/\/$/,'');
 const SCRAPER_SFW_SITE  = process.env.SCRAPER_SFW_SITE  || 'auto';
 const SCRAPER_NSFW_SITE = process.env.SCRAPER_NSFW_SITE || 'nsfw';
 const SCRAPER_TOKEN     = process.env.SCRAPER_TOKEN || '';
@@ -8553,27 +8556,6 @@ app.get('/admin/flow', function(req,res){
     botLid
   });
 });
-/* ═══ v81: Save env vars from Account Setup ═══ */
-app.post('/admin/save-env', function(req,res){
-  try {
-    const updates = req.body || {};
-    const envPath = path.join(__dirname, fs.existsSync(path.join(__dirname,'.env')) ? '.env' : 'env');
-    let envContent = fs.readFileSync(envPath, 'utf8');
-    for (const [key, value] of Object.entries(updates)) {
-      if (!value) continue;
-      const escapedValue = String(value).replace(/"/g, '\\"');
-      const regex = new RegExp('^' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=.*$', 'm');
-      if (regex.test(envContent)) {
-        envContent = envContent.replace(regex, key + '=' + escapedValue);
-      } else {
-        envContent += '\n' + key + '=' + escapedValue;
-      }
-    }
-    fs.writeFileSync(envPath, envContent, 'utf8');
-    pushLog('info', 'config', 'Account setup saved to env file');
-    res.json({ok: true});
-  } catch(e) { res.json({ok: false, error: e.message}); }
-});
 
 /* ═══ v81: Bot Detection Meter ═══ */
 app.get('/admin/bot-detect', function(req,res){
@@ -8613,6 +8595,47 @@ app.post('/admin/test-scraper-sites', async function(req,res){
     const passed = results.filter(r => r.ok).length;
     res.json({passed, total: results.length, results});
   } catch(e) { res.json({passed: 0, total: 0, results: [], error: e.message}); }
+});
+
+/* ═══ v84.1: BLENDER FILM PIPELINE — plan-only control surface ═══
+ * The heavy Blender work NEVER runs on Render (no Blender there).
+ * These routes drive `python3 -m blender_pipeline` which only writes
+ * .bpy text files + progress.json (tiny, CPU-trivial). You download
+ * the workdir (or pull the repo) and run render.sh wherever Blender
+ * lives — your PC or the included GitHub Actions workflow. */
+const { execFile } = require('child_process');
+const BLENDER_PIPELINE_CWD = __dirname;
+function blenderCmd(args, res) {
+  execFile('python3', ['-m', 'blender_pipeline'].concat(args), {
+    cwd: BLENDER_PIPELINE_CWD, timeout: 240000, maxBuffer: 4 * 1024 * 1024
+  }, (err, stdout, stderr) => {
+    if (err && !stdout) {
+      return res.json({ ok: false, error: (err.code === 'ENOENT')
+        ? 'python3 not found on this host — run the pipeline locally or in CI'
+        : err.message, stderr: String(stderr || '').slice(-800) });
+    }
+    res.json({ ok: !err, stdout: String(stdout || '').slice(-4000), stderr: String(stderr || '').slice(-1000) });
+  });
+}
+app.post('/admin/blender/plan', function(req, res) {
+  const topic = String(req.body.topic || 'The San people of the Kalahari').slice(0, 160);
+  const grade = String(req.body.grade || '10').slice(0, 4);
+  const workdir = String(req.body.workdir || 'work/film').replace(/[^a-zA-Z0-9_\-\/]/g, '');
+  blenderCmd(['all', '--topic', topic, '--grade', grade, '--workdir', workdir], res);
+});
+app.get('/admin/blender/status', function(req, res) {
+  const workdir = String(req.query.workdir || 'work/film').replace(/[^a-zA-Z0-9_\-\/]/g, '');
+  blenderCmd(['status', '--workdir', workdir], res);
+});
+app.get('/admin/blender/files', function(req, res) {
+  const workdir = String(req.query.workdir || 'work/film').replace(/[^a-zA-Z0-9_\-\/]/g, '');
+  const dir = path.join(BLENDER_PIPELINE_CWD, workdir, 'bpy');
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.bpy')).map(f => ({
+      file: f, kb: Math.round(fs.statSync(path.join(dir, f)).size / 1024)
+    }));
+    res.json({ ok: true, workdir, files });
+  } catch (e) { res.json({ ok: false, error: 'no workdir yet — POST /admin/blender/plan first' }); }
 });
 
 /* ═══ v81: Free API Keys — no signup needed ═══ */

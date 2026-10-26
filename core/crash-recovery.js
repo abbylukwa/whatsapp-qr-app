@@ -14,6 +14,7 @@
  * ══════════════════════════════════════════════════════════════ */
 
 const fs = require('fs');
+const { writeJSONAtomic } = require('./atomic');
 const path = require('path');
 
 class CrashRecovery {
@@ -29,6 +30,8 @@ class CrashRecovery {
     this.crashes = [];
     this.restartCount = 0;
     this.isShuttingDown = false;
+    this._restartPending = false;   // v84.1 re-entrancy guard
+    this._bootedAt = Date.now();    // v84.1 healthy-uptime tracking
     this.shutdownCallbacks = [];
     this.watchdogTimer = null;
     this.watchdogCallback = options.watchdogCallback || null;
@@ -58,11 +61,11 @@ class CrashRecovery {
   saveState() {
     try {
       fs.mkdirSync(path.dirname(this.stateFile), { recursive: true });
-      fs.writeFileSync(this.stateFile, JSON.stringify({
+      writeJSONAtomic(this.stateFile, {
         crashes: this.crashes.slice(-50), // keep last 50
         restartCount: this.restartCount,
         lastSave: Date.now()
-      }, null, 2));
+      });
     } catch (e) {}
   }
 
@@ -143,6 +146,15 @@ class CrashRecovery {
 
   /* ── Schedule restart with exponential backoff ────────────── */
   scheduleRestart(reason) {
+    // v84.1 FIX: guard against re-entrant crashes — a second
+    // uncaughtException while a restart timer is pending used to
+    // schedule MULTIPLE exits and re-run shutdown callbacks.
+    if (this._restartPending) {
+      this.log('warn', 'crash-recovery', 'Restart already pending — ignoring duplicate crash signal');
+      return;
+    }
+    this._restartPending = true;
+
     const delay = Math.min(
       this.backoffBase * Math.pow(2, this.restartCount),
       this.backoffMax
@@ -155,15 +167,28 @@ class CrashRecovery {
 
     setTimeout(() => {
       // Run shutdown callbacks then restart
-      this.runShutdownCallbacks().then(() => {
-        // Reset restart count on successful restart
-        this.restartCount = 0;
-        this.saveState();
-        // Note: actual restart is handled by process manager (PM2, systemd, etc.)
-        // We just clean up and exit with code 0 to trigger restart
-        process.exit(0);
+      this.runShutdownCallbacks().catch(() => {}).then(() => {
+        // v84.1 FIX (two bugs):
+        //  1) Do NOT reset restartCount before exit — the count is the
+        //     backoff memory; resetting it here meant the "exponential"
+        //     backoff never exceeded ~2s. It is reset on CLEAN boot
+        //     (uptime > 10 min) instead, see _maybeResetBackoff().
+        //  2) Exit code 0 told Render/PM2 the process died CLEANLY,
+        //     masking failure semantics. A crash restart must exit 1.
+        // Note: actual restart is handled by the process manager
+        // (Render, PM2, systemd) — we just clean up and exit.
+        process.exit(1);
       });
     }, delay);
+  }
+
+  /* v84.1: call this after a long healthy run to forget crash debt */
+  _maybeResetBackoff() {
+    if (this._bootedAt && (Date.now() - this._bootedAt) > 10 * 60 * 1000 && this.restartCount > 0) {
+      this.restartCount = 0;
+      this.saveState();
+      this.log('info', 'crash-recovery', 'Healthy for 10+ min — restart backoff reset');
+    }
   }
 
   /* ── Graceful shutdown ────────────────────────────────────── */

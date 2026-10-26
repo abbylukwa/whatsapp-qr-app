@@ -15,6 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJSONAtomic } = require('./atomic');
 const os = require('os');
 
 class HealthMonitor {
@@ -57,16 +58,33 @@ class HealthMonitor {
   saveHistory() {
     try {
       fs.mkdirSync(path.dirname(this.historyFile), { recursive: true });
-      fs.writeFileSync(this.historyFile, JSON.stringify(this.history, null, 2));
+      writeJSONAtomic(this.historyFile, this.history);
     } catch (e) {}
   }
 
   /* ── System resource check ────────────────────────────────── */
   getSystemHealth() {
     const mem = process.memoryUsage();
-    const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMemPercent = ((totalMem - freeMem) / totalMem) * 100;
+
+    /* v84.1 FIX: os.totalmem()/os.freemem() report the HOST machine's
+     * memory, not the container's — on Render's 512MB free plan the
+     * 85% alert could never fire. Read the cgroup limit first
+     * (cgroup v2 then v1), fall back to os figures when absent. */
+    let totalMem = os.totalmem();
+    let containerMem = null;
+    try {
+      const v2 = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+      if (v2 && v2 !== 'max') containerMem = parseInt(v2, 10);
+    } catch (e) {}
+    if (!containerMem) {
+      try {
+        const v1 = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+        if (v1) { const n = parseInt(v1, 10); if (n > 0 && n < totalMem) containerMem = n; }
+      } catch (e) {}
+    }
+    if (containerMem) totalMem = containerMem;
+    // "used" = the process footprint (the only thing we control) vs cap
+    const usedMemPercent = (mem.rss / totalMem) * 100;
 
     return {
       uptime: Date.now() - this.startTime,

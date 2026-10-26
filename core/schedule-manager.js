@@ -11,6 +11,7 @@
  * ══════════════════════════════════════════════════════════════ */
 
 const fs = require('fs');
+const { writeJSONAtomic } = require('./atomic');
 const path = require('path');
 
 class ScheduleManager {
@@ -20,6 +21,7 @@ class ScheduleManager {
     this.scheduleFile = path.join(schedulesDir, `${platform}.json`);
     this.log = () => {};
     this.timers = new Map();
+    this.callbacks = new Map();   // v84.1: for enable() re-arming
     this.schedule = this.load();
   }
 
@@ -49,7 +51,7 @@ class ScheduleManager {
   save() {
     try {
       fs.mkdirSync(this.schedulesDir, { recursive: true });
-      fs.writeFileSync(this.scheduleFile, JSON.stringify(this.schedule, null, 2));
+      writeJSONAtomic(this.scheduleFile, this.schedule);
     } catch (e) {
       this.log('error', 'schedule', `Save failed: ${e.message}`);
     }
@@ -59,14 +61,28 @@ class ScheduleManager {
   enable() {
     this.schedule.enabled = true;
     this.save();
-    this.log('info', 'schedule', `${this.platform} enabled`);
+    // v84.1: belt & braces — if timers were stopped by external code
+    // (stopAllTasks / process restart), re-arm every enabled task from
+    // the stored callback registry so enable() ALWAYS means running.
+    let rearmed = 0;
+    for (const task of this.schedule.tasks) {
+      if (task.enabled && this.callbacks.has(task.id) && !this.timers.has(task.id)) {
+        this.startTask(task.id, this.callbacks.get(task.id));
+        rearmed++;
+      }
+    }
+    this.log('info', 'schedule', `${this.platform} enabled` + (rearmed ? ` (${rearmed} task chains re-armed)` : ''));
   }
 
   disable() {
     this.schedule.enabled = false;
-    this.stopAllTasks();
+    // v84.1 FIX: this used to call stopAllTasks() — which KILLED every
+    // timer chain. enable() only flipped the flag back, so after an
+    // off→on cycle the platform looked "on" but never ran again.
+    // Now the chain stays alive and the disabled flag simply gates the
+    // action inside runWithJitter (see startTask).
     this.save();
-    this.log('info', 'schedule', `${this.platform} disabled`);
+    this.log('info', 'schedule', `${this.platform} disabled (task chains kept alive, actions gated)`);
   }
 
   isEnabled() {
@@ -127,25 +143,36 @@ class ScheduleManager {
     if (!task || !task.enabled) return false;
 
     this.stopTask(taskId); // Clear any existing timer
+    // v84.1: remember the callback so enable() can re-arm dead chains
+    if (!this.callbacks) this.callbacks = new Map();
+    this.callbacks.set(taskId, callback);
 
     const runWithJitter = async () => {
-      if (!this.schedule.enabled || !task.enabled) return;
+      /* v84.1 FIX: this used to `return` (killing the reschedule chain)
+       * whenever the schedule/task was disabled at fire time. After
+       * `!platform off` → `!platform on` the flag flipped back but the
+       * timer chain was already dead — the platform looked "on" yet
+       * never ran another scheduled task until a process restart.
+       * Now the chain ALWAYS re-arms; disabled states just skip the
+       * action this tick. */
+      const jitteredInterval = task.interval * (1 + (Math.random() * 2 - 1) * (task.jitter || 0));
 
-      // Add jitter to interval
-      const jitteredInterval = task.interval * (1 + (Math.random() * 2 - 1) * task.jitter);
-
-      try {
-        this.log('info', 'schedule', `Running task: ${taskId}`);
-        await callback(task);
-        task.lastRun = Date.now();
-        task.runCount++;
-        task.nextRun = Date.now() + jitteredInterval;
-        this.save();
-      } catch (e) {
-        this.log('error', 'schedule', `Task ${taskId} failed: ${e.message}`);
+      if (this.schedule.enabled && task.enabled) {
+        try {
+          this.log('info', 'schedule', `Running task: ${taskId}`);
+          await callback(task);
+          task.lastRun = Date.now();
+          task.runCount++;
+          task.nextRun = Date.now() + jitteredInterval;
+          this.save();
+        } catch (e) {
+          this.log('error', 'schedule', `Task ${taskId} failed: ${e.message}`);
+        }
+      } else {
+        this.log('info', 'schedule', `Task ${taskId} skipped (schedule/task disabled) — chain kept alive`);
       }
 
-      // Schedule next run with jitter
+      // Schedule next run with jitter (ALWAYS — keep the chain alive)
       const timer = setTimeout(runWithJitter, jitteredInterval);
       this.timers.set(taskId, timer);
     };

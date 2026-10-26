@@ -8,6 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJSONAtomic, readJSONSafe } = require('./atomic');
 
 class DataManager {
   constructor(platform, dataDir = './data') {
@@ -24,12 +25,16 @@ class DataManager {
   /* ── Key-value storage ─────────────────────────────────────── */
   get(key, defaultVal = null) {
     if (this.data[key] !== undefined) return this.data[key];
-    // Try loading from file
+    // Try loading from file — v84.1: readJSONSafe quarantines corrupt
+    // files instead of silently discarding them (silent data loss).
     try {
       const file = path.join(this.dataDir, `${key}.json`);
       if (fs.existsSync(file)) {
-        this.data[key] = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return this.data[key];
+        const loaded = readJSONSafe(file, null);
+        if (loaded !== null) {
+          this.data[key] = loaded;
+          return this.data[key];
+        }
       }
     } catch (e) {}
     return defaultVal;
@@ -39,7 +44,7 @@ class DataManager {
     this.data[key] = value;
     try {
       const file = path.join(this.dataDir, `${key}.json`);
-      fs.writeFileSync(file, JSON.stringify(value, null, 2));
+      writeJSONAtomic(file, value);
     } catch (e) {
       this.log('error', 'data', `Failed to save ${key}: ${e.message}`);
     }
@@ -55,12 +60,15 @@ class DataManager {
 
   addToList(name, item) {
     const list = this.getList(name);
-    // Check for duplicates by id or string match
-    const isDup = list.some(existing =>
-      (item.id && existing.id === item.id) ||
-      (typeof item === 'string' && existing === item) ||
-      (item.url && existing.url === item.url)
-    );
+    // v84.1 FIX: `item.id && …` treated id=0 and other falsy ids as
+    // "no id", letting duplicates in. Compare with hasOwnProperty-style
+    // truth handling and cover mixed string/object lists.
+    const isDup = list.some(existing => {
+      if (typeof item === 'string') return existing === item;
+      if (item.id !== undefined && item.id !== null) return existing && existing.id === item.id;
+      if (item.url) return existing && existing.url === item.url;
+      return existing === item;
+    });
     if (isDup) return false;
     list.push(item);
     this.set(`list_${name}`, list);

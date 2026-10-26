@@ -1,5 +1,36 @@
-# BreadBot v72 — whatsapp-qr-app
+# BreadBot v84.1 — whatsapp-qr-app
 
+## v84.1.0 — THE PERFECTION PASS (fixed everything the audit found)
+### CRITICAL security
+- `env` file with 4 LIVE Rewind API keys + admin phone REMOVED from git; shipped as sanitized `env.example`. `config/api-keys.json` + `data/crash-state.json` sanitized + untracked (.gitignore hardened). **ROTATE the leaked keys with the provider.**
+- SSRF/scheme guards on remote fetches; scraper client honors SCRAPER_URL/SCRAPER both.
+
+### Twitter/X (link pipeline + media)
+- OWN-LINKS-ONLY policy: every tweet/reply passes enforceLinkPolicy() — URLs not in OWNER_LINKS env or the scraper's my_links slots are STRIPPED; x.com self-links always allowed.
+- MEDIA UPLOAD IMPLEMENTED: tweet(text, mediaPath) attaches files via the composer file input; independentNSFWPost now actually fetches video via the new remote scraper client (fetchVideo) and posts WITH media + dedup hash.
+- platforms/scraper/index.js REWRITTEN: was spawning a nonexistent local sibling + calling /api/* routes that don't exist; now a real remote client for the deployed scraper (search/gif/video/music/download/my-links) forwarding MYLINKS on every request.
+- Post-task human inactivity (_postTaskInactivity) after tweet/reply; DMs unchanged (2/cycle).
+
+### Bot engine fixes (all verified by test-all.js)
+- Atomic JSON persistence everywhere (core/atomic.js tmp+rename; corrupt files quarantined, not silently reset).
+- crash-recovery: re-entrant crash guard; exits 1 (not 0); backoff no longer resets itself; reset only after 10min healthy.
+- rate-limiter: waitAndRecord now respects hourly/daily caps (was record-past-cap = ban risk); getRemaining expires windows; deployed limits no longer overwritten by stale persisted ones.
+- schedule-manager: disable() no longer kills timer chains; enable() re-arms dead chains from a callback registry (off→on was permanently silent before).
+- multi-platform: per-fire jitter (was constant intervals = detectable), tracked circadian re-delay timers (were leaking past shutdown), per-platform action MUTEX (login/post race), fingerprint rotation chain survives errors, and the three dead subsystems are ALIVE: HealthMonitor.startMonitoring, InternetMonitor.start, SelfUpdate.startAutoCheck (opt-in AUTO_UPDATE=true only).
+- circadian: _checkDayReset actually called; timezone-correct date key; ±15% jitter stable per 10-min bucket (gates no longer flip per call).
+- health-monitor: container memory from cgroup v2/v1 (os.totalmem never fired alerts on Render's 512MB).
+- interaction-tracker: maxHistory enforced + 30s save throttle + flush().
+- anti-detection: Firefox UA on Chrome engine removed; --disable-web-security/--disable-features removed; evasions no longer stack on rotation.
+- videoScheduler: 36 hardcoded adult queries REMOVED from source (config-driven only); recordRequest bypass fixed; user eviction.
+- self-update: rollback branch-name mismatch fixed; npm timeout 120s→600s; --omit=dev.
+- facebook: Playwright :has-text() selectors replaced with xpath (never matched before).
+- server.js: duplicate /admin/save-env removed; SCRAPER_URL honors legacy SCRAPER env; NEW /admin/blender/* routes.
+
+### blender_pipeline (NEW — Task 2)
+- AI-orchestrated .bpy film factory: syllabus ingest (CAPS/Cambridge/custom) → AI or knowledge-brain art direction → object-by-object emitters (terrain, spear, bow, human with nails+3 hair systems+cloth, fire, hut, eland, props) → cinematic assembly (per-scene camera/light rigs timed to narration) → narration + edge-tts + SRT + alignment.json → render.sh + GitHub Actions render workflow.
+- Runs WITHOUT Blender on server; resumable progress.json; API budget cap with zero-key fallback. CLI: python -m blender_pipeline demo
+
+## v84.0.0 — previous
 ## v74.0.0 — SCHOOL-GROUP CLASSIFIER + REGISTRY SELF-HEAL (whole-number release)
 
 WHY: owner report — "the bot gets confused which ones are school group

@@ -1,3 +1,4 @@
+const { writeJSONAtomic } = require('./atomic');
 'use strict';
 /* ══════════════════════════════════════════════════════════════
  *  core/circadian-orchestrator.js — Human Circadian Rhythm Engine
@@ -141,9 +142,18 @@ class CircadianOrchestrator {
 
   /* ── Get current date string (YYYY-MM-DD) ────────────────── */
   _getCurrentDate() {
-    const now = new Date();
-    const local = new Date(now.toLocaleString('en-US', { timeZone: this.timezone }));
-    return local.toISOString().split('T')[0];
+    // v84.1 FIX: toISOString() returns the UTC date of the reconstructed
+    // instant, not the timezone-local date — the day key was off by one
+    // near midnight, so counters reset at the wrong time. Use Intl to
+    // format the date IN the configured timezone.
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: this.timezone, year: 'numeric', month: '2-digit', day: '2-digit'
+      }).format(new Date());   // en-CA gives YYYY-MM-DD
+    } catch (e) {
+      const local = new Date(new Date().toLocaleString('en-US', { timeZone: this.timezone }));
+      return local.toISOString().split('T')[0];
+    }
   }
 
   /* ════════════════════════════════════════════════════════════
@@ -152,6 +162,10 @@ class CircadianOrchestrator {
    *  This is the CORE of the circadian model
    * ════════════════════════════════════════════════════════════ */
   getActivityLevel() {
+    // v84.1 FIX: the daily counter reset was defined (_checkDayReset)
+    // but never called, so totalActionsToday grew forever across days.
+    this._checkDayReset();
+
     const hour = this._getCurrentHour();
     const dayOfWeek = this._getCurrentDayOfWeek();
     const cfg = this.config;
@@ -211,10 +225,26 @@ class CircadianOrchestrator {
       }
     }
 
-    // Add ±15% random jitter to make every day slightly different
-    level *= (0.85 + Math.random() * 0.30);
+    // ── v84.1: ±15% "day flavour" jitter — STABLE per 10-min bucket.
+    // Was re-rolled on EVERY call, so two calls 1s apart disagreed and
+    // threshold gates flipped randomly. Now every 10-minute window has
+    // one fixed jitter factor: days still differ, calls stay consistent.
+    level *= this._dayFlavour();
 
     return Math.max(0, Math.min(1, level));
+  }
+
+  /* v84.1: deterministic ±15% jitter, stable within a 10-minute bucket */
+  _dayFlavour() {
+    const bucket = Math.floor(Date.now() / 600000);          // 10-min windows
+    const seed = `${bucket}:${this.timezone}`;
+    let h = 2166136261;
+    for (let i = 0; i < seed.length; i++) {
+      h ^= seed.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const r = ((h >>> 0) % 1000) / 1000;                     // 0..1 deterministic
+    return 0.85 + r * 0.30;
   }
 
   /* ════════════════════════════════════════════════════════════
@@ -544,7 +574,7 @@ class CircadianOrchestrator {
   _saveState() {
     try {
       fs.mkdirSync(path.dirname(this.stateFile), { recursive: true });
-      fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
+      writeJSONAtomic(this.stateFile, this.state);
     } catch (e) {}
   }
 

@@ -27,6 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const { EducationalShortsGenerator, CURRICULUM, TEMPLATES } = require('./educational-shorts');
+const { writeJSONAtomic } = require('../atomic');
 const DataManager = require('../data-manager');
 
 class ContentPipeline {
@@ -774,7 +775,7 @@ class ContentPipeline {
   saveCalendar(filePath, days = 365) {
     const calendar = this.generateCalendar(days);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(calendar, null, 2));
+    writeJSONAtomic(filePath, calendar);
     this.log('info', 'content', 'Calendar saved: ' + filePath + ' (' + calendar.youtube.length + ' YT, ' + calendar.facebook.length + ' FB, ' + calendar.twitter.length + ' TW)');
     return calendar;
   }

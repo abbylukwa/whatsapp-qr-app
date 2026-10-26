@@ -21,6 +21,7 @@
  * ══════════════════════════════════════════════════════════════ */
 
 const fs = require('fs');
+const { writeJSONAtomic } = require('./atomic');
 const path = require('path');
 
 class InteractionTracker {
@@ -264,13 +265,48 @@ class InteractionTracker {
     }
   }
 
+  /* ── v84.1: enforce the maxHistory cap (was stored but never applied →
+   * unbounded RAM + disk growth) and throttle saves (a full-dataset
+   * sync write on EVERY event is a major I/O bottleneck). */
+  _enforceCap() {
+    const entries = Object.entries(this.interactions);      // [platform, map]
+    const total = entries.reduce((n, [, map]) => n + Object.keys(map).length, 0);
+    if (total <= this.maxHistory) return;
+    // evict oldest posts across platforms until under cap
+    const flat = [];
+    for (const [platform, map] of entries) {
+      for (const [id, post] of Object.entries(map)) flat.push({ platform, id, createdAt: post.createdAt || 0 });
+    }
+    flat.sort((a, b) => a.createdAt - b.createdAt);
+    const evict = new Set(flat.slice(0, total - this.maxHistory).map(e => `${e.platform}|${e.id}`));
+    for (const [platform, map] of Object.entries(this.interactions)) {
+      for (const id of Object.keys(map)) {
+        if (evict.has(`${platform}|${id}`)) delete map[id];
+      }
+    }
+  }
+
   _save() {
     try {
+      // throttle: at most one flush per 30s unless flushed explicitly
+      const now = Date.now();
+      if (this._lastSave && now - this._lastSave < 30000) { this._dirty = true; return; }
+      this._lastSave = now;
+      this._dirty = false;
+      this._enforceCap();
       fs.mkdirSync(this.dataDir, { recursive: true });
       const file = path.join(this.dataDir, 'interactions.json');
-      fs.writeFileSync(file, JSON.stringify({ interactions: this.interactions, summary: this.summary }, null, 2));
+      writeJSONAtomic(file, { interactions: this.interactions, summary: this.summary });
     } catch (e) {
       this.log('warn', 'interactions', `Save failed: ${e.message}`);
+    }
+  }
+
+  /* v84.1: flush pending writes — call from a 60s interval or on close */
+  flush() {
+    if (this._dirty || !this._lastSave) {
+      this._lastSave = 0;          // bypass throttle
+      this._save();
     }
   }
 }

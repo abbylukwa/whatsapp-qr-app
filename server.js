@@ -7252,7 +7252,7 @@ function escHtml(s){ return String(s || '').replace(/[&<>"']/g, function(c){ ret
 app.get('/healthz', function(req, res){ res.json({ ok: true, uptime: Math.round(process.uptime()), ts: new Date().toISOString() }); });
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5.3</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5.4</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7273,7 +7273,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v84.5.3</h1>
+<h1>BreadBot v84.5.4</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -7385,6 +7385,15 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div style="margin-bottom:6px"><select id="cookPlat" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px"><option value="twitter">Twitter / X</option><option value="youtube">YouTube</option><option value="facebook">Facebook</option><option value="tiktok">TikTok</option></select> <button class="primary" onclick="savePlatformCookies()">💾 Save cookies</button> <button onclick="document.getElementById('cookBlob').value='';document.getElementById('cookOut').innerHTML='';">Clear</button></div>
 <textarea id="cookBlob" placeholder='Paste the cookie export here — JSON array like [{"name":"auth_token","value":"…","domain":".x.com"}] (EditThisCookie), or raw cookies.txt lines (domain⇥flag⇥path⇥secure⇥expiry⇥name⇥value), or a simple {"name":"value"} object' style="width:100%;height:110px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;font-size:10px"></textarea>
 <div id="cookOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
+<div style="border-top:1px solid #21262d;margin-top:8px;padding-top:8px">
+<b style="color:#a371f7">🔓 Option C — LIVE LOGIN WINDOW, right here (works on Render too)</b>
+<div style="font-size:10px;color:#8b949e;line-height:1.5;margin:4px 0 6px">Select a platform → <b>Open</b> → the REAL login page appears below, live. <b>Click on it</b>, type in the box, press Enter — the CAPTCHA is yours to solve like a human. The moment the login succeeds, cookies save automatically. Nothing to install.</div>
+<div style="margin-bottom:6px"><select id="livePlat" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px"><option value="twitter">Twitter / X</option><option value="youtube">YouTube</option><option value="facebook">Facebook</option><option value="tiktok">TikTok</option></select> <button class="primary" onclick="liveOpen()">🔓 Open live window</button> <button onclick="liveStop()">✖ Close</button> <span id="liveStatus" style="font-size:10px;color:#8b949e"></span></div>
+<div id="liveWrap" style="display:none">
+<img id="liveShot" alt="live login" onclick="liveClick(event)" style="width:100%;border:1px solid #30363d;border-radius:6px;cursor:crosshair;display:block">
+<div style="margin-top:4px;display:flex;gap:4px"><input id="liveText" placeholder="type here (username / password / search)… then Enter" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:monospace;font-size:11px" onkeydown="if(event.key==='Enter'){liveType();}"> <button onclick="liveType()">Send ⏎</button> <button onclick="liveKey('Tab')">⇥</button> <button onclick="liveKey('Backspace')">⌫</button></div>
+</div>
+</div>
 </div>
 <div class="card"><h2>📁 Media Cache — files you can actually open</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Every panel download (image/gif/video/music) and every generated audio/prompt lands here as <b>your own copy</b> — openable for 24h, instead of dying with the scraper's 1-hour temp links (the old "things not found" bug).</div>
@@ -7395,7 +7404,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="card"><h2>🎬 Blender Preview — see & hear the scene</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Type a topic → get a <b>VIEW preview</b> (deterministic mock layout of the exact scene), the <b>real .bpy Blender script</b> of that scene, and a <b>HEAR preview</b> (real Edge-TTS narration). The mock image is an approximate layout — the .bpy is what Blender actually renders.</div>
 <input id="bpTopic" placeholder="scene topic — e.g. water cycle for kids" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;margin-bottom:6px">
-<button class="primary" onclick="renderBlenderPreview()">🖼 View preview</button> <button onclick="hearBlenderPreview()">🔊 Hear preview</button>
+<button class="primary" onclick="renderBlenderPreview()">🖼 View preview</button> <button onclick="hearBlenderPreview()">🔊 Hear preview</button> <button onclick="renderBlenderMp4()">🎬 MP4 preview</button>
 <div id="bpOut" style="font-size:11px;line-height:1.7;margin-top:8px;color:#8b949e">pick a topic and press View preview…</div>
 </div>
 <div class="card"><h2>🎥 Film Last Mile — .bpy → .mp4 → share it</h2>
@@ -7945,6 +7954,19 @@ async function connectPlatform(name){var o=document.getElementById('platOut');o.
 function pickCookies(name){var s=document.getElementById('cookPlat');if(s)s.value=name;var b=document.getElementById('cookBlob');if(b){b.focus();if(b.scrollIntoView)b.scrollIntoView({behavior:'smooth',block:'center'});}}
 async function headfulPlatform(name){var o=document.getElementById('platOut');o.innerHTML='<span style="color:#a371f7">🔓 Opening a real Chrome window for '+esc(name)+'… log in INSIDE that window (CAPTCHA + 2FA included) — this waits up to 8 min, then saves the cookies automatically.</span>';try{var r=await api('platform-headful-login','POST',{platform:name});o.innerHTML=r.ok?'<span style="color:#3fb950">'+esc(r.result||'logged in via pop-out')+'</span>':'<span style="color:#f85149">❌ '+esc(r.error||'pop-out login did not complete')+'</span>';loadPlatformStatus();}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 async function savePlatformCookies(){var ps=document.getElementById('cookPlat'),b=document.getElementById('cookBlob'),o=document.getElementById('cookOut');if(!ps||!b||!o)return;var name=ps.value||'';if(!b.value.trim()){o.innerHTML='<span style="color:#f85149">Paste the cookie export first — see the 5 steps above.</span>';return;}o.innerHTML='<span style="color:#d29922">Saving '+esc(name)+' cookies…</span>';try{var r=await api('platform-cookies','POST',{platform:name,cookies:b.value});o.innerHTML=r.ok?'<span style="color:#3fb950">✅ '+esc(String(r.saved))+' cookies saved ('+esc(r.format||'')+')</span> — '+esc(r.next||'now press Connect'):'<span style="color:#f85149">❌ '+esc(r.error||'save failed')+'</span>';if(r.ok)loadPlatformStatus();}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+/* v84.5.4 — LIVE LOGIN WINDOW: the real page, streamed as screenshots.
+ * Click on the image = click in the page (coords scaled to the viewport).
+ * Type box sends keystrokes; proof cookies auto-save the moment login lands. */
+var livePlat=null,liveShotTimer=null,liveStatusTimer=null;
+async function liveOpen(){var ps=document.getElementById('livePlat');if(!ps)return;var name=ps.value;var st=document.getElementById('liveStatus');st.innerHTML='<span style="color:#d29922">Opening '+esc(name)+'…</span>';try{var r=await api('headful-start','POST',{platform:name});if(!r.ok){st.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}livePlat=name;var w=document.getElementById('liveWrap');w.style.display='block';var img=document.getElementById('liveShot');img.onload=null;clearInterval(liveShotTimer);clearInterval(liveStatusTimer);liveShotTimer=setInterval(liveShot,900);liveStatusTimer=setInterval(liveStatus,2000);liveShot();liveStatus();st.innerHTML='<span style="color:#a371f7">🔴 LIVE — '+esc(r.note||'log in inside the image below')+'</span>';}catch(e){st.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+function liveShot(){if(!livePlat)return;var img=document.getElementById('liveShot');img.src='/admin/headful-shot?platform='+encodeURIComponent(livePlat)+'&t='+Date.now();img.onerror=function(){};}
+async function liveStatus(){if(!livePlat)return;var st=document.getElementById('liveStatus');try{var r=await api('headful-status?platform='+encodeURIComponent(livePlat));if(r.loggedIn){liveCleanup();st.innerHTML='<span style="color:#3fb950">✅ LOGGED IN — '+esc(String(r.saved))+' cookies saved ('+esc(r.file||'')+'). Press 🔌 Connect to activate.</span>';loadPlatformStatus();return;}if(!r.running){liveCleanup();st.innerHTML='<span style="color:#f85149">'+esc(r.error||r.note||'window closed — nothing saved')+'</span>';return;}st.innerHTML='<span style="color:#a371f7">🔴 LIVE — waiting for you to log in ('+esc(String(r.elapsed||0))+'s / 600s) · '+esc(r.url||'')+'</span>';}catch(e){}}
+function liveCleanup(){clearInterval(liveShotTimer);clearInterval(liveStatusTimer);liveShotTimer=null;liveStatusTimer=null;}
+async function liveStop(){if(livePlat){try{await api('headful-stop','POST',{platform:livePlat});}catch(e){}}livePlat=null;liveCleanup();document.getElementById('liveWrap').style.display='none';document.getElementById('liveStatus').innerHTML='<span style="color:#8b949e">closed — nothing saved</span>';}
+async function liveClick(ev){if(!livePlat)return;var img=document.getElementById('liveShot');var rect=img.getBoundingClientRect();try{await api('headful-input','POST',{platform:livePlat,kind:'click',x:Math.round(ev.clientX-rect.left),y:Math.round(ev.clientY-rect.top),w:Math.round(rect.width),h:Math.round(rect.height)});}catch(e){}}
+async function liveType(){if(!livePlat)return;var inp=document.getElementById('liveText');var t=inp.value;if(t){try{await api('headful-input','POST',{platform:livePlat,kind:'type',text:t});await api('headful-input','POST',{platform:livePlat,kind:'key',key:'Enter'});}catch(e){}inp.value='';}}
+async function liveKey(k){if(!livePlat)return;try{await api('headful-input','POST',{platform:livePlat,kind:'key',key:k});}catch(e){}}
+async function renderBlenderMp4(){var t=$('bpTopic').value.trim()||'water cycle for kids';var o=$('bpOut');o.innerHTML='<span style="color:#d29922">🎬 Rendering MP4: scene → PNG → narrator audio → ffmpeg zoom… (up to a minute)</span>';try{var r=await api('blender/mp4','POST',{topic:t});if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}o.innerHTML='<span style="color:#3fb950">✅ MP4 ready</span> · '+esc(String(r.duration||''))+'s · '+esc(r.voice||'')+' · '+Math.round((r.bytes||0)/1024)+'KB<br><video src="'+esc(r.mp4Url)+'" controls preload="metadata" style="width:100%;margin-top:6px;border-radius:6px"></video><div style="color:#8b949e;margin-top:4px">Narration: '+esc(r.narration||'')+'</div>';}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 function setEroticStyle(style){eroticStyle=style;var names={flirty:'Flirty 😏',excited:'Excited 🔥',sensual:'Sensual 💜',bold:'Bold 🌶'};$('eroticActive').textContent=names[style]||style;try{fetch('/admin/erotic-style',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:style})});}catch(e){}}
 
 /* ═══ v82: Group Links Backup & Auto-Join ═══ */
@@ -8036,9 +8058,32 @@ app.post('/admin/generate-prompt', function(req, res) {
  * generated" — a lie with no file behind it. Now: Microsoft Edge
  * neural voices via msedge-tts (free, keyless), real mp3 in the
  * media cache, honest ok:false when TTS is unavailable. */
+/* v84.5.4: shared Edge-TTS core — one place for voice/format/prosody.
+ * Narration tone = en-US-AndrewNeural (deep natural male, sounds like a
+ * real documentary host, NOT a robot) + slightly slower rate + lower pitch. */
+async function ttsToMp3(text, voice, rate, pitch){
+  const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
+  const tts = new MsEdgeTTS();
+  await tts.setMetadata(voice || 'en-US-AndrewNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+  const opts = {};
+  if (rate) opts.rate = rate;
+  if (pitch) opts.pitch = pitch;
+  const r = tts.toStream(String(text), opts);
+  const stream = r.audioStream || r;
+  const chunks = [];
+  for await (const c of stream) chunks.push(c);
+  const buf = Buffer.concat(chunks);
+  if (!buf.length) throw new Error('empty audio stream from Edge TTS');
+  return buf;
+}
+
 app.post('/admin/generate-audio', async function(req, res) {
   var topic = (req.body && req.body.topic) || 'demo';
-  var voice = (req.body && req.body.voice) || 'en-US-AriaNeural';
+  var explicit = !!(req.body && req.body.voice);
+  /* v84.5.4: default voice is now a NARRATOR (Andrew) with a calm slower
+   * prosody — callers that pass an explicit voice keep full control. */
+  var voice = explicit ? req.body.voice : 'en-US-AndrewNeural';
+  var prosody = explicit ? {} : { rate: '-6%', pitch: '-2Hz' };
   /* v84.3: callers may pass a full script (Blender preview narration,
    * lesson text, …). Without one, the deterministic explainer template
    * is used as before. */
@@ -8046,23 +8091,13 @@ app.post('/admin/generate-audio', async function(req, res) {
   if (script){
     /* caller-provided narration used verbatim */
   } else {
-  script = 'In this video, we explore ' + topic + '. ';
-  script += 'Let us start by understanding the basics. ';
-  script += topic + ' is a fascinating subject that involves multiple concepts working together. ';
-  script += 'First, we examine the key components. ';
-  script += 'Then, we see how they interact in real-world scenarios. ';
-  script += 'Finally, we draw our conclusions and summarize what we have learned.';
+  script = 'Today we explore ' + topic + ' — step by step, so it all makes sense. ';
+  script += 'First, the big picture: what it is, and why it matters. ';
+  script += 'Then we zoom in on the key pieces, one at a time, and see how each one plays its part. ';
+  script += 'Finally, we put it all together and watch the whole thing come alive.';
   }
   try {
-    const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
-    const tts = new MsEdgeTTS();
-    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-    const r = await tts.toStream(script);
-    const stream = r.audioStream || r;
-    const chunks = [];
-    for await (const c of stream) chunks.push(c);
-    const buf = Buffer.concat(chunks);
-    if (!buf.length) throw new Error('empty audio stream from Edge TTS');
+    const buf = await ttsToMp3(script, voice, prosody.rate, prosody.pitch);
     const audio = saveLocalMedia(buf, 'audio', '.mp3', topic);
     const scriptTxt = saveLocalMedia(Buffer.from(script, 'utf8'), 'script', '.txt', topic);
     /* 48 kbps mono mp3 ≈ 6000 bytes/second — estimate, labeled as such */
@@ -8079,6 +8114,186 @@ app.post('/admin/generate-audio', async function(req, res) {
     res.json({ ok: false, script: script, voice: voice,
       error: 'Edge-TTS ' + (missing ? 'module not installed — run: npm install msedge-tts' : 'failed: ' + e.message) });
   }
+});
+
+/* v84.5.4 — REAL MP4 PREVIEW: scene SVG → PNG (sharp) → narrator audio
+ * (Edge-TTS Andrew) → ffmpeg slow cinematic zoom → H.264+AAC MP4. This is
+ * the answer to "the thing is not mp4" — a watchable video file, served
+ * from the media cache, playable right in the panel. */
+app.post('/admin/blender/mp4', async function(req, res){
+  const fsx = require('fs'), osx = require('os');
+  let tmp = null;
+  try {
+    const topic = String((req.body && req.body.topic) || '').trim().slice(0, 120) || 'untitled scene';
+    const spec = buildSceneSpec(topic);
+    const narration = sceneNarration(spec);
+
+    /* 1. scene → PNG (sharp rasterizes the SVG at print quality) */
+    const sharp = require('sharp');
+    const svgBuf = Buffer.from(renderSceneSvg(spec), 'utf8');
+    const png = await sharp(svgBuf, { density: 160 }).resize(1280, 720).png().toBuffer();
+
+    /* 2. narrator audio — same voice the HEAR preview uses */
+    const audioBuf = await ttsToMp3(narration, 'en-US-AndrewNeural', '-6%', '-2Hz');
+
+    /* 3. measure real audio duration (ffprobe; fall back to bitrate estimate) */
+    tmp = path.join(osx.tmpdir(), 'bb_mp4_' + Date.now());
+    fsx.writeFileSync(tmp + '.png', png);
+    fsx.writeFileSync(tmp + '.mp3', audioBuf);
+    let dur = audioBuf.length / 6000;
+    try {
+      const { execSync } = require('child_process');
+      const outp = execSync('ffprobe -v error -show_entries format=duration -of csv=p=0 "' + tmp + '.mp3"', { encoding: 'utf8', timeout: 15000 });
+      const d = parseFloat(String(outp).trim());
+      if (isFinite(d) && d > 0.5) dur = d;
+    } catch (e) { /* keep the estimate */ }
+    const frames = Math.max(60, Math.min(1500, Math.ceil(dur * 25)));
+
+    /* 4. ffmpeg: slow Ken-Burns push-in over the scene + narration → MP4 */
+    const { execSync } = require('child_process');
+    const vf = "scale=2560:1440,zoompan=z='min(1+0.0009*on,1.28)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=" + frames + ":s=1280x720:fps=25,format=yuv420p";
+    execSync('ffmpeg -y -i "' + tmp + '.png" -i "' + tmp + '.mp3" -filter_complex "[0:v]' + vf + '[v]" -map "[v]" -map 1:a -c:v libx264 -preset veryfast -tune stillimage -c:a aac -b:a 128k -shortest -movflags +faststart "' + tmp + '.mp4"', { stdio: 'ignore', timeout: 180000 });
+    const mp4 = fsx.readFileSync(tmp + '.mp4');
+    if (!mp4.length || mp4.length < 10000) throw new Error('ffmpeg produced an empty/invalid mp4');
+    const saved = saveLocalMedia(mp4, 'blender', '.mp4', topic);
+    try { fsx.unlinkSync(tmp + '.png'); fsx.unlinkSync(tmp + '.mp3'); fsx.unlinkSync(tmp + '.mp4'); } catch (e) {}
+    tmp = null;
+    pushLog('info', 'multi-platform', 'MP4 preview rendered: ' + topic + ' — ' + Math.round(mp4.length / 1024) + 'KB, ' + Math.round(dur) + 's, narrator audio');
+    res.json({ ok: true, topic, mp4Url: mediaFileUrl(req, saved.file), bytes: mp4.length,
+      duration: Math.round(dur), voice: 'en-US-AndrewNeural', narration,
+      note: 'real MP4 (H.264 + AAC) — slow cinematic zoom over the scene with narrator audio' });
+  } catch (e) {
+    if (tmp) { try { fsx.unlinkSync(tmp + '.png'); fsx.unlinkSync(tmp + '.mp3'); fsx.unlinkSync(tmp + '.mp4'); } catch (e2) {} }
+    const hint = /Cannot find module.*sharp/.test(String(e.message)) ? ' — run: npm install sharp' : (/ffmpeg|ffprobe/.test(String(e.message)) ? ' — ffmpeg/ffprobe not found on this host (Render: add ffmpeg to the Aptfile)' : '');
+    res.json({ ok: false, error: 'MP4 render failed: ' + e.message + hint });
+  }
+});
+
+/* v84.5.4 — LIVE LOGIN WINDOW: the REAL platform login page, streamed into
+ * the panel as live screenshots. The owner CLICKS and TYPES right there
+ * (CAPTCHA included — human solves it), and the moment a proof session
+ * cookie appears all cookies are saved to data/<p>/cookies.json.
+ * Works on ANY host — no screen needed on the server: Chrome runs headless
+ * stealth, the "window" lives in the owner's browser. */
+const HEADFUL_VIEW = { width: 1280, height: 800 };
+const headfulSessions = {};
+const HEADFUL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+async function headfulClose(name){
+  const s = headfulSessions[name];
+  delete headfulSessions[name];
+  if (s && s.browser) { try { await s.browser.close(); } catch (e) {} }
+}
+function headfulSaveCookies(name, cookies){
+  const file = path.resolve(__dirname, 'data', name, 'cookies.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.tmp', JSON.stringify(cookies));
+  fs.renameSync(file + '.tmp', file);
+  return cookies.length;
+}
+app.post('/admin/headful-start', async function(req, res){
+  const name = String((req.body && req.body.platform) || '').trim().toLowerCase();
+  if (!PLATFORM_META[name]) return res.status(400).json({ ok: false, error: 'unknown platform — use one of: ' + Object.keys(PLATFORM_META).join(', ') });
+  try {
+    if (headfulSessions[name]) {
+      if (Date.now() - headfulSessions[name].startedAt < 10 * 60 * 1000) {
+        const { HEADFUL_FLOWS } = require('./core/headful-login');
+        return res.json({ ok: true, reused: true, platform: name, note: HEADFUL_FLOWS[name].hint });
+      }
+      await headfulClose(name);
+    }
+    const { launchStealthBrowser } = require('./core/anti-detection');
+    const { HEADFUL_FLOWS } = require('./core/headful-login');
+    const cfg = HEADFUL_FLOWS[name];
+    const { browser } = await launchStealthBrowser({
+      headless: true,
+      agent: { name: 'remote-console', ua: HEADFUL_UA, viewport: HEADFUL_VIEW },
+      proxy: process.env[name.toUpperCase() + '_PROXY'] || process.env.PROXY_URL || null
+    });
+    const page = await browser.newPage();
+    await page.setViewport(HEADFUL_VIEW);
+    page.on('dialog', d => d.dismiss().catch(() => {}));
+    await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => {
+      pushLog('warn', 'multi-platform', name + ' live window: page still loading (' + e.message.split('\n')[0] + ') — continue');
+    });
+    headfulSessions[name] = { browser, page, startedAt: Date.now() };
+    pushLog('info', 'multi-platform', name + ': LIVE LOGIN WINDOW opened in the panel — owner clicks/types inside it; cookies save automatically on login');
+    res.json({ ok: true, platform: name, note: cfg.hint });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'could not open the live window: ' + e.message });
+  }
+});
+app.get('/admin/headful-shot', async function(req, res){
+  const name = String(req.query.platform || '').trim().toLowerCase();
+  const s = headfulSessions[name];
+  if (!s) return res.status(404).json({ ok: false, dead: true, error: 'no live window for ' + name });
+  try {
+    const shot = await s.page.screenshot({ type: 'jpeg', quality: 55 });
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'no-store');
+    return res.send(shot);
+  } catch (e) {
+    await headfulClose(name).catch(() => {});
+    return res.status(404).json({ ok: false, dead: true, error: 'window died: ' + e.message });
+  }
+});
+app.post('/admin/headful-input', async function(req, res){
+  const name = String((req.body && req.body.platform) || '').trim().toLowerCase();
+  const s = headfulSessions[name];
+  if (!s) return res.status(404).json({ ok: false, error: 'no live window for ' + name + ' — press Open first' });
+  const b = req.body || {};
+  try {
+    if (b.kind === 'click') {
+      const w = Math.max(1, Number(b.w) || HEADFUL_VIEW.width);
+      const h = Math.max(1, Number(b.h) || HEADFUL_VIEW.height);
+      const vx = (Number(b.x) || 0) * (HEADFUL_VIEW.width / w);
+      const vy = (Number(b.y) || 0) * (HEADFUL_VIEW.height / h);
+      await s.page.mouse.click(vx, vy);
+    } else if (b.kind === 'type') {
+      await s.page.keyboard.type(String(b.text || '').slice(0, 200), { delay: 25 });
+    } else if (b.kind === 'key') {
+      const ALLOWED = ['Enter', 'Tab', 'Backspace', 'Escape', 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'];
+      const k = String(b.key || '');
+      if (!ALLOWED.includes(k)) return res.status(400).json({ ok: false, error: 'key not allowed: ' + k });
+      await s.page.keyboard.press(k);
+    } else if (b.kind === 'scroll') {
+      await s.page.mouse.wheel(0, Math.max(-800, Math.min(800, Number(b.dy) || 0)));
+    } else return res.status(400).json({ ok: false, error: 'kind must be click|type|key|scroll' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'input failed: ' + e.message });
+  }
+});
+app.get('/admin/headful-status', async function(req, res){
+  const name = String(req.query.platform || '').trim().toLowerCase();
+  const s = headfulSessions[name];
+  if (!s) return res.json({ ok: true, running: false });
+  try {
+    const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+    if (elapsed > 600) {
+      await headfulClose(name);
+      return res.json({ ok: true, running: false, expired: true, note: 'live window auto-closed after 10 min (nothing saved)' });
+    }
+    const { HEADFUL_FLOWS } = require('./core/headful-login');
+    const cfg = HEADFUL_FLOWS[name];
+    const cookies = await s.page.cookies();
+    const proof = cookies.find(c => cfg.proofCookies.includes(c.name));
+    if (proof) {
+      const n = headfulSaveCookies(name, cookies);
+      await headfulClose(name);
+      pushLog('info', 'multi-platform', name + ': LIVE LOGIN — session cookie ' + proof.name + ' seen, ' + n + ' cookies saved → data/' + name + '/cookies.json');
+      return res.json({ ok: true, running: false, loggedIn: true, saved: n, file: 'data/' + name + '/cookies.json' });
+    }
+    let url = ''; try { url = s.page.url(); } catch (e) {}
+    return res.json({ ok: true, running: true, loggedIn: false, elapsed, url });
+  } catch (e) {
+    await headfulClose(name).catch(() => {});
+    return res.json({ ok: true, running: false, error: 'window died: ' + e.message });
+  }
+});
+app.post('/admin/headful-stop', function(req, res){
+  const name = String((req.body && req.body.platform) || '').trim().toLowerCase();
+  headfulClose(name);
+  res.json({ ok: true, platform: name, note: 'live window closed (nothing saved)' });
 });
 
 /* Erotic Style */
@@ -9157,24 +9372,43 @@ function buildSceneSpec(topic){
   const rnd = bbMulberry32(bbHashStr(topic));
   const prims = ['sphere','cube','cylinder','cone','torus'];
   const roles = ['hero','support','detail','context','accent'];
-  const count = 4 + Math.floor(rnd() * 3);   /* 4-6 objects */
+  /* v84.5.4: 6-9 objects composed in THREE depth bands (foreground big &
+   * close, midground, background small & far) instead of a flat scatter —
+   * real depth, a clear hero, and a readable frame. */
+  const count = 6 + Math.floor(rnd() * 4);
+  const bands = [
+    { zMin:-1.15, zMax:-0.55, rMin:0.85, rMax:1.35 },   /* foreground */
+    { zMin:-0.25, zMax: 0.55, rMin:0.45, rMax:0.80 },   /* midground */
+    { zMin: 0.80, zMax: 1.35, rMin:0.25, rMax:0.48 }    /* background */
+  ];
   const objects = [];
   for (let i = 0; i < count; i++){
-    const prim = prims[Math.floor(rnd() * prims.length)];
-    const r = 0.35 + rnd() * 0.75;
-    const lx = -2.6 + (4.2 * (i + rnd() * 0.6) / count);
-    const lz = -1.2 + rnd() * 2.0;
+    const prim = (i === 0 ? 'sphere' : prims[Math.floor(rnd() * prims.length)]);
+    const band = (i === 0 ? bands[1] : bands[(i < 3 ? 0 : (i < count - 2 ? 1 : 2))]);
+    const r = band.rMin + rnd() * (band.rMax - band.rMin);
+    const lx = -3.4 + (6.8 * (i + rnd() * 0.7) / count) + (rnd() - 0.5) * 0.6;
+    const lz = band.zMin + rnd() * (band.zMax - band.zMin);
     const safe = String(prim).replace(/[^a-z0-9_]/gi, '');
     objects.push({ name: (i === 0 ? 'hero_' : 'prop' + (i + 1) + '_') + safe,
       prim: safe, radius: Math.round(r * 100) / 100,
-      x: Math.round(lx * 100) / 100, y: r, z: Math.round(lz * 100) / 100,
-      color: theme.palette[i % theme.palette.length], role: roles[Math.min(i, roles.length - 1)] });
+      x: Math.round(lx * 100) / 100, y: Math.round(r * 100) / 100, z: Math.round(lz * 100) / 100,
+      color: hexShade(theme.palette[i % theme.palette.length], 0.85 + rnd() * 0.3),
+      role: (i === 0 ? 'hero' : (i % 4 === 3 ? 'accent' : roles[Math.min(i, roles.length - 1)])) });
   }
   return { topic, theme, objects,
-    lights: { key:{ type:'SUN', energy:4.5, rot:[50, 12, 28], temp:'5600K daylight' },
+    lights: { key:{ type:'SUN', energy:5.0, rot:[50, 12, 28], temp:'5600K daylight' },
               fill:{ type:'AREA', energy:180, size:3, rot:[-35, -20, 0] },
               rim:{ type:'AREA', energy:120, size:2, rot:[20, 160, 0] } },
-    camera: { pos:[0, 1.7, 6.4], lens: 50, focusDistance: 6.4, fstop: 2.2 } };
+    camera: { pos:[0, 7.2, 2.8], lens: 45, focusDistance: 7.2, fstop: 2.4, aimZ: 0.75 } };
+}
+function hexShade(hex, f){
+  /* v84.5.4: factor-based hex shading — keeps o.color a valid HEX for both
+   * the SVG preview AND the .bpy hexcol() (the old palette jitters broke one
+   * or the other). */
+  const n = parseInt(String(hex).slice(1), 16);
+  const cl = function(v){ return Math.max(0, Math.min(255, Math.round(v))); };
+  const r = cl(((n >> 16) & 255) * f), g = cl(((n >> 8) & 255) * f), b = cl((n & 255) * f);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 function svgShade(hex, amt){
   const n = parseInt(String(hex).slice(1), 16);
@@ -9219,21 +9453,46 @@ function renderSceneSvg(spec){
   const sorted = spec.objects.slice().sort(function(a, b){ return b.z - a.z; });
   let s = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">';
   s += '<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + th.sky[0] + '"/><stop offset="1" stop-color="' + th.sky[1] + '"/></linearGradient>';
-  s += '<radialGradient id="sun" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#fff8e0" stop-opacity="0.95"/><stop offset="1" stop-color="#fff8e0" stop-opacity="0"/></radialGradient></defs>';
+  s += '<radialGradient id="sun" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#fff8e0" stop-opacity="0.95"/><stop offset="1" stop-color="#fff8e0" stop-opacity="0"/></radialGradient>';
+  s += '<radialGradient id="vig" cx="0.5" cy="0.45" r="0.75"><stop offset="0.62" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.3"/></radialGradient>';
+  s += '<linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient></defs>';
   s += '<rect width="800" height="450" fill="url(#sky)"/>';
+  /* v84.5.4: theme atmosphere — stars for space, puffy clouds otherwise */
+  if (th.name === 'space'){
+    const srnd = bbMulberry32(bbHashStr(spec.topic + ':stars'));
+    for (let i = 0; i < 26; i++){
+      s += '<circle cx="' + Math.round(srnd() * 800) + '" cy="' + Math.round(srnd() * 300) + '" r="' + (srnd() < 0.85 ? 1 : 2) + '" fill="#ffffff" opacity="' + (0.35 + srnd() * 0.6).toFixed(2) + '"/>';
+    }
+  } else {
+    const crnd = bbMulberry32(bbHashStr(spec.topic + ':clouds'));
+    for (let i = 0; i < 3; i++){
+      const cx = Math.round(90 + crnd() * 620), cy = Math.round(48 + crnd() * 110), cw = Math.round(60 + crnd() * 70);
+      s += '<g opacity="0.5"><ellipse cx="' + cx + '" cy="' + cy + '" rx="' + cw + '" ry="' + Math.round(cw * 0.28) + '" fill="#ffffff"/>';
+      s += '<ellipse cx="' + Math.round(cx - cw * 0.4) + '" cy="' + (cy + 7) + '" rx="' + Math.round(cw * 0.55) + '" ry="' + Math.round(cw * 0.2) + '" fill="#ffffff"/></g>';
+    }
+  }
   s += '<circle cx="620" cy="96" r="150" fill="url(#sun)"/>';
   s += '<rect y="330" width="800" height="120" fill="' + svgShade(th.ground, -0.18) + '"/>';
   s += '<ellipse cx="400" cy="345" rx="480" ry="42" fill="' + th.ground + '"/>';
+  s += '<rect y="326" width="800" height="18" fill="url(#glow)"/>';
+  /* v84.5.4: soft reflection streaks under every object */
+  for (let i = 0; i < sorted.length; i++){
+    const o = sorted[i];
+    const sx = Math.round(400 + o.x * 58), sy = Math.round(GY + 14 + o.z * 16);
+    const rr = Math.max(10, Math.round(o.radius * 54 * (1 - o.z * 0.05)));
+    s += '<ellipse cx="' + sx + '" cy="' + (sy + Math.round(rr * 0.6)) + '" rx="' + Math.round(rr * 0.9) + '" ry="' + Math.max(3, Math.round(rr * 0.2)) + '" fill="' + o.color + '" opacity="0.18"/>';
+  }
   for (let i = 0; i < sorted.length; i++) s += svgDrawPrim(sorted[i], GY);
+  s += '<rect width="800" height="450" fill="url(#vig)"/>';
   s += '<rect x="14" y="396" width="772" height="40" rx="6" fill="#000000" opacity="0.55"/>';
-  s += '<text x="26" y="413" font-family="monospace" font-size="13" fill="#cfe3ff">' + svgEsc(spec.topic) + ' — ' + sorted.length + ' objects · SUN key + AREA fill/rim · 50mm</text>';
+  s += '<text x="26" y="413" font-family="monospace" font-size="13" fill="#cfe3ff">' + svgEsc(spec.topic) + ' — ' + sorted.length + ' objects · depth-composed · SUN key + AREA fill/rim · 45mm</text>';
   s += '<text x="26" y="430" font-family="monospace" font-size="10" fill="#9fb3d1">MOCK VIEW PREVIEW — approximate layout, not a Blender render. Open the .bpy for the real scene.</text>';
   s += '</svg>';
   return s;
 }
 function buildBpyScript(spec){
   const th = spec.theme, L = [];
-  L.push('# ' + spec.topic + ' — BreadBot v84.3 scene preview script');
+  L.push('# ' + spec.topic + ' — BreadBot v84.5.4 scene preview script');
   L.push('# Deterministic: the same topic always regenerates this exact scene.');
   L.push('# Run inside Blender:   blender --background --python THIS_FILE.py');
   L.push('# It renders preview.png (1920x1080) next to the script.');
@@ -9248,22 +9507,32 @@ function buildBpyScript(spec){
   L.push('def hexcol(h):');
   L.push('    return tuple(pow(int(h[i:i+2], 16) / 255.0, 2.2) for i in (1, 3, 5)) + (1.0,)');
   L.push('');
-  L.push('def material(name, hexstr):');
+  L.push('def material(name, hexstr, rough=0.4, metal=0.0):');
   L.push('    m = bpy.data.materials.new(name)');
   L.push('    m.use_nodes = True');
-  L.push('    m.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = hexcol(hexstr)');
+  L.push('    bsdf = m.node_tree.nodes["Principled BSDF"]');
+  L.push('    bsdf.inputs["Base Color"].default_value = hexcol(hexstr)');
+  L.push('    bsdf.inputs["Roughness"].default_value = rough');
+  L.push('    try: bsdf.inputs["Metallic"].default_value = metal');
+  L.push('    except Exception: pass');
   L.push('    return m');
   L.push('');
-  L.push('# ground plane (theme: ' + th.name + ')');
+  L.push('# ground plane (theme: ' + th.name + ')' + (th.name === 'water' ? ' — low roughness for wet reflections' : ''));
   L.push('bpy.ops.mesh.primitive_plane_add(size=40, location=(0, 0, 0))');
   L.push('ground = bpy.context.object');
-  L.push('ground.data.materials.append(material("ground", "' + th.ground + '"))');
+  L.push('ground.data.materials.append(material("ground", "' + th.ground + '", rough=' + (th.name === 'water' ? '0.12' : '0.65') + '))');
+  if (th.name === 'water'){
+    L.push('try: scn.eevee.use_ssr = True');
+    L.push('except Exception: pass');
+  }
   L.push('');
-  L.push('# objects (Blender is Z-up; spec y = up axis)');
+  L.push('# objects — depth-composed (foreground big & close, background small & far)');
   for (const o of spec.objects){
     const vname = 'm_' + o.name.replace(/[^a-z0-9_]/gi, '');
     const loc = '(' + o.x + ', ' + o.z + ', ' + o.y + ')';
-    L.push(vname + ' = material("' + o.name + '", "' + o.color + '")');
+    const rough = (o.role === 'hero' ? 0.25 : (o.role === 'accent' ? 0.3 : 0.4));
+    const metal = (o.role === 'accent' ? 0.75 : 0.0);
+    L.push(vname + ' = material("' + o.name + '", "' + o.color + '", rough=' + rough + ', metal=' + metal + ')');
     if (o.prim === 'sphere')        L.push('bpy.ops.mesh.primitive_uv_sphere_add(radius=' + o.radius + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
     else if (o.prim === 'cube')     L.push('bpy.ops.mesh.primitive_cube_add(size=' + (Math.round(o.radius * 1.8 * 100) / 100) + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
     else if (o.prim === 'cylinder') L.push('bpy.ops.mesh.primitive_cylinder_add(radius=' + (Math.round(o.radius * 0.8 * 100) / 100) + ', depth=' + (Math.round(o.radius * 2.1 * 100) / 100) + ', location=' + loc + '); bpy.context.object.data.materials.append(' + vname + ')');
@@ -9278,19 +9547,36 @@ function buildBpyScript(spec){
   L.push('    lo = bpy.data.objects.new(name, ld); scn.collection.objects.link(lo)');
   L.push('    lo.location = loc; lo.rotation_euler = [math.radians(a) for a in rot]');
   L.push('    return lo');
-  L.push('light("key_sun", "SUN", 4.5, (4, -6, 9), (50, 12, 28))');
+  L.push('light("key_sun", "SUN", 5.0, (4, -6, 9), (50, 12, 28))');
   L.push('light("fill_area", "AREA", 180, (-5, -3, 4), (-35, -20, 0), size=3)');
   L.push('light("rim_area", "AREA", 120, (2, 6, 5), (20, 160, 0), size=2)');
   L.push('');
-  L.push('# world + camera');
+  L.push('# world: vertical sky gradient (falls back to flat color on old Blender)');
   L.push('world = bpy.data.worlds.new("World"); scn.world = world; world.use_nodes = True');
-  L.push('world.node_tree.nodes["Background"].inputs[0].default_value = hexcol("' + th.sky[1] + '")');
-  L.push('world.node_tree.nodes["Background"].inputs[1].default_value = 0.6');
+  L.push('try:');
+  L.push('    nt = world.node_tree; nt.nodes.clear()');
+  L.push('    tex = nt.nodes.new("ShaderNodeTexCoord"); sep = nt.nodes.new("ShaderNodeSeparateXYZ")');
+  L.push('    mr = nt.nodes.new("ShaderNodeMapRange"); mr.inputs["From Min"].default_value = -0.25');
+  L.push('    mr.inputs["From Max"].default_value = 0.6');
+  L.push('    ramp = nt.nodes.new("ShaderNodeValToRGB")');
+  L.push('    ramp.color_ramp.elements[0].color = hexcol("' + th.sky[1] + '")');
+  L.push('    ramp.color_ramp.elements[1].color = hexcol("' + th.sky[0] + '")');
+  L.push('    bg = nt.nodes.new("ShaderNodeBackground"); bg.inputs["Strength"].default_value = 1.0');
+  L.push('    out = nt.nodes.new("ShaderNodeOutputWorld")');
+  L.push('    nt.links.new(tex.outputs["Generated"], sep.inputs["Vector"])');
+  L.push('    nt.links.new(sep.outputs["Z"], mr.inputs["Value"])');
+  L.push('    nt.links.new(mr.outputs["Result"], ramp.inputs["Fac"])');
+  L.push('    nt.links.new(ramp.outputs["Color"], bg.inputs["Color"])');
+  L.push('    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])');
+  L.push('except Exception:');
+  L.push('    world.node_tree.nodes["Background"].inputs[0].default_value = hexcol("' + th.sky[1] + '")');
+  L.push('');
+  L.push('# camera: elevated 3/4 view with depth of field');
   L.push('cam_data = bpy.data.cameras.new("Camera")');
   L.push('cam = bpy.data.objects.new("Camera", cam_data); scn.collection.objects.link(cam)');
-  L.push('cam.location = (0, 6.4, 1.7); scn.camera = cam; cam_data.lens = 50');
-  L.push('cam_data.dof.use_dof = True; cam_data.dof.focus_distance = 6.4; cam_data.dof.aperture_fstop = 2.2');
-  L.push('bpy.ops.object.empty_add(location=(0, 0, 0.8)); aim = bpy.context.object');
+  L.push('cam.location = (0, 7.2, 2.8); scn.camera = cam; cam_data.lens = 45');
+  L.push('cam_data.dof.use_dof = True; cam_data.dof.focus_distance = 7.2; cam_data.dof.aperture_fstop = 2.4');
+  L.push('bpy.ops.object.empty_add(location=(0, 0, 0.75)); aim = bpy.context.object');
   L.push('con = cam.constraints.new(type="TRACK_TO"); con.target = aim');
   L.push('');
   L.push('scn.render.filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview")');
@@ -9299,13 +9585,25 @@ function buildBpyScript(spec){
   return L.join('\n') + '\n';
 }
 function sceneNarration(spec){
-  const objs = spec.objects, hero = objs[0];
-  const rest = objs.slice(1, 4).map(function(o){ return o.prim; }).join(', ');
-  return 'Here is a preview of our scene: ' + spec.topic + '. ' +
-    'The hero of the frame is a ' + hero.prim + ', about ' + (hero.radius * 2).toFixed(1) + ' meters across, resting on the ground plane. ' +
-    (objs.length > 1 ? 'Around it, the scene contains ' + (objs.length - 1) + ' supporting objects, including a ' + rest + '. ' : '') +
-    'Lighting uses a key sun at five thousand six hundred kelvin, with a soft area fill and a rim light for separation. ' +
-    'The camera frames the scene at fifty millimeters, ready for the full Blender render.';
+  /* v84.5.4: NARRATOR voice, not a spec sheet. The old text read render
+   * settings out loud ("key sun at five thousand six hundred kelvin") —
+   * that is why it sounded robotic. Now it talks about the TOPIC like an
+   * education video host. Deterministic per topic. */
+  const hero = spec.objects[0];
+  const shapes = spec.objects.slice(1).map(function(o){ return o.prim; });
+  const uniq = shapes.filter(function(p, i){ return shapes.indexOf(p) === i; });
+  const intros = [
+    'Welcome back, explorers! Today we are diving into ' + spec.topic + '.',
+    'Have you ever wondered how ' + spec.topic + ' really works? Let us find out, together.',
+    'Today we take a close look at ' + spec.topic + ' — one step at a time, so it all makes sense.'
+  ];
+  const pick = bbHashStr(spec.topic) % intros.length;
+  return intros[pick] + ' ' +
+    'This scene is our story in miniature. Right in the center, one big ' + hero.prim + ' takes the stage — the main character of today\'s episode. ' +
+    (uniq.length ? 'All around it, ' + uniq.join(', ') + ' shapes play the supporting cast, and each one is a different piece of the process. ' : '') +
+    'Warm sunlight pours in from one side, while a soft glow lifts the shadows, so every detail stays easy to follow. ' +
+    'As we move closer, watch how the pieces connect — because that connection is the heart of ' + spec.topic + '. ' +
+    'In the full render, everything comes alive. Let\'s begin!';
 }
 app.post('/admin/blender/preview', function(req, res){
   try {

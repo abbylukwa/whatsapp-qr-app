@@ -15,3 +15,5 @@ libatk1.0-0
 libgtk-3-0
 libgbm1
 libxshmfence1
+# v84.5.4 — MP4 preview rendering (blender/mp4 endpoint: still → H.264 + AAC)
+ffmpeg

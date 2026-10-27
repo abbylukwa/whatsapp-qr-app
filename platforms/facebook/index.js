@@ -338,7 +338,10 @@ class FacebookBot {
     try {
       const { browser, agent } = await launchStealthBrowser({
         headless: true,
-        agent: undefined // random agent
+        agent: undefined, // random agent
+        /* v84.5.2: optional residential/mobile proxy — defeats datacenter-IP
+         * checkpoint walls. Set FACEBOOK_PROXY or PROXY_URL in env. */
+        proxy: process.env.FACEBOOK_PROXY || process.env.PROXY_URL || null
       });
       this.browser = browser;
       this.page = await browser.newPage();
@@ -393,13 +396,22 @@ class FacebookBot {
 
   /* ── Login ─────────────────────────────────────────────────── */
   async login() {
-    if (!this.page) await this.init();
+    /* v84.5.1: guard BOTH browser and a LIVE page (the old !this.page check
+     * still crashed when the page object existed but its tab was closed) */
+    if (!this.browser || !this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
+      if (this.browser) { try { await this.browser.close(); } catch (e) {} this.browser = null; this.page = null; }
+      await this.init();
+    }
 
     try {
       this.log('info', 'facebook', 'Logging in...');
 
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2', timeout: 30000 });
-      await humanDelay(2000, 4000);
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2', timeout: 45000 }).catch(async (navErr) => {
+        /* v84.5.1: slow hosts fail networkidle2 — one patient retry */
+        this.log('warn', 'facebook', 'Nav slow/retry: ' + navErr.message.split('\n')[0]);
+        await this.page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      });
+      await humanDelay(3000, 5000);
 
       // Check if already logged in (cookies may have worked)
       try {
@@ -423,11 +435,19 @@ class FacebookBot {
         return { success: false, error: 'CAPTCHA detected' };
       }
 
+      /* v84.5.1: patient field waits — FB serves the login form slowly on
+       * datacenter hosts. Honest error names the landed URL instead of a
+       * raw selector dump. */
+      const emailField = await this.page.waitForSelector('#email', { timeout: 25000 }).catch(() => null);
+      if (!emailField) {
+        return { success: false, error: 'Facebook never showed the login form in 25s (landed on: ' + this.page.url() + ') — usually a checkpoint/anti-bot wall from this IP; retry Connect' };
+      }
       // Type email with human-like behavior
       await humanType(this.page, '#email', this.email, { wpm: 50 + Math.random() * 30 });
       await humanDelay(500, 1500);
 
       // Type password
+      await this.page.waitForSelector('#pass', { timeout: 15000 }).catch(() => {});
       await humanType(this.page, '#pass', this.password, { wpm: 55 + Math.random() * 25 });
       await humanDelay(800, 2000);
 
@@ -441,7 +461,7 @@ class FacebookBot {
         this.log('error', 'facebook', 'Login failed - still on login page or checkpoint');
         this.health.errorCount++;
         this.health.lastError = 'Login failed - check credentials or 2FA';
-        return { success: false, error: 'Login failed - check credentials or 2FA' };
+        return { success: false, error: 'Facebook stopped the login (landed on: ' + currentUrl + ') — wrong credentials, 2FA, or a checkpoint; check your FB_EMAIL/FB_PASSWORD and any login alerts' };
       }
 
       this.loggedIn = true;

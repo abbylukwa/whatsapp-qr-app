@@ -290,7 +290,12 @@ class YouTubeBot {
   /* ── Initialize browser with cookie persistence ────────────── */
   async init() {
     try {
-      const { browser, agent } = await launchStealthBrowser({ headless: true });
+      /* v84.5.2: optional residential/mobile proxy — defeats Google's
+       * datacenter-IP anti-bot wall. Set YOUTUBE_PROXY or PROXY_URL in env. */
+      const { browser, agent } = await launchStealthBrowser({
+        headless: true,
+        proxy: process.env.YOUTUBE_PROXY || process.env.PROXY_URL || null
+      });
       this.browser = browser;
       this.page = await browser.newPage();
       this.health.startedAt = Date.now();
@@ -336,12 +341,22 @@ class YouTubeBot {
 
   /* ── Login via browser ─────────────────────────────────────── */
   async login() {
-    if (!this.browser) await this.init();
+    /* v84.5.1: guard BOTH browser and a LIVE page — the old !this.browser
+     * check skipped init when the browser existed but this.page didn't,
+     * which is exactly the "undefined (reading 'goto')" Connect crash */
+    if (!this.browser || !this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
+      if (this.browser) { try { await this.browser.close(); } catch (e) {} this.browser = null; this.page = null; }
+      await this.init();
+    }
 
     try {
       this.log('info', 'youtube', 'Navigating to YouTube...');
 
-      await this.page.goto('https://www.youtube.com/', { waitUntil: 'networkidle2', timeout: 30000 });
+      await this.page.goto('https://www.youtube.com/', { waitUntil: 'networkidle2', timeout: 45000 }).catch(async (navErr) => {
+        /* v84.5.1: slow hosts fail networkidle2 — one patient retry */
+        this.log('warn', 'youtube', 'Nav slow/retry: ' + navErr.message.split('\n')[0]);
+        await this.page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      });
       await warmSession(this.page, { actions: 3, log: this.log });
 
       // Check if already logged in (cookies may have worked)
@@ -361,21 +376,31 @@ class YouTubeBot {
 
       this.log('info', 'youtube', 'Logging in with credentials...');
 
-      // Click sign in
-      await humanClick(this.page, 'a[aria-label="Sign in"]');
-      await humanDelay(2000, 4000);
+      // Click sign in (v84.5.1: several real markups — button/link/mobile)
+      const signed = await Promise.all(['a[aria-label="Sign in"]', 'ytd-button-renderer.ytd-masthead button[aria-label*="Sign in"]', 'paper-button[aria-label*="Sign in"]']
+        .map(s => this.page.$(s).then(el => el ? { s, el } : null))).then(r => r.filter(Boolean)[0] || null);
+      if (signed) {
+        await signed.el.click();
+        this.log('info', 'youtube', 'Sign-in control clicked (' + signed.s + ')');
+      } else {
+        await this.page.goto('https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fwww.youtube.com%2F', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      }
+      await humanDelay(3000, 5000);
 
-      // Type email
-      const emailInput = await this.page.waitForSelector('input[type="email"]', { timeout: 10000 });
+      /* v84.5.1: Google renders the email field slowly on datacenter hosts —
+       * patient wait (25s) instead of 10s, honest error with landed URL */
+      const emailInput = await this.page.waitForSelector('input[type="email"]', { timeout: 25000 }).catch(() => null);
       if (emailInput) {
         await humanType(this.page, 'input[type="email"]', this.email, { wpm: 45 + Math.random() * 20 });
         await humanDelay(500, 1500);
         await this.page.keyboard.press('Enter');
-        await humanDelay(2000, 4000);
+        await humanDelay(3000, 5000);
+      } else {
+        return { success: false, error: 'Google never showed the email field in 25s (landed on: ' + this.page.url() + ') — usually a Google anti-bot wall from this IP; retry Connect or import a session' };
       }
 
-      // Type password
-      const passInput = await this.page.waitForSelector('input[type="password"]', { timeout: 15000 });
+      // Type password (v84.5.1: Google may ask "confirm it's you" pages first — wait longer)
+      const passInput = await this.page.waitForSelector('input[type="password"]', { timeout: 25000 }).catch(() => null);
       if (passInput) {
         await humanType(this.page, 'input[type="password"]', this.password, { wpm: 50 + Math.random() * 20 });
         await humanDelay(500, 2000);
@@ -391,8 +416,8 @@ class YouTubeBot {
       }
 
       // Verify login
-      await this.page.goto('https://www.youtube.com/', { waitUntil: 'networkidle2', timeout: 30000 });
-      await humanDelay(2000, 3000);
+      await this.page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await humanDelay(3000, 5000);
 
       const avatarAfter = await this.page.$('#avatar-btn');
       if (avatarAfter) {

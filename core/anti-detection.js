@@ -197,7 +197,10 @@ async function launchStealthBrowser(options = {}) {
   let chromeSource = 'none';
   
   // 1. @sparticuz/chromium (cloud/serverless — works on Render, Vercel, AWS Lambda)
-  if (chromiumAvailable && spChromiumModule) {
+  //    v84.5.3: SKIPPED for explicit headful (options.headless === false) —
+  //    the sparticuz build forces headless:'shell', which would kill the
+  //    pop-out login window (owner solves CAPTCHA by hand in that window).
+  if (chromiumAvailable && spChromiumModule && options.headless !== false) {
     try {
       const spExecPath = await spChromiumModule.executablePath();
       if (spExecPath) {

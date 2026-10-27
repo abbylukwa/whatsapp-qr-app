@@ -66,6 +66,9 @@ class TikTokBot {
       // TikTok works best with mobile viewport
       const { browser, agent } = await launchStealthBrowser({
         headless: true,
+        /* v84.5.2: optional residential/mobile proxy — Set TIKTOK_PROXY or
+         * PROXY_URL in env. */
+        proxy: process.env.TIKTOK_PROXY || process.env.PROXY_URL || null,
         agent: {
           name: 'mobile-chrome',
           ua: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36',
@@ -95,12 +98,27 @@ class TikTokBot {
   async saveCookies() {
     if (!this.browser) return;
     try {
-      const cookies = await this.page.cookies();
+      const cookies = await this._tiktokSessionCookies();
       fs.mkdirSync(path.dirname(this.cookieFile), { recursive: true });
       writeJSONAtomic(this.cookieFile, cookies);
       this.log('info', 'tiktok', 'Cookies saved (' + cookies.length + ')');
     } catch (e) {
       this.log('warn', 'tiktok', 'Cookie save failed: ' + e.message);
+    }
+  }
+
+  /* v84.5.1: page.cookies() can come back EMPTY on the shell-headless build
+   * when TikTok swaps frames mid-load (we observed a logged-in page save 0
+   * cookies). CDP Network.getAllCookies reads the WHOLE browser profile and
+   * is immune to frame swaps; filter to TikTok domains, fallback to page. */
+  async _tiktokSessionCookies() {
+    try {
+      const client = await this.page.createCDPSession();
+      const res = await client.send('Network.getAllCookies');
+      await client.detach().catch(() => {});
+      return (res.cookies || []).filter(c => /tiktok|byteover/i.test(c.domain || ''));
+    } catch (e) {
+      return await this.page.cookies().catch(() => []);
     }
   }
 
@@ -120,7 +138,13 @@ class TikTokBot {
 
   /* ── Login ─────────────────────────────────────────────────── */
   async login() {
-    if (!this.browser) await this.init();
+    /* v84.5.1: guard BOTH browser and a LIVE page — the old !this.browser
+     * check skipped init when the browser existed but this.page didn't,
+     * which is exactly the "undefined (reading 'goto')" Connect crash */
+    if (!this.browser || !this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
+      if (this.browser) { try { await this.browser.close(); } catch (e) {} this.browser = null; this.page = null; }
+      await this.init();
+    }
 
     try {
       this.log('info', 'tiktok', 'Logging in...');
@@ -129,14 +153,18 @@ class TikTokBot {
       await humanDelay(2000, 5000);
 
       // Check if already logged in (cookies may have worked)
+      /* v84.5.1: the login page ITSELF renders profile-ish icons, so the old
+       * indicator-only check false-positived and saved ZERO cookies. Real
+       * proof = a TikTok session cookie (sessionid / sessionid_ss / sid_guard). */
       try {
-        const profileIndicator = await this.page.$('[data-e2e="profile-icon"], [data-e2e="me-icon"], div[data-e2e="nav-profile"]');
-        if (profileIndicator) {
+        const existing = await this._tiktokSessionCookies();
+        const hasRealSession = existing.some(c => ['sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt'].includes(c.name));
+        if (hasRealSession) {
           this.loggedIn = true;
           await this.saveCookies();
           this.health.successCount++;
           this.data.addToHistory('login', { success: true, method: 'cookies' });
-          this.log('info', 'tiktok', 'Already logged in (cookies)');
+          this.log('info', 'tiktok', 'Already logged in (session cookie present)');
           return { success: true };
         }
       } catch (e) {}
@@ -175,13 +203,17 @@ class TikTokBot {
         await humanDelay(3000, 6000);
       }
 
-      // Verify login
+      // Verify login (v84.5.1: real proof = session cookie, not just URL)
       const currentUrl = this.page.url();
-      if (currentUrl.includes('login')) {
-        this.log('error', 'tiktok', 'Login failed');
+      const postCk = await this._tiktokSessionCookies();
+      const hasSession = postCk.some(c => ['sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt'].includes(c.name));
+      if (currentUrl.includes('login') || !hasSession) {
+        this.log('error', 'tiktok', 'Login failed (url: ' + currentUrl + ', session cookie: ' + hasSession + ')');
         this.health.errorCount++;
         this.health.lastError = 'Login failed — check credentials';
-        return { success: false, error: 'Login failed — check credentials' };
+        return { success: false, error: currentUrl.includes('login')
+          ? 'TikTok stayed on the login page — wrong credentials or a captcha/cchallenge; check TIKTOK_USERNAME/TIKTOK_PASSWORD'
+          : 'TikTok left the login page but no session cookie was set — login not confirmed; retry Connect' };
       }
 
       this.loggedIn = true;

@@ -7252,7 +7252,7 @@ function escHtml(s){ return String(s || '').replace(/[&<>"']/g, function(c){ ret
 app.get('/healthz', function(req, res){ res.json({ ok: true, uptime: Math.round(process.uptime()), ts: new Date().toISOString() }); });
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5.3</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7273,7 +7273,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v84.5.0</h1>
+<h1>BreadBot v84.5.3</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -7379,6 +7379,12 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div style="margin-bottom:6px"><button class="primary" onclick="loadPlatformStatus()">🔄 Check connections</button> <span style="font-size:10px;color:#8b949e">env creds needed: TWITTER_USERNAME/PASS · YOUTUBE_EMAIL/PASS · FB_EMAIL/PASS</span></div>
 <div id="platStatus" style="font-size:11px;line-height:1.9;max-height:320px;overflow-y:auto">click Check connections…</div>
 <div id="platOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
+</div>
+<div class="card"><h2>🍪 Cookie Bypass — no CAPTCHA, ever</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">First login from a <b>server IP</b> often hits a CAPTCHA/checkpoint wall (Twitter CAPTCHA, Google anti-bot, FB checkpoint). Workaround — 2 minutes, ONCE per platform: <b style="color:#a371f7">Option A (easiest): run  node login-window.js  on YOUR PC — a real Chrome window pops out, log in by hand (CAPTCHA included), cookies save automatically</b>. Option B: on your PC log into the platform in Chrome ② install the <b>EditThisCookie</b> / <b>cookie-editor</b> extension ③ Export (JSON) ④ paste below → <b>Save cookies</b> ⑤ press <b>Connect</b>. The bot loads those cookies and verifies the session — no password typing, no CAPTCHA. Persists across redeploys (data/&lt;p&gt;/cookies.json).</div>
+<div style="margin-bottom:6px"><select id="cookPlat" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px"><option value="twitter">Twitter / X</option><option value="youtube">YouTube</option><option value="facebook">Facebook</option><option value="tiktok">TikTok</option></select> <button class="primary" onclick="savePlatformCookies()">💾 Save cookies</button> <button onclick="document.getElementById('cookBlob').value='';document.getElementById('cookOut').innerHTML='';">Clear</button></div>
+<textarea id="cookBlob" placeholder='Paste the cookie export here — JSON array like [{"name":"auth_token","value":"…","domain":".x.com"}] (EditThisCookie), or raw cookies.txt lines (domain⇥flag⇥path⇥secure⇥expiry⇥name⇥value), or a simple {"name":"value"} object' style="width:100%;height:110px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;font-size:10px"></textarea>
+<div id="cookOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
 </div>
 <div class="card"><h2>📁 Media Cache — files you can actually open</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Every panel download (image/gif/video/music) and every generated audio/prompt lands here as <b>your own copy</b> — openable for 24h, instead of dying with the scraper's 1-hour temp links (the old "things not found" bug).</div>
@@ -7934,8 +7940,11 @@ async function hearBlenderPreview(){var t=$('bpTopic').value.trim()||'water cycl
 async function runLinkCheck(quick){var o=$('lcOut');o.innerHTML='<span style="color:#d29922">Generating + fetching every link…</span>';try{var r=await api('link-check'+(quick?'?quick=1':''));if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}var h='';for(var i=0;i<r.results.length;i++){var x=r.results[i];h+='<div>'+(x.pass?'<span style="color:#3fb950">PASS</span>':'<span style="color:#f85149">FAIL</span>')+' '+esc(x.name)+' — HTTP '+esc(x.status)+' · '+esc(x.contentType||'-')+' · '+esc(x.bytes||0)+'B'+(x.error?' <span style="color:#f85149">'+esc(x.error)+'</span>':'')+'</div>';}h+='<div style="margin-top:5px;color:'+(r.fail?'#f85149':'#3fb950')+'"><b>'+r.pass+' pass / '+r.fail+' fail</b> in '+r.ms+'ms</div>';o.innerHTML=h;}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function verifyLogins(){var b=$('loginVerify');if(!b)return;b.innerHTML='<span style="color:#d29922">Checking saved sessions (no platform APIs used)…</span>';try{var r=await api('verify-logins');var rep=r.report||{};var h='';var order=['whatsapp','twitter','facebook','youtube','tiktok'];for(var i=0;i<order.length;i++){var p=order[i];var x=rep[p];if(!x)continue;h+='<div>'+(String(x.status).indexOf('CONNECTED')===0||String(x.status).indexOf('VERIFIED')===0?'<span style="color:#3fb950">●</span>':(x.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'))+' <b>'+p+'</b>: '+esc(x.status||'')+(x.cookiesCount?' ('+x.cookiesCount+' cookies, '+esc(x.ageHours||'?')+'h old)':'')+'</div>';}var f=rep.youtubeFeed;if(f){h+='<div style="margin-top:4px;color:#8b949e">YT feed: '+(f.ok?'<span style="color:#3fb950">reachable</span> — '+esc(f.videoCount)+' videos, latest: '+esc((f.latestVideos&&f.latestVideos[0]&&f.latestVideos[0].title)||''):(esc(f.error||f.note||'not checked')))+'<br><span style="font-size:10px">'+esc(f.method||'')+'</span></div>';}b.innerHTML=h||'No report';}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 /* v84.5 — Platform Connections: per-platform status + one-click login */
-async function loadPlatformStatus(){var el=document.getElementById('platStatus');var o=document.getElementById('platOut');if(!el)return;el.innerHTML='<span style="color:#d29922">Checking platforms…</span>';try{var r=await api('platform-status');var ps=r.platforms||{};var h='';for(var name in ps){var x=ps[name];if(x.error){h+='<div style="border-top:1px solid #21262d;padding:4px 0"><b>'+esc(name)+'</b>: <span style="color:#f85149">'+esc(x.error)+'</span></div>';continue;}var cred=x.credentialsSet||{};var dot=(!cred.id||!cred.password)?'<span style="color:#f85149">●</span>':(x.loggedIn?'<span style="color:#3fb950">●</span>':(x.cookies&&x.cookies.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'));var state=(!cred.id||!cred.password)?'NO CREDS — set '+(x.meta?x.meta.idLabel:'')+' + '+(x.meta?x.meta.passLabel:'')+' in env':(x.loggedIn?'logged in ✓':((x.cookies&&x.cookies.present)?'cookies saved ('+x.cookies.count+') — will auto-reconnect on next action':'creds set — press Connect'));h+='<div style="border-top:1px solid #21262d;padding:4px 0">'+dot+' <b>'+esc(name.toUpperCase())+'</b> — '+esc(state)+(x.chrome?'':' · <span style="color:#f85149">no Chrome on host</span>')+(x.enabled===false?' · <span style="color:#d29922">schedule OFF (!'+name+' on)</span>':'')+'<br><span style="font-size:10px;color:#8b949e">sends: '+esc((x.meta&&x.meta.sends)||'')+'</span> <a href="javascript:void(0)" data-plat="'+esc(name)+'" style="color:#58a6ff">🔌 Connect</a></div>';}el.innerHTML=h||'No platforms';el.onclick=function(ev){var a=ev.target&&ev.target.closest?ev.target.closest('[data-plat]'):null;if(a)connectPlatform(a.getAttribute('data-plat'));};}catch(e){el.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function loadPlatformStatus(){var el=document.getElementById('platStatus');var o=document.getElementById('platOut');if(!el)return;el.innerHTML='<span style="color:#d29922">Checking platforms…</span>';try{var r=await api('platform-status');var ps=r.platforms||{};var h='';for(var name in ps){var x=ps[name];if(x.error){h+='<div style="border-top:1px solid #21262d;padding:4px 0"><b>'+esc(name)+'</b>: <span style="color:#f85149">'+esc(x.error)+'</span></div>';continue;}var cred=x.credentialsSet||{};var dot=(!cred.id||!cred.password)?'<span style="color:#f85149">●</span>':(x.loggedIn?'<span style="color:#3fb950">●</span>':(x.cookies&&x.cookies.present?'<span style="color:#d29922">●</span>':'<span style="color:#f85149">●</span>'));var state=(!cred.id||!cred.password)?'NO CREDS — set '+(x.meta?x.meta.idLabel:'')+' + '+(x.meta?x.meta.passLabel:'')+' in env':(x.loggedIn?'logged in ✓':((x.cookies&&x.cookies.present)?'cookies saved ('+x.cookies.count+') — will auto-reconnect on next action':'creds set — press Connect'));h+='<div style="border-top:1px solid #21262d;padding:4px 0">'+dot+' <b>'+esc(name.toUpperCase())+'</b> — '+esc(state)+(x.chrome?'':' · <span style="color:#f85149">no Chrome on host</span>')+(x.enabled===false?' · <span style="color:#d29922">schedule OFF (!'+name+' on)</span>':'')+'<br><span style="font-size:10px;color:#8b949e">sends: '+esc((x.meta&&x.meta.sends)||'')+'</span> <a href="javascript:void(0)" data-plat="'+esc(name)+'" style="color:#58a6ff">🔌 Connect</a> <a href="javascript:void(0)" data-head="'+esc(name)+'" style="color:#a371f7">🔓 pop-out</a> <a href="javascript:void(0)" data-cook="'+esc(name)+'" style="color:#d29922">🍪 cookies</a></div>';}el.innerHTML=h||'No platforms';el.onclick=function(ev){var a=ev.target&&ev.target.closest?ev.target.closest('[data-plat]'):null;if(a)connectPlatform(a.getAttribute('data-plat'));var d=ev.target&&ev.target.closest?ev.target.closest('[data-head]'):null;if(d)headfulPlatform(d.getAttribute('data-head'));var c=ev.target&&ev.target.closest?ev.target.closest('[data-cook]'):null;if(c)pickCookies(c.getAttribute('data-cook'));};}catch(e){el.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function connectPlatform(name){var o=document.getElementById('platOut');o.innerHTML='<span style="color:#d29922">Logging the bot into '+esc(name)+'… (headless browser — takes up to a minute)</span>';try{var r=await api('platform-login','POST',{platform:name});o.innerHTML=r.ok?'<span style="color:#3fb950">✅ '+esc(r.result||'logged in')+'</span>':'<span style="color:#f85149">❌ '+esc(r.error||r.result||'login failed')+'</span>';loadPlatformStatus();}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+function pickCookies(name){var s=document.getElementById('cookPlat');if(s)s.value=name;var b=document.getElementById('cookBlob');if(b){b.focus();if(b.scrollIntoView)b.scrollIntoView({behavior:'smooth',block:'center'});}}
+async function headfulPlatform(name){var o=document.getElementById('platOut');o.innerHTML='<span style="color:#a371f7">🔓 Opening a real Chrome window for '+esc(name)+'… log in INSIDE that window (CAPTCHA + 2FA included) — this waits up to 8 min, then saves the cookies automatically.</span>';try{var r=await api('platform-headful-login','POST',{platform:name});o.innerHTML=r.ok?'<span style="color:#3fb950">'+esc(r.result||'logged in via pop-out')+'</span>':'<span style="color:#f85149">❌ '+esc(r.error||'pop-out login did not complete')+'</span>';loadPlatformStatus();}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function savePlatformCookies(){var ps=document.getElementById('cookPlat'),b=document.getElementById('cookBlob'),o=document.getElementById('cookOut');if(!ps||!b||!o)return;var name=ps.value||'';if(!b.value.trim()){o.innerHTML='<span style="color:#f85149">Paste the cookie export first — see the 5 steps above.</span>';return;}o.innerHTML='<span style="color:#d29922">Saving '+esc(name)+' cookies…</span>';try{var r=await api('platform-cookies','POST',{platform:name,cookies:b.value});o.innerHTML=r.ok?'<span style="color:#3fb950">✅ '+esc(String(r.saved))+' cookies saved ('+esc(r.format||'')+')</span> — '+esc(r.next||'now press Connect'):'<span style="color:#f85149">❌ '+esc(r.error||'save failed')+'</span>';if(r.ok)loadPlatformStatus();}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 function setEroticStyle(style){eroticStyle=style;var names={flirty:'Flirty 😏',excited:'Excited 🔥',sensual:'Sensual 💜',bold:'Bold 🌶'};$('eroticActive').textContent=names[style]||style;try{fetch('/admin/erotic-style',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:style})});}catch(e){}}
 
 /* ═══ v82: Group Links Backup & Auto-Join ═══ */
@@ -8905,6 +8914,131 @@ app.post('/admin/platform-login', async function(req, res){
       result: result.success ? ('logged in — cookies saved to data/' + name + '/cookies.json') : (result.error || 'login failed — check the boot log (CAPTCHA / wrong creds / checkpoint all log there)') });
   } catch(e){
     res.status(500).json({ ok: false, error: name + ' login crashed: ' + e.message });
+  }
+});
+
+/* v84.5.2 — CAPTCHA BYPASS: paste cookies from YOUR own PC browser.
+ * First login from a datacenter IP often hits CAPTCHA/checkpoint walls
+ * (Twitter CAPTCHA, Google anti-bot, FB checkpoint). Manual-once fix:
+ * log into the platform in your own browser, export cookies
+ * (EditThisCookie / cookie-editor → JSON), paste here. Saved to
+ * data/<platform>/cookies.json — the exact file every bot auto-loads
+ * on init, so Connect then verifies the session WITHOUT typing
+ * credentials. No CAPTCHA, ever again. Accepts THREE formats:
+ *   A) JSON array (EditThisCookie / puppeteer shape)
+ *   B) {"name":"value", ...} map
+ *   C) Netscape cookies.txt lines (domain⇥flag⇥path⇥secure⇥expiry⇥name⇥value)
+ */
+const COOKIE_DEFAULT_DOMAINS = {
+  twitter: '.x.com', youtube: '.youtube.com', facebook: '.facebook.com', tiktok: '.tiktok.com'
+};
+function normalizeSameSite(v){
+  const s = String(v || '').toLowerCase();
+  if (s === 'no_restriction' || s === 'none') return 'None';
+  if (s === 'lax' || s === 'unspecified' || s === '') return 'Lax';
+  if (s === 'strict') return 'Strict';
+  return 'Lax';
+}
+app.post('/admin/platform-cookies', function(req, res){
+  const name = String((req.body && req.body.platform) || '').trim().toLowerCase();
+  if (!PLATFORM_META[name]) return res.status(400).json({ ok: false, error: 'unknown platform — use one of: ' + Object.keys(PLATFORM_META).join(', ') });
+  const raw = String((req.body && req.body.cookies) || '').trim();
+  if (!raw) return res.status(400).json({ ok: false, error: 'paste the cookie export into the box first (EditThisCookie JSON array, cookies.txt lines, or a {"name":"value"} object)' });
+
+  let cookies = [];
+  let format = '';
+
+  // ── A/B: JSON (array of cookie objects, or a name→value map) ──
+  try {
+    const j = JSON.parse(raw);
+    if (Array.isArray(j)) {
+      cookies = j.filter(c => c && c.name && typeof c.value !== 'undefined').map(c => ({
+        name: String(c.name), value: String(c.value),
+        domain: String(c.domain || COOKIE_DEFAULT_DOMAINS[name] || ''),
+        path: String(c.path || '/'),
+        expires: (typeof c.expires === 'number' && isFinite(c.expires)) ? c.expires
+                 : (typeof c.expirationDate === 'number' ? c.expirationDate : -1),
+        httpOnly: !!c.httpOnly, secure: (c.secure !== false),
+        sameSite: normalizeSameSite(c.sameSite)
+      }));
+      if (cookies.length) format = 'json array';
+    } else if (j && typeof j === 'object') {
+      cookies = Object.keys(j).filter(k => k && typeof j[k] !== 'object' && typeof j[k] !== 'function').map(k => ({
+        name: String(k), value: String(j[k]),
+        domain: COOKIE_DEFAULT_DOMAINS[name] || '', path: '/',
+        expires: -1, httpOnly: false, secure: true, sameSite: 'Lax'
+      }));
+      if (cookies.length) format = 'name/value map';
+    }
+  } catch (e) { /* not JSON — fall through to Netscape parsing */ }
+
+  // ── C: Netscape cookies.txt (domain TAB flag TAB path TAB secure TAB expiry TAB name TAB value) ──
+  if (!cookies.length && /\t/.test(raw)) {
+    for (const line0 of raw.split(/\r?\n/)) {
+      if (!line0 || (line0.startsWith('# ') && !line0.startsWith('#HttpOnly_'))) continue;
+      const isHttpOnly = line0.startsWith('#HttpOnly_');
+      const line = isHttpOnly ? line0.slice('#HttpOnly_'.length) : line0;
+      const parts = line.split('\t').map(s => s.trim());
+      if (parts.length < 7 || !parts[0] || !parts[5]) continue;
+      const [domain, , cpath, secure, expiry, cname] = parts;
+      const value = parts.slice(6).join('\t');
+      cookies.push({
+        name: cname, value,
+        domain, path: cpath || '/',
+        expires: /^\d+$/.test(expiry) ? parseInt(expiry, 10) : -1,
+        httpOnly: isHttpOnly,
+        secure: String(secure).toUpperCase() === 'TRUE',
+        sameSite: 'Lax'
+      });
+    }
+    if (cookies.length) format = 'netscape cookies.txt';
+  }
+
+  if (!cookies.length) return res.status(400).json({ ok: false, error: 'could not parse that blob — export as a JSON array (EditThisCookie), cookies.txt lines, or a {"name":"value"} object' });
+
+  const file = path.resolve(__dirname, 'data', name, 'cookies.json');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file + '.tmp', JSON.stringify(cookies));
+    fs.renameSync(file + '.tmp', file);
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'could not write ' + file + ': ' + e.message });
+  }
+  const sessionish = cookies.some(c => /session|auth|sid|sso|token/i.test(c.name));
+  pushLog('info', 'multi-platform', name + ': ' + cookies.length + ' cookies pasted from panel (' + format + ') → data/' + name + '/cookies.json');
+  res.json({ ok: true, platform: name, saved: cookies.length, format,
+    file: 'data/' + name + '/cookies.json', sessionish,
+    next: 'press 🔌 Connect on ' + name + ' — the bot loads these cookies and verifies the session without typing credentials (no CAPTCHA)' });
+});
+
+/* v84.5.3 — POP-OUT LOGIN (panel button): opens a REAL Chrome window on
+ * hosts that HAVE a screen (the owner's PC). The owner solves CAPTCHA/
+ * 2FA by hand; the moment a proof session cookie appears, all cookies
+ * are saved to data/<p>/cookies.json → logged in from then on, no
+ * CAPTCHA ever. Cloud hosts (no display) get an honest 409 with the
+ * exact local command to run instead. */
+const botHeadfulRunning = {};
+app.post('/admin/platform-headful-login', async function(req, res){
+  const name = String((req.body && req.body.platform) || '').trim().toLowerCase();
+  if (!PLATFORM_META[name]) return res.status(400).json({ ok:false, error:'unknown platform — use one of: ' + Object.keys(PLATFORM_META).join(', ') });
+  const hasDisplay = (process.platform === 'win32' || process.platform === 'darwin') ? true : !!process.env.DISPLAY;
+  if (!hasDisplay) return res.status(409).json({ ok:false, honest:true,
+    error: 'this host has NO screen (Render/cloud) — a pop-out window is impossible HERE. Do it on YOUR PC instead: run  node login-window.js ' + name + '  in the app folder — a Chrome window pops out, you solve the CAPTCHA, cookies save to data/' + name + '/cookies.json. Then copy that file to the server (same path) or paste it in the 🍪 card.' });
+  if (botHeadfulRunning[name]) return res.status(409).json({ ok:false, error:'a pop-out login for ' + name + ' is already open — finish it in the Chrome window' });
+  botHeadfulRunning[name] = true;
+  try {
+    const { headfulLogin } = require('./core/headful-login');
+    pushLog('info', 'multi-platform', name + ': pop-out login opened — waiting for the owner to log in inside the Chrome window…');
+    const r = await headfulLogin(name, { timeoutMs: 8 * 60 * 1000, log: (lvl, tag, msg) => pushLog(lvl, 'multi-platform', msg) });
+    if (r.ok) {
+      res.json({ ok:true, platform:name, saved:r.saved, file:r.file, result:'✅ logged in via the pop-out window — ' + r.saved + ' cookies saved to ' + r.file + '. Press 🔌 Connect to activate (or just let the bot boot).' });
+    } else {
+      res.json({ ok:false, platform:name, timedOut:!!r.timedOut, noDisplay:!!r.noDisplay, error:r.error || 'pop-out login did not complete' });
+    }
+  } catch(e){
+    res.status(500).json({ ok:false, error:name + ' pop-out login crashed: ' + e.message });
+  } finally {
+    botHeadfulRunning[name] = false;
   }
 });
 

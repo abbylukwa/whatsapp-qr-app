@@ -705,7 +705,26 @@ class MultiPlatformManager {
       return { success: false, error: name + ' is disabled — enable first with !' + name + ' on' };
     }
 
-    return await bot.login();
+    /* ═══ v84.5.1 FIX: "Cannot read properties of undefined (reading 'goto')" ═══
+     * Connect (and !tw login etc.) could crash when the browser object existed
+     * but the PAGE never did — boot init crashed halfway, fingerprint rotation,
+     * or the per-platform login() guards only checked ONE of the two. Now the
+     * login path guarantees a LIVE page first, under the same per-platform mutex
+     * the auto-post tasks use (no login/post browser race either). */
+    return await this._withPlatformLock(name, async () => {
+      const pageDead = !bot.page || (typeof bot.page.isClosed === 'function' && bot.page.isClosed());
+      if (!bot.browser || pageDead) {
+        if (bot._chromeAvailable === false) {
+          return { success: false, error: name + ' has no Chrome/Chromium on this host — browser login impossible here' };
+        }
+        // stale half-dead browser? close it so init() doesn't leak it
+        if (bot.browser) { try { await bot.browser.close(); } catch (e) {} bot.browser = null; bot.page = null; }
+        this.log('info', 'multi-platform', name + ': no live browser page — initializing before login...');
+        try { await bot.init(); }
+        catch (e) { return { success: false, error: name + ' browser init failed: ' + e.message }; }
+      }
+      return await bot.login();
+    });
   }
 
   getPlatform(name) {

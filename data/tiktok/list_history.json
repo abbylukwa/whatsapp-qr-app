@@ -5,5 +5,12 @@
       "success": true
     },
     "timestamp": 1793049251668
+  },
+  {
+    "action": "login",
+    "details": {
+      "success": true
+    },
+    "timestamp": 1793055800481
   }
 ]

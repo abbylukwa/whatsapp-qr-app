@@ -447,21 +447,32 @@ class TwitterBot {
    * ════════════════════════════════════════════════════════════ */
   async init() {
     try {
-      const { browser, page } = await launchStealthBrowser({
+      /* v84.5.1 THE REAL FIX: launchStealthBrowser returns { browser, agent } —
+       * there is NO `page` in its return. The old `const { browser, page }`
+       * destructure made this.page undefined FOREVER, so every twitter
+       * goto/login died with "Cannot read properties of undefined (reading
+       * 'goto')" — the exact crash the owner hit on Connect. All other
+       * platforms already did this correctly: destructure agent, newPage(). */
+      const { browser, agent } = await launchStealthBrowser({
         headless: true,
-        userDataDir: path.join(this.dataDir, 'twitter', 'browser-profile')
+        userDataDir: path.join(this.dataDir, 'twitter', 'browser-profile'),
+        /* v84.5.2: optional residential/mobile proxy — defeats datacenter-IP
+         * walls (CAPTCHA/checkpoint). Set TWITTER_PROXY or PROXY_URL in env,
+         * e.g. http://user:pass@gw.proxy.com:8000 */
+        proxy: process.env.TWITTER_PROXY || process.env.PROXY_URL || null
       });
       this.browser = browser;
-      this.page = page;
+      this.page = await browser.newPage();
       this.health.startedAt = Date.now();
 
-      // Apply anti-detection evasions
-      await applyEvasions(page);
+      // Apply anti-detection evasions (the browser-level targetcreated
+      // listener in launchStealthBrowser covers every page opened later)
+      await applyEvasions(this.page);
 
       // Try to load saved cookies
       await this.loadCookies();
 
-      this.log('info', 'twitter', 'Browser initialized (stealth + evasions)');
+      this.log('info', 'twitter', 'Browser initialized (' + agent.name + ', stealth + evasions)');
       return { success: true };
     } catch (e) {
       this.log('error', 'twitter', 'Init failed: ' + e.message);
@@ -476,16 +487,40 @@ class TwitterBot {
     if (!this.username || !this.password) {
       return { success: false, error: 'No credentials (set TWITTER_USERNAME + TWITTER_PASSWORD)' };
     }
-    if (!this.browser || !this.page) {
+    if (!this.browser || !this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
+      if (this.browser) { try { await this.browser.close(); } catch (e) {} this.browser = null; this.page = null; }  /* v84.5.1: no stale-browser leak */
       await this.init();
     }
 
     try {
       this.log('info', 'twitter', 'Logging in as @' + this.username + '...');
 
-      // Navigate to login
-      await this.page.goto('https://x.com/i/flow/login', { waitUntil: 'networkidle2', timeout: 30000 });
-      await humanDelay(2000, 5000);
+      // Navigate to login (v84.5.1: ONE retry — slow hosts fail networkidle2 the first time)
+      try {
+        await this.page.goto('https://x.com/i/flow/login', { waitUntil: 'networkidle2', timeout: 45000 });
+      } catch (navErr) {
+        this.log('warn', 'twitter', 'Login nav slow/retry: ' + navErr.message.split('\n')[0]);
+        await this.page.goto('https://x.com/i/flow/login', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      }
+      await humanDelay(3000, 6000);
+
+      /* v84.5.2: cookie fast-path — with valid saved cookies X redirects
+       * straight to the feed, so the username field NEVER appears and the
+       * code below used to false-fail with "never showed the username
+       * field" even though the session works. If the feed is here, we're
+       * in — no CAPTCHA, no typing. */
+      try {
+        const inFeed = await this.page.waitForSelector(
+          'a[data-testid="AppTabBar_Profile_Link"], a[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="primaryColumn"]',
+          { timeout: 8000 }).catch(() => null);
+        if (inFeed && !/\/(login|flow)/.test(this.page.url())) {
+          this.loggedIn = true;
+          await this.saveCookies();
+          this.health.successCount++;
+          this.log('info', 'twitter', 'Already logged in via saved cookies — no CAPTCHA, no typing');
+          return { success: true, result: 'logged in via saved cookies' };
+        }
+      } catch (e) {}
 
       // Check CAPTCHA
       const captcha = await detectCaptcha(this.page);
@@ -494,13 +529,25 @@ class TwitterBot {
         return { success: false, error: 'CAPTCHA detected: ' + captcha.type };
       }
 
-      // Type username
-      const usernameInput = await this.page.waitForSelector('input[autocomplete="username"]', { timeout: 10000 });
-      if (usernameInput) {
-        await humanType(this.page, 'input[autocomplete="username"]', this.username, { wpm: 45 + Math.random() * 20 });
+      /* v84.5.1: X serves the identifier field under DIFFERENT markups
+       * (input[autocomplete="username"] classic, input[name="text"] on the
+       * current flow) and slow hosts need more than 10s for the SPA to
+       * render. Patient multi-selector wait instead of a fixed 10s one. */
+      const USER_SELECTORS = ['input[autocomplete="username"]', 'input[name="text"]', 'input[type="text"]'];
+      let foundSel = null;
+      for (const sel of USER_SELECTORS) {
+        const hit = await this.page.waitForSelector(sel, { timeout: 15000 }).catch(() => null);
+        if (hit) { foundSel = sel; break; }
+      }
+      if (foundSel) {
+        this.log('info', 'twitter', 'Login field found (' + foundSel + ')');
+        await humanType(this.page, foundSel, this.username, { wpm: 45 + Math.random() * 20 });
         await humanDelay(500, 1500);
         await this.page.keyboard.press('Enter');
         await humanDelay(2000, 4000);
+      } else {
+        const where = this.page.url();
+        return { success: false, error: 'X never showed the username field in 45s (landed on: ' + where + ') — usually a checkpoint/anti-bot wall from this IP; retry Connect or log in once from a browser and the saved cookies will carry it' };
       }
 
       // Handle unusual activity check (sometimes X asks to re-enter username)
@@ -515,7 +562,7 @@ class TwitterBot {
       } catch (e) {}
 
       // Type password
-      const passwordInput = await this.page.waitForSelector('input[type="password"]', { timeout: 10000 });
+      const passwordInput = await this.page.waitForSelector('input[type="password"]', { timeout: 20000 }).catch(() => null);
       if (passwordInput) {
         await humanType(this.page, 'input[type="password"]', this.password, { wpm: 50 + Math.random() * 20 });
         await humanDelay(500, 2000);

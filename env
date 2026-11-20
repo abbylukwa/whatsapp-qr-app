@@ -34,18 +34,12 @@ MYLINKS=
 # Your scraper deployment (the bot sends MYLINKS to it automatically)
 SCRAPER=https://intelligent-scraper.onrender.com
 
-# ── AI POOL SLOTS — paste keys below, leave empty = unused ──
-# Slot 1: Rewind (WORKS — verified)
-API_1=sk-rewind-4333d7fa464607525568ffaa02ec1d5c
-# Slot 2: Rewind backup
-API_2=sk-rewind-f15c84b6e4e2a4c5c8a0034b6240b0f9
-# Slot 3: Rewind backup 5
+# ── AI POOL SLOTS — v92: THE ONE KEY (boss request: this key ONLY) ──
+API_1=sk-rewind-8dd05bd5d3d74e805a5199364a274f67
+API_2=
 API_3=
-# Slot 4: Rewind backup 3
-API_4=sk-rewind-07354d0da5b3ade6519b305eb4b5db11
-# Slot 5: Rewind backup 4
-API_5=sk-rewind-3aa65541a08f460fdf56b4377e00437a
-# Slot 6: (empty — add another key here)
+API_4=
+API_5=
 API_6=
 API_7=
 API_8=
@@ -55,8 +49,8 @@ API_8=
 #API_1_URL=
 #API_1_MODEL=
 
-# Legacy named keys still work too (they join the same pool):
-REWIND_KEY=sk-rewind-4333d7fa464607525568ffaa02ec1d5c
+# Legacy named keys — v92: old keys REMOVED (boss request)
+REWIND_KEY=
 REWIND_MODEL=rewind-uncensored
 OPENAI_KEY=
 OPENAI_MODEL=gpt-4o-mini

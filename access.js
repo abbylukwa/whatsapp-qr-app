@@ -225,12 +225,17 @@ const HOME_LANGS = ['en', 'sn', 'nd', 'mixed'];
 function shouldReplyGroup(langCode){
   return !HOME_LANGS.includes(String(langCode || 'en').toLowerCase());
 }
-/* Group send matrix — the single decision the whole group flow funnels into. */
+/* Group send matrix — the single decision the whole group flow funnels into.
+ * v92: the ACTIVATED designated group is full service — the boss's people
+ * can casually ask for media there ("give me a … video") in ANY language;
+ * every OTHER group keeps the language gate (English/Shona = silence). */
 function groupDecision(chatJid, langCode, isAdmin){
   if (!isAllowedGroup(chatJid))        return { reply: false, reason: 'group-not-allowed' };
   if (isAdmin)                         return { reply: true,  reason: 'admin' };
-  if (isDesignated(chatJid) && !isNsfwActivated())
-                                       return { reply: false, reason: 'nsfw-group-not-activated' };
+  if (isDesignated(chatJid)){
+    if (!isNsfwActivated())            return { reply: false, reason: 'nsfw-group-not-activated' };
+    return { reply: true,  reason: 'activated-media-group' };
+  }
   if (!shouldReplyGroup(langCode))     return { reply: false, reason: 'shona-or-english' };
   return { reply: true, reason: 'foreign-language:' + langCode };
 }

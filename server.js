@@ -1867,6 +1867,15 @@ function rememberSearch(chatJid, kind, results, query){
     lastSearchByChat.delete(lastSearchByChat.keys().next().value);
   }
 }
+/* v92: video searches remember ranked PAGE candidates (objects), not
+ * plain urls — "next" resolves each into a real file as it walks. */
+function rememberVideoSearch(chatJid, results, query){
+  const list = (results || []).filter(r => r && typeof r === 'object' && r.url);
+  lastSearchByChat.set(chatJid, { kind: 'video', results: list, idx: 0, query: String(query || ''), at: Date.now() });
+  if (lastSearchByChat.size > 500){
+    lastSearchByChat.delete(lastSearchByChat.keys().next().value);
+  }
+}
 /* Send the next `count` still-unsent results of THIS chat's remembered
  * search. Returns how many actually went out. */
 async function sendRelevantBatch(chatJid, count, opts = {}){
@@ -1876,6 +1885,22 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
   let sent = 0;
   for (let i = 0; i < n; i++){
     if (st.idx >= st.results.length) break;
+    if (st.kind === 'video'){
+      /* v92: every candidate is RESOLVED into a real file; dead ones
+       * are skipped without burning the batch */
+      const cand = st.results[st.idx];
+      st.idx++;
+      const r = await scraperVideoResolve(cand.url);
+      if (!r.ok){ i--; continue; }
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind: 'video', mimetype: r.mimetype || 'video/mp4',
+        caption: '🎬 ' + ((r.title && r.title !== 'video' ? r.title : cand.title) + (cand.site ? '  [' + cand.site + ']' : '')).trim().slice(0, 110),
+        priority: 3, lane: 'slow', taskType: opts.taskType || 'group', typing: false
+      });
+      sent++;
+      if (i < n - 1) await sleepMs(1500 + Math.random() * 1000);   /* human pace */
+      continue;
+    }
     const url = st.results[st.idx];
     st.idx++;
     const label = st.idx + '/' + st.results.length;
@@ -2163,6 +2188,46 @@ function adminReply(jid, text){
 function schoolReply(jid, text){
   return sendBuffer(jid, { text }, 0, 'fast', 'admin', false, { account:'school' })
     .catch(e => pushLog('warn','schoolreply',e.message));
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v92 GROUP VERIFICATION — "the bot waits for 5 messages and
+ *  confirms the groups … ask admin for verification with group name".
+ *  Every group the bot SEES is profiled by the listener. When a group
+ *  that is NOT on the whitelist has 5 messages, the bot DMs the admin
+ *  ONCE: the group's name + its JID + how to activate it. The group
+ *  itself gets NOTHING until the admin approves (!allowgroup) or
+ *  activates it directly (!download <query> inside it).
+ * ══════════════════════════════════════════════════════════════ */
+const VERIFY_AFTER_MSGS = 5;
+const VERIFY_STATE_FILE = path.join(__dirname, 'data', 'group-verify.json');
+let verifyAsked = {};
+try { verifyAsked = JSON.parse(fs.readFileSync(VERIFY_STATE_FILE, 'utf8')) || {}; } catch (e) {}
+function saveVerifyState(){ try { fs.mkdirSync(path.dirname(VERIFY_STATE_FILE), { recursive: true }); fs.writeFileSync(VERIFY_STATE_FILE, JSON.stringify(verifyAsked, null, 1)); } catch (e) {} }
+let pendingVerifyJid = null;               /* last group the admin was asked about */
+async function maybeVerifyGroup(chatJid){
+  try {
+    if (!chatJid || !String(chatJid).endsWith('@g.us')) return false;
+    if (accessCtl.isAllowedGroup(chatJid)) return false;
+    const p = groupListener.profileSummary(chatJid);
+    if (!p || (p.msgs || 0) < VERIFY_AFTER_MSGS) return false;
+    if (verifyAsked[chatJid]) return false;           /* asked once per group */
+    verifyAsked[chatJid] = { at: Date.now(), msgs: p.msgs };
+    saveVerifyState();
+    pendingVerifyJid = chatJid;
+    const name = getGroupName(chatJid) || 'unknown group';
+    await adminReply(ADMIN_JID,
+      '👥 NEW GROUP WANTS IN — VERIFICATION\n' +
+      '· Name: "' + name + '"\n' +
+      '· JID: ' + chatJid + '\n' +
+      '· Messages seen: ' + p.msgs + '\n\n' +
+      'Approve it:\n' +
+      '· !allowgroup — allow this group (media requests ON, no NSFW designation)\n' +
+      '· OR send !download <query> inside that group — activates it AND downloads\n' +
+      'Ignore = stays silent forever.');
+    pushLog('info', 'access', 'verification asked: ' + name + ' (' + chatJid + ') after ' + p.msgs + ' msgs');
+    return true;
+  } catch (e) { pushLog('warn','access','verify: ' + e.message); return false; }
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -3025,6 +3090,52 @@ async function scraperVideo(query, exclude, site, boostCat=null){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  v92 RANKED VIDEO FLOW — "the most relevant search"
+ *  scraper /video-ranked returns a ranked list of watch pages scored
+ *  against the WHOLE query (weighted engine — coverage, phrase,
+ *  boundary hits). The bot remembers the list for "next", and sends
+ *  the best pick resolved into a real file via /video-resolve.
+ * ══════════════════════════════════════════════════════════════ */
+async function scraperVideoRanked(query, opts = {}){
+  resetDailyStats(); dailyStats.scraperVideos++;
+  try {
+    const body = { query };
+    if (Array.isArray(opts.exclude) && opts.exclude.length) body.exclude = opts.exclude.slice(-10);
+    if (opts.site) body.site = String(opts.site).trim();
+    const preferUrl = resolvePreferUrl(opts.site);
+    const vidLinks = [...new Set([].concat(preferUrl || [], MY_LINKS_ENV, siteHealth.healthyLinks('videos', false, null, opts.boostCat || null)))];
+    if (vidLinks.length) body.myLinks = vidLinks;
+    const r = await scrapperFetch('/video-ranked', body, 45000);
+    if (!r || !r.success || !Array.isArray(r.results)) throw new Error('scrapper: no ranked results');
+    const list = r.results.filter(x => x && x.url)
+      .map(x => ({ title: x.title || 'video', url: x.url, site: x.site || '', kind: x.kind || 'page', score: x.score || 0 }));
+    if (!list.length) throw new Error('scrapper: ranked list empty');
+    pushLog('info', 'scraper', `video-ranked "${query}": ${list.length} ranked (top "${(list[0].title||'').slice(0,50)}" score ${list[0].score} via ${list[0].site})`);
+    return list;
+  } catch(e){
+    pushLog('error','scraper',`video-ranked "${query}": ${e.message}`);
+    return [];
+  }
+}
+async function scraperVideoResolve(pageUrl){
+  try {
+    const r = await scrapperFetch('/video-resolve', { url: pageUrl }, 150000);
+    if (!r || !r.mediaUrl) throw new Error('scrapper: resolve failed');
+    /* local copy first — temp scraper links die within the hour */
+    const local = await downloadToLocalMedia(r.mediaUrl, 'video');
+    if (local) return { ok:true, mediaUrl:local.url, sourceUrl:r.mediaUrl, localFile:local.file,
+                        title:r.title||'video', mimetype:local.mimetype||'video/mp4',
+                        sizeBytes:local.size, site:r.source || pageUrl };
+    return { ok:true, mediaUrl:r.mediaUrl, sourceUrl:r.mediaUrl, title:r.title||'video',
+             mimetype:r.mimetype||'video/mp4', sizeBytes:r.sizeBytes||0, site:r.source || pageUrl,
+             tempLink:true, expiresInSeconds:r.expiresInSeconds||3600 };
+  } catch(e){
+    pushLog('warn','scraper',`video-resolve ${String(pageUrl).slice(0,80)}: ${e.message}`);
+    return { ok:false, error:e.message };
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  NSFW
  * ══════════════════════════════════════════════════════════════ */
 /* v73.1 VIDEO SITE PICKER — list the configured video sites so the user
@@ -3092,14 +3203,28 @@ function detectMediaIntent(text){
     while (s && s !== prevT){ prevT = s; s = s.replace(TRAIL_FILL,'').trim(); }
     return s;
   }
+  /* v92 NATURAL ORDER — the boss: "commands like 'give me a ---- video'
+   * as simple as that". The old regex only understood "<query> video"
+   * (query BEFORE the noun) and turned "give me a porn video" into an
+   * empty query → default 'funny'. Now the sentence is SPLIT at the
+   * media noun: words after it win ("video of cats" → cats), otherwise
+   * the words BEFORE it are the query after request-verbs are stripped
+   * ("give me a porn video" → porn). */
+  const REQ_FILL = /^(please\s+|pls\s+|plz\s+|hey\s+|hi\s+|yo\s+|chief\s+|mukoma\s+|can\s+you\s+|could\s+you\s+)?(send|share|give|gimme|show|drop|post|download|get|bring|find|need|want|ndipe|ndipewo|mungandipe|ndoda)\s+(me\s+)?(a\s+|an\s+|some\s+|any\s+|the\s+|that\s+|this\s+|one\s+)?/i;
+  function naturalQuery(before, after){
+    const a = cleanQuery(String(after || '').replace(REQ_FILL, ''));
+    if (a) return a;
+    const b = cleanQuery(String(before || '').replace(REQ_FILL, ''));
+    return b;
+  }
   if (/\b(gif|gifs)\b/i.test(low)){
-    let q = low.replace(/^.*?\b(gif|gifs)\b\s*(of|ya|ye|za)?\s*/i,'').trim();
-    q = cleanQuery(q);
+    const m = low.match(/^(.*?)\b(gif|gifs)\b\s*(of|ya|ye|za|for|about)?\s*(.*)$/i);
+    let q = m ? naturalQuery(m[1], m[4]) : '';
     return { type:'gif', query: q||'funny' };
   }
   if (/\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b/i.test(low)){
-    let q = low.replace(/^.*?\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b\s*(of|ya|ye|za)?\s*/i,'').trim();
-    q = cleanQuery(q);
+    const m = low.match(/^(.*?)\b(video|videos|vid|vids|vidyo|mavhidhiyo)\b\s*(of|ya|ye|za|for|about)?\s*(.*)$/i);
+    let q = m ? naturalQuery(m[1], m[4]) : '';
     return { type:'video', query: q||'funny' };
   }
   if (/\b(song|songs|album|albums|music|track|tracks|mixtape)\b/i.test(low)){
@@ -5719,16 +5844,63 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'download': {
-      const url = args[1];
-      if (!url){ await reply('Usage: !download <url>'); return; }
-      await reply('Resolving via scrapper...');
-      const r = await scraperDownloadMedia(url, 'auto');
-      if (!r.ok){ await reply('Err: '+r.error); return; }
-      await sendMediaUrl(chatJid, r.mediaUrl, {
-        kind: r.kind, mimetype: r.mimetype, caption: r.title,
-        priority: 0, lane: 'fast', taskType: 'admin', typing: false
-      });
-      await reply('Sent.');
+      /* v92 THE ACTIVATION SWITCH — the boss: "as the admin I'll just send
+       * !download nsfw, then it downloads my query — that means THAT'S the
+       * group I want my bot in and sending stuff, but ignore any other."
+       *   !download <url>     → direct download (old behavior)
+       *   !download <query>   → in a GROUP: whitelist + activate THIS group
+       *                         (NSFW query → designated NSFW group), then
+       *                         run the ranked download right here. In a
+       *                         DM it is just a ranked video download. */
+      const arg = args.slice(1).join(' ').trim();
+      if (!arg){ await reply('Usage: !download <url>\n       !download <query>  (in the group you want activated)'); return; }
+      if (/^https?:\/\//i.test(arg)){
+        await reply('Resolving via scrapper...');
+        const rd = await scraperDownloadMedia(arg, 'auto');
+        if (!rd.ok){ await reply('Err: '+rd.error); return; }
+        await sendMediaUrl(chatJid, rd.mediaUrl, {
+          kind: rd.kind, mimetype: rd.mimetype, caption: rd.title,
+          priority: 0, lane: 'fast', taskType: 'admin', typing: false
+        });
+        await reply('Sent.');
+        break;
+      }
+      if (isGroup){
+        const nsfwQ = detectNsfw(arg);
+        accessCtl.addGroup(chatJid);
+        if (nsfwQ){
+          accessCtl.setDesignated(chatJid);
+          accessCtl.setNsfwActivated(true);
+          videoScheduler.setQueries(NSFW_QUERIES);
+          videoScheduler.setGroup(chatJid);
+          videoScheduler.enable();
+        }
+        pushLog('success','access','group ACTIVATED via !download: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ ? ' (NSFW designated)' : ''));
+        await reply('🔥 ACTIVATED: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ
+          ? '\n🞊 NSFW media group — explicit content goes HERE only'
+          : '') +
+          '\nMembers can just type "give me a … video / pics / song" in this chat now.\nEverything else stays ignored.\nDownloading "' + arg + '"…');
+      }
+      const ranked = await scraperVideoRanked(arg, {});
+      if (ranked.length){
+        rememberVideoSearch(chatJid, ranked, arg);
+        const sent = await sendRelevantBatch(chatJid, 1, { taskType: 'admin' });
+        if (sent){ resetDailyStats(); dailyStats.nsfwSent++; await reply('✅ Sent — say "next" for the next match.'); break; }
+      }
+      await reply('Searching "'+arg+'" via scrapper...');
+      const r = await scraperVideo(arg, null, null);
+      if (r.ok){
+        await sendMediaUrl(chatJid, r.mediaUrl, {
+          kind: 'video', mimetype: r.mimetype || 'video/mp4', caption: '🎬 ' + (r.title || arg).slice(0, 90),
+          priority: 0, lane: 'fast', taskType: 'admin', typing: false
+        });
+        resetDailyStats(); dailyStats.nsfwSent++;
+        await reply('Sent.');
+      } else if (r.available && r.available.length){
+        await reply('❌ No file. Available sites:\n' + r.available.map(s => '• ' + s.slot + ' — ' + s.name).join('\n'));
+      } else {
+        await reply('Err: ' + r.error);
+      }
       break;
     }
     case 'music': {
@@ -5745,14 +5917,26 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'nsfwvideo': {
-      /* v73.1: rides the configured video slots (scraper /video) — the
-       * old built-in Redgifs path is gone. Optional site pick:
-       *   !nsfwvideo <query>                → default order (YonaYethuu first)
+      /* v92: RANKED flow — scraper /video-ranked scores every candidate
+       * against the WHOLE query; the best pick is resolved into a real
+       * file, the ranked list is remembered for "next". Optional site
+       * pick still forces one slot:
+       *   !nsfwvideo <query>                → most relevant overall
        *   !nsfwvideo <query> site:yona      → force one site
        *   !nsfwvideo <query> #2 / @2        → force by listed position */
       const picked = parseVideoSitePick(args.slice(1).join(' '));
       if (!picked.query){ await reply('Usage: !nsfwvideo <query> [site:<name|#>]\n!vidsites lists the available video sites.'); return; }
-      await reply('Searching "'+picked.query+'"'+(picked.site ? ' on '+picked.site : '')+'...');
+      await reply('Searching "'+picked.query+'"'+(picked.site ? ' on '+picked.site : '')+' — best match first...');
+      const ranked = await scraperVideoRanked(picked.query, { site: picked.site });
+      if (ranked.length){
+        rememberVideoSearch(chatJid, ranked, picked.query);
+        const sent = await sendRelevantBatch(chatJid, 1, { taskType: 'admin' });
+        if (sent){
+          resetDailyStats(); dailyStats.nsfwSent++;
+          await reply('✅ Sent — say "next" for the next match (' + ranked.length + ' ranked).');
+          break;
+        }
+      }
       const r = await scraperVideo(picked.query, null, picked.site);
       if (r.ok){
         await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -6182,10 +6366,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'allowgroup': {
-      /* !allowgroup <invite link or @g.us JID> — whitelist a group and
-       * resolve the code to its REAL JID right away */
-      if (!args[1]){ await reply('Usage: !allowgroup <link-or-jid>\ne.g. !allowgroup https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW'); break; }
-      const arg = args.slice(1).join('').trim();
+      /* !allowgroup [link-or-jid] — whitelist a group and resolve the
+       * code to its REAL JID right away. v92: NO ARG = verify the group
+       * you're standing in (or the one the bot just asked you about). */
+      const arg = args.slice(1).join('').trim() || (isGroup ? chatJid : (pendingVerifyJid || ''));
+      if (!arg){ await reply('Usage: !allowgroup <link-or-jid>\nor run it INSIDE the group you want to allow, or right after my verification DM.'); break; }
       const r = accessCtl.addGroup(arg);
       if (!r.ok){ await reply('❌ ' + r.error); break; }
       if (r.added && r.code && sock){
@@ -6194,7 +6379,9 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
           if (info && info.id){ accessCtl.registerInviteJid(r.code, info.id); await reply('✅ Group allowed: ' + (info.subject || r.code) + ' → ' + info.id); break; }
         } catch (e) { await reply('✅ Link saved (' + r.code + ') — JID resolves when the bot next sees the group (' + e.message + ')'); break; }
       }
-      await reply(r.added ? '✅ Group allowed (' + (r.code || r.jid) + ')' : 'ℹ️ That group was already allowed');
+      await reply(r.added
+        ? '✅ Group ALLOWED: ' + (getGroupName(arg) || r.code || r.jid || arg) + '\nMedia requests work there now. NSFW designation: !nsfwgroup on (inside it) — or just !download <query>.'
+        : 'ℹ️ That group was already allowed');
       break;
     }
     case 'nsfwgroup': {
@@ -6845,6 +7032,20 @@ async function handleMessage(msg){
      *    speaks up in groups talking OTHER languages — Persian, Arabic…);
      *  · admin text bypasses all of it. */
     const gLang = await resolveGroupLang(chatJid, text);
+
+    /* ═══ v92 GROUP VERIFICATION — the boss: "the bot waits for 5
+     * messages and confirms the groups … ask admin for verification
+     * with group name". EVERY group is observed (even ones not on the
+     * whitelist) — after 5 messages in a group the bot isn't allowed
+     * in, it DMs the ADMIN a verification prompt WITH THE GROUP NAME.
+     * Nothing is ever sent into the group itself. */
+    groupListener.observe(chatJid, { senderJid, text, lang: gLang });
+    if (!accessCtl.isAllowedGroup(chatJid)){
+      await maybeVerifyGroup(chatJid);
+      pushLog('info','access','group silent — group-not-allowed (observing) · ' + (getGroupName(chatJid) || chatJid));
+      return;
+    }
+
     const gd = accessCtl.groupDecision(chatJid, gLang, isAdmin);
     if (!gd.reply){
       pushLog('info','access','group silent — ' + gd.reason + ' · ' + (getGroupName(chatJid) || chatJid));
@@ -6856,7 +7057,6 @@ async function handleMessage(msg){
      * group the bot doesn't know yet → NO auto-reply at all (commands
      * and localized verbs still work). Once the profile shows someone
      * actually asking the bot for something, full service switches on. */
-    groupListener.observe(chatJid, { senderJid, text, lang: gLang });
     const explicitRequest = text.startsWith('!') || !!multilang.localIntent(text);
     /* the designated NSFW group the admin ACTIVATED keeps full service —
      * listen-first only decides NEW/unknown groups */
@@ -6949,30 +7149,53 @@ async function handleMessage(msg){
           }
         }
         if (gIntent.type === 'video'){
-          /* ═══ v73 UPDATE: MEMBERS CAN REQUEST SPECIFIC VIDEOS — a real
-           * video engine (your configured video slots via scraper /video),
-           * NOT the gif channel it used to fall into ("wrong files"
-           * complaint). Rate limit: 3 video requests/hour per member. ═══ */
+          /* ═══ v92: THE MOST RELEVANT VIDEO — the query goes through the
+           * scraper's weighted ranked search (whole-query scoring); the
+           * best pick is resolved into a real file, the ranked list is
+           * remembered so "next" serves the following picks from the
+           * SAME search. Old single-shot /video stays as the fallback. ═══ */
           if (!isAdmin && !videoScheduler.canRequest(senderJid)){
             await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 3, 'slow', 'group', true);
             return;
           }
           if (!isVague(gIntent.query)){
-            await sendBuffer(chatJid, { text:'🎬 Finding "' + gIntent.query + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
-            const qr = await mediaQueue.run(chatJid, 'video', gIntent.query, async () =>
-              scraperVideo(gIntent.query, null, null, localCat(senderJid, chatJid, gLang)));
-            const r = qr.result;
-            if (r.ok){
+            const cnt = extractCountFromQuery(gIntent.query);   /* "5 porn videos" → count 5, query "porn" */
+            const vq = cnt.query || gIntent.query;
+            await sendBuffer(chatJid, { text:'🎬 Finding the best "' + vq + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
+            const qr = await mediaQueue.run(chatJid, 'video', vq, async () => {
+              const ranked = await scraperVideoRanked(vq, { boostCat: localCat(senderJid, chatJid, gLang) });
+              return { ok: ranked.length > 0, ranked };
+            });
+            const rs = qr.result;
+            if (rs.ok){
               if (!isAdmin) videoScheduler.recordRequest(senderJid);
-              await sendMediaUrl(chatJid, r.mediaUrl, {
-                kind: 'video', mimetype: r.mimetype || 'video/mp4',
-                caption: '🎬 ' + (r.title || gIntent.query).slice(0, 90),
+              rememberVideoSearch(chatJid, rs.ranked, vq);
+              const st = lastSearchByChat.get(chatJid);
+              const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group' });
+              if (sent){
+                resetDailyStats(); dailyStats.videosSent += sent;
+                if (isNsfw) dailyStats.nsfwSent += sent;
+                if (st && st.idx < st.results.length){
+                  await sendBuffer(chatJid, { text:'✅ ' + sent + ' of ' + st.results.length + ' matches sent — say "next" for more.' }, 3, 'slow', 'group', true);
+                }
+                return;
+              }
+              /* every ranked candidate failed → fall through to the old chain */
+            }
+            const r = await mediaQueue.run(chatJid, 'video', vq, async () =>
+              scraperVideo(vq, null, null, localCat(senderJid, chatJid, gLang)));
+            const rr = r.result;
+            if (rr.ok){
+              if (!isAdmin) videoScheduler.recordRequest(senderJid);
+              await sendMediaUrl(chatJid, rr.mediaUrl, {
+                kind: 'video', mimetype: rr.mimetype || 'video/mp4',
+                caption: '🎬 ' + (rr.title || vq).slice(0, 90),
                 priority: 3, lane: 'slow', taskType: 'group', typing: false
               });
               resetDailyStats(); dailyStats.videosSent++;
               if (isNsfw) dailyStats.nsfwSent++;
             } else {
-              await sendBuffer(chatJid, { text:'❌ No video for "' + gIntent.query + '" — try different words.' }, 3, 'slow', 'group', true);
+              await sendBuffer(chatJid, { text:'❌ No video for "' + vq + '" — try different words.' }, 3, 'slow', 'group', true);
             }
             return;
           }

@@ -53,7 +53,7 @@ const PHONE_COUNTRY = {
   '263': 'zimbabwe', '27': 'southafrica',
   '234': 'africa', '254': 'africa', '256': 'africa', '233': 'africa', '220': 'africa', '221': 'africa', '225': 'africa', '227': 'africa', '229': 'africa', '237': 'africa', '241': 'africa', '242': 'africa', '243': 'africa', '250': 'africa', '251': 'africa', '252': 'africa', '253': 'africa', '257': 'africa', '258': 'africa', '260': 'africa', '261': 'africa', '264': 'africa', '265': 'africa', '266': 'africa', '267': 'africa', '268': 'africa', '269': 'africa',
   '20': 'arab', '212': 'arab', '213': 'arab', '216': 'arab', '218': 'arab', '222': 'arab', '249': 'arab', '963': 'arab', '964': 'arab', '965': 'arab', '966': 'arab', '967': 'arab', '968': 'arab', '971': 'arab', '973': 'arab', '974': 'arab',
-  '98': 'persian', '91': 'indian',
+  '93': 'persian', '98': 'persian', '91': 'indian',
   '49': 'euro', '33': 'euro', '39': 'euro', '34': 'euro', '351': 'euro', '31': 'euro', '32': 'euro', '46': 'euro', '47': 'euro', '45': 'euro', '380': 'euro', '7': 'euro', '48': 'euro', '420': 'euro', '36': 'euro', '30': 'euro', '43': 'euro', '41': 'euro', '353': 'euro', '40': 'euro', '359': 'euro', '385': 'euro', '386': 'euro', '421': 'euro',
   '90': 'more', '81': 'more', '82': 'more', '52': 'more', '54': 'more', '55': 'more', '57': 'more', '51': 'more', '58': 'more'
 };
@@ -63,7 +63,7 @@ const LANG_CATEGORY = {
   fa: 'persian', ar: 'arab', hi: 'indian', ur: 'indian', bn: 'indian', ta: 'indian',
   yo: 'africa', ig: 'africa', ha: 'africa', sw: 'africa', am: 'africa',
   fr: 'euro', de: 'euro', it: 'euro', es: 'euro', pt: 'euro', ru: 'euro', nl: 'euro', pl: 'euro', uk: 'euro', ro: 'euro', el: 'euro', hu: 'euro', cs: 'euro', sv: 'euro',
-  tr: 'more', ja: 'more', ko: 'more'
+  tr: 'turkish', ja: 'japanese', ko: 'more', ru: 'russian'
 };
 function categoryByPhone(phone){
   const digits = String(phone || '').replace(/\D/g, '');

@@ -2189,7 +2189,11 @@ async function maybeVerifyGroup(chatJid){
     if (accessCtl.isAllowedGroup(chatJid)) return false;
     const p = groupListener.profileSummary(chatJid);
     if (!p || (p.msgs || 0) < VERIFY_AFTER_MSGS) return false;
-    if (verifyAsked[chatJid]) return false;           /* asked once per group */
+    /* v92.2: re-ask every 24h instead of once-forever — if the boss
+     * missed the first DM prompt the group used to stay locked out for
+     * good with no way back except a redeploy (which wipes data/ on
+     * Render anyway, but a persistent disk would never re-ask). */
+    if (verifyAsked[chatJid] && Date.now() - (verifyAsked[chatJid].at || 0) < 24 * 60 * 60 * 1000) return false;
     verifyAsked[chatJid] = { at: Date.now(), msgs: p.msgs };
     saveVerifyState();
     pendingVerifyJid = chatJid;
@@ -2983,6 +2987,124 @@ function parseVideoSitePick(raw){
   }
   return { query: rest.join(' ').trim(), site: site || undefined };
 }
+/* ══════════════════════════════════════════════════════════════
+ *  v92.2 SHORT COMMANDS — the boss: "the downloads commands are too
+ *  big … do something like nsfw.play ---- .play nle full album mp3/4
+ *  and nsfw.see nsfw.gif … super easy, same as in the other language".
+ *  Four tiny commands, NO ! needed, identical everywhere (admin DM,
+ *  whitelisted DM, activated groups):
+ *    nsfw.play <query>   → NSFW video — most relevant first (+ "next")
+ *    nsfw.see  <query>   → NSFW pictures
+ *    nsfw.gif  <query>   → NSFW gifs
+ *    .play     <query>   → music — "mp3" (default) or "mp4"/video in
+ *                          the query picks audio vs video
+ *  A leading ! or . is accepted and ignored: nsfw.play = !nsfw.play
+ *  = .nsfw.play. NSFW ones honor the group NSFW window outside the
+ *  activated designated group. Music "full album" goes to the YouTube
+ *  search chain as-is (albums resolve just like singles).
+ * ══════════════════════════════════════════════════════════════ */
+const SHORT_CMD_RE     = /^[.!]?\s*(nsfw\.play|nsfw\.see|nsfw\.gif|play)\s+([\s\S]+)$/i;
+const SHORT_CMD_BARE_RE = /^[.!]?\s*(nsfw\.play|nsfw\.see|nsfw\.gif|play)\s*$/i;
+function parseShortMediaCommand(text){
+  const t = String(text || '').trim();
+  if (!t || t.length > 300 || t.includes('\n')) return null;
+  const m = SHORT_CMD_RE.exec(t);
+  if (m){
+    const kind = m[1].toLowerCase();
+    let q = m[2].trim();
+    let mode = 'audio';
+    if (kind === 'play'){
+      if (/\bmp4\b|\bvideo\b/i.test(q)) mode = 'video';
+      q = q.replace(/\b(mp3|mp4|m4a|audio|video)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+      if (!q) return { kind:'play', query:'', bare:true, mode };
+    }
+    return { kind, query: q, mode };
+  }
+  const b = SHORT_CMD_BARE_RE.exec(t);
+  if (b) return { kind: b[1].toLowerCase(), query:'', bare:true, mode:'audio' };
+  return null;
+}
+const SHORT_CMD_USAGE = {
+  'nsfw.play': 'Usage: nsfw.play <query> — NSFW video, best match first (say "next" for more).',
+  'nsfw.see':  'Usage: nsfw.see <query> — NSFW pictures.',
+  'nsfw.gif':  'Usage: nsfw.gif <query> — NSFW gifs.',
+  'play':      'Usage: .play <song or album> [mp3|mp4] — music as audio (default) or video.'
+};
+async function runShortMediaCommand(chatJid, cmd, opts = {}){
+  const reply = opts.replyFn || ((t) => adminReply(chatJid, t));
+  const taskType = opts.taskType || 'admin';
+  const prefer = opts.prefer || getUserSitePref(opts.senderJid || '') || null;
+  const cat = opts.cat || null;
+  try {
+    if (cmd.bare || !cmd.query){
+      await reply(SHORT_CMD_USAGE[cmd.kind] || 'Usage: nsfw.play|nsfw.see|nsfw.gif <query> · .play <song> [mp3|mp4]');
+      return true;
+    }
+    if (cmd.kind === 'play'){
+      const q = cmd.query;
+      await reply('Searching "' + q + '" (' + cmd.mode + ')...');
+      const r = await musicDownload(q, cmd.mode);
+      if (!r.ok){ await reply('No ' + cmd.mode + ' for "' + q + '" — ' + (r.error || 'try different words')); return true; }
+      await sendMediaUrl(chatJid, r.mediaUrl, {
+        kind: cmd.mode === 'video' ? 'video' : 'audio',
+        mimetype: r.mimetype || (cmd.mode === 'video' ? 'video/mp4' : 'audio/mpeg'),
+        caption: (cmd.mode === 'video' ? '\uD83C\uDFAC ' : '\uD83C\uDFB5 ') + (r.title || q).slice(0, 90),
+        priority: 0, lane: 'fast', taskType, typing: false
+      });
+      resetDailyStats(); dailyStats.downloads++;
+      await reply('Sent.');
+      return true;
+    }
+    if (cmd.kind === 'nsfw.play'){
+      await reply('Searching "' + cmd.query + '" — best match first...');
+      const ranked = await scraperVideoRanked(cmd.query, { site: prefer || null });
+      if (ranked.length){
+        rememberVideoSearch(chatJid, ranked, cmd.query);
+        const sent = await sendRelevantBatch(chatJid, 1, { taskType, caption: '' });
+        if (sent){
+          resetDailyStats(); dailyStats.nsfwSent++;
+          await reply('Sent — say "next" for the next match (' + ranked.length + ' ranked).');
+          return true;
+        }
+      }
+      const r = await scraperVideo(cmd.query, null, prefer || null);
+      if (r.ok){
+        await sendMediaUrl(chatJid, r.mediaUrl, { kind:'video', mimetype:r.mimetype||'video/mp4',
+          caption:'\uD83C\uDFAC ' + (r.title||cmd.query).slice(0,90), priority:0, lane:'fast', taskType, typing:false });
+        resetDailyStats(); dailyStats.nsfwSent++;
+        await reply('Sent.');
+      } else {
+        await reply('No video for "' + cmd.query + '" — ' + (r.error || 'try different words'));
+      }
+      return true;
+    }
+    if (cmd.kind === 'nsfw.see' || cmd.kind === 'nsfw.gif'){
+      const wantGif = cmd.kind === 'nsfw.gif';
+      const cnt = extractCountFromQuery(cmd.query);
+      const q = cnt.query || cmd.query;
+      await reply('Searching "' + q + '" ' + (wantGif ? 'gifs' : 'pictures') + '...');
+      const r = wantGif
+        ? await scraperGif(q, true, prefer, cat)
+        : await scraperSearch(q, true, prefer, cat);
+      const list = (wantGif ? r.gifs : r.images) || [];
+      if (r.ok && list.length){
+        rememberSearch(chatJid, wantGif ? 'gif' : 'image', list, cmd.query);
+        const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType, caption: '' });
+        if (sent){ resetDailyStats(); dailyStats.picsSent += sent; dailyStats.nsfwSent += sent; }
+        else await reply('No working ' + (wantGif ? 'gif' : 'picture') + ' for "' + q + '" — try different words');
+      } else {
+        await reply('No ' + (wantGif ? 'gif' : 'picture') + ' found for "' + q + '"');
+      }
+      return true;
+    }
+    return false;
+  } catch(e){
+    pushLog('error','shortcmd', cmd.kind + ': ' + e.message);
+    try { await reply('Err: ' + e.message); } catch(e2){}
+    return true;
+  }
+}
+
 async function nsfwRoleplay(userName, text){
   /* v70: same persona + safety rails as the normal DM chat — she stays
    * in character, replies with ONE short message, never leaks her
@@ -4695,26 +4817,21 @@ MEDIA (via intelligent scrapper)
 !bcastpic <cap> / !bcastgif <cap> / !allimg <url> | <cap>
 (v91: users can also just say "5 pics of <q>" then "next" for more)
 
+SHORT COMMANDS (v92.2 — no ! needed, work in DM + activated groups)
+nsfw.play <q> — NSFW video, best match first · say "next" for more
+nsfw.see <q> — NSFW pictures · nsfw.gif <q> — NSFW gifs
+.play <song or album> [mp3|mp4] — music audio (default) or video
+(e.g. .play nle full album mp3 · nsfw.play latina · nsfw.see teen)
+
 DOWNLOADS (via intelligent scrapper — ONLY your configured slots, no built-in sites)
 !dl <q> / !download <url> / !music <q>
 !st <name> — FULL scraper test: search → download → sends the file here
 !nsfwvideo <q> [site:<name|#>] / !vidsites / !nsfw <url> · !nsfw on|off|auto (force window) / !nsfwroleplay on|off
 !scrapersearch <q> / !scrapergif <q> — raw endpoint tests
 
-STUDY BUDDY (v68 — buttons: send "menu")
-!menu — tap-button menus (main · school · study · groups · ads)
-!study [topic] / "what should I study" — ordered study plan
-!deadlines — everything due, soonest first
-!pdf <topic> / !pdf from <doc> — AI study notes as a real PDF
-!docs / !forgetdocs — documents I've read (PDF · DOCX · TXT, 12h)
-!updates — flush the group updates you need
+STUDY BUDDY — REMOVED in v92 (the boss took it out; buttons below are the remaining menus)
+!menu — tap-button menus (main · groups · ads)
 !tasks / !canceltask <id> — scheduled sends ("send 5 chess videos to this group by 5pm")
-
-SCHOOL (works in both modes)
-!today / !week / !timetable
-!addlecture <day> <HH:MM> <HH:MM> <name> | <venue>
-!dellecture <n> / !addassignment <YYYY-MM-DD> <module> <type> <title>
-!delassignment <n> / !weather [harare|bindura]
 
 CONTROL
 !pause / !resume / !offline <mins> / !online
@@ -4768,7 +4885,12 @@ const CASUAL_ALIASES = [
   { re:/^(twitter|tw)\b(.*)$/i,                                     to:'tw$2' },
   { re:/^(tiktok|tt)\b(.*)$/i,                                      to:'tt$2' },
   { re:/^(platforms|all platforms)\s*$/i,                            to:'platforms' },
-  { re:/^(broadcast all|broadcastall)\b(.*)$/i,                     to:'broadcastall$2' }
+  { re:/^(broadcast all|broadcastall)\b(.*)$/i,                     to:'broadcastall$2' },
+  /* v92.2 SHORT COMMANDS — the boss's tiny downloads, no ! needed */
+  { re:/^nsfw\.play\s+(.*)$/i,                                      to:'nsfw.play $1' },
+  { re:/^nsfw\.see\s+(.*)$/i,                                       to:'nsfw.see $1' },
+  { re:/^nsfw\.gif\s+(.*)$/i,                                       to:'nsfw.gif $1' },
+  { re:/^[.!]?play\s+(.*)$/i,                                       to:'play $1' }
 ];
 function parseCasualAdmin(text){
   if (!text) return null;
@@ -5567,6 +5689,14 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         priority: 0, lane: 'fast', taskType: 'admin', typing: false
       });
       await reply('Sent.');
+      break;
+    }
+    case 'nsfw.play': case 'nsfw.see': case 'nsfw.gif': case 'play': {
+      /* v92.2 SHORT COMMANDS — same engine everywhere; admin bypasses the
+       * NSFW window (admins always have). */
+      const parsed = parseShortMediaCommand(text)
+        || { kind: cmd, query: args.slice(1).join(' ').trim(), mode: /\bmp4\b|\bvideo\b/i.test(args.join(' ')) ? 'video' : 'audio' };
+      await runShortMediaCommand(chatJid, parsed, { taskType: 'admin' });
       break;
     }
     case 'nsfwvideo': {
@@ -6400,7 +6530,7 @@ async function handleMessage(msg){
           }
           /* v92: the brain may NOT synthesize download commands —
            * media requests ride the deterministic chain only */
-          if (/^!(dl|download|music|nsfwvideo|pic|gif)/i.test(synth)){
+          if (/^!(dl|download|music|nsfwvideo|pic|gif|nsfw\.play|nsfw\.see|nsfw\.gif|play)/i.test(synth)){
             pushLog('info','brain','admin synth download refused (v92 separation): ' + synth);
             return;
           }
@@ -6547,9 +6677,25 @@ async function handleMessage(msg){
      * Nothing is ever sent into the group itself. */
     groupListener.observe(chatJid, { senderJid, text, lang: gLang });
     if (!accessCtl.isAllowedGroup(chatJid)){
+      /* v92.4 BOSS RULE, tightened: "the groups which speak in english or
+       * shona do not send anything in there — only groups in other
+       * languages mainly persian, and only the dm numbers in the config
+       * and the admins are allowed to be replied; everyone else is
+       * perfectly ignored."
+       *   · English/Shona/Ndebele group (whitelisted or NOT) → TOTAL
+       *     silence, not even the verification machinery replies there.
+       *   · A group speaking a FOREIGN language (Persian, Arabic, …)
+       *     gets SERVED even without the whitelist — explicit requests,
+       *     commands and the short commands all work.
+       *   · The admin still gets the one-time verification notice so he
+       *     knows the group exists (it never replies inside the group). */
       await maybeVerifyGroup(chatJid);
-      pushLog('info','access','group silent — group-not-allowed (observing) · ' + (getGroupName(chatJid) || chatJid));
-      return;
+      const foreign = !accessCtl.HOME_LANGS.includes(String(gLang || 'en').toLowerCase());
+      if (!foreign){
+        pushLog('info','access','group silent — english/shona (boss rule, perfectly ignored) · ' + (getGroupName(chatJid) || chatJid));
+        return;
+      }
+      pushLog('info','access','foreign-language group served without whitelist (' + gLang + ') · ' + (getGroupName(chatJid) || chatJid));
     }
 
     const gd = accessCtl.groupDecision(chatJid, gLang, isAdmin);
@@ -6563,7 +6709,11 @@ async function handleMessage(msg){
      * group the bot doesn't know yet → NO auto-reply at all (commands
      * and localized verbs still work). Once the profile shows someone
      * actually asking the bot for something, full service switches on. */
-    const explicitRequest = text.startsWith('!') || !!multilang.localIntent(text);
+    /* v92.2: the short commands (nsfw.play / nsfw.see / nsfw.gif / .play)
+     * count as explicit requests too — they must never be eaten by
+     * listen-first. */
+    const shortCmd = parseShortMediaCommand(text);
+    const explicitRequest = text.startsWith('!') || !!multilang.localIntent(text) || !!shortCmd;
     /* the designated NSFW group the admin ACTIVATED keeps full service —
      * listen-first only decides NEW/unknown groups */
     const designated = accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated();
@@ -6590,6 +6740,24 @@ async function handleMessage(msg){
       if (isNextRequest(text)){
         const handled = await handleNextMedia(chatJid,
           (t) => sendBuffer(chatJid, { text: t }, 3, 'slow', 'group', true), 'group');
+        if (handled) return;
+      }
+      /* ═══ v92.2 SHORT COMMANDS — nsfw.play / nsfw.see / nsfw.gif / .play ═══
+       * Handled BEFORE the brain so they stay deterministic. The NSFW
+       * ones obey the same window rule as every other explicit request:
+       * always open in the admin-activated designated group, clock-gated
+       * elsewhere; admins bypass. */
+      if (shortCmd){
+        const shortNsfw = shortCmd.kind !== 'play';
+        if (shortNsfw && !isAdmin && !nsfwOpen){
+          await sendBuffer(chatJid, { text: await t2(chatJid,'Not right now, try after 9pm') }, 3, 'slow', 'group', true);
+          return;
+        }
+        const handled = await runShortMediaCommand(chatJid, shortCmd, {
+          replyFn: (t) => sendBuffer(chatJid, { text: t }, 3, 'slow', 'group', true),
+          taskType: 'group', senderJid, isAdmin,
+          cat: localCat(senderJid, chatJid, gLang)
+        });
         if (handled) return;
       }
       /* ═══ v71.5 AI BRAIN decides FIRST — regex chain stays as the
@@ -6990,6 +7158,13 @@ async function connectBot(){
         const fresh = getSelfLid();
         if (fresh){ botLid = fresh; pushLog('success','bot','Bot LID learned (creds): ' + botLid); }
       }
+      /* v92.3: AUTOMATIC session backup — whenever the authentic session
+       * changes (keys rotate, device re-registers), the encrypted blob is
+       * pushed to the secret gist 90s later (debounced). Every future
+       * deploy restores THIS session — no QR, no phone, no manual copy. */
+      if (!LOADTEST && connectionStatus === 'connected'){
+        try { sessionStore.schedulePush(AUTH_FOLDER); } catch(e){}
+      }
     });
     sock.ev.on('group-participants.update', async (u)=>{ try { await handleParticipants(u); } catch(e){ pushLog('error','group',e.message); } });
     sock.ev.on('messages.upsert', async function(data){
@@ -7138,6 +7313,9 @@ const translator = require('./translator');   /* v85: free no-signup translation
  * designated group (see access.js). Initialized with the admin number,
  * which is always auto-added to config/allowed-numbers.txt. */
 const accessCtl = require('./access');
+/* v92.3: GitHub-backed automatic session backup — the authentic session
+ * survives EVERY redeploy (secret encrypted gist, restore at boot). */
+const sessionStore = require('./session-store');
 const accessInfo = accessCtl.init(ADMIN_PHONE);
 pushLog('info', 'access', `whitelist loaded — ${accessInfo.numbers} numbers, ${accessInfo.groups} groups` +
   (accessCtl.getDesignated() ? (`, NSFW group ${accessCtl.isNsfwActivated() ? 'ACTIVE' : 'awaiting activation'}`) : ''));
@@ -7231,6 +7409,16 @@ async function replyInLang(chatJid, lang, text){
 /* shorthand — translate a short template string into the chat's language */
 async function t2(chatJid, s){
   try { return await replyInLang(chatJid, getChatLang(chatJid), s); } catch (e) { return s; }
+}
+/* v92.2 FIX — the v92.1 multilingual DM search referenced `searchQ` but
+ * NEVER defined it: every whitelisted-DM media request died with
+ * "ReferenceError: searchQ is not defined" (one of the "bot ignores my
+ * messages" holes). The speaker keeps their own words in the replies;
+ * the SEARCH runs on the English translation (falls back to the raw
+ * query when translation is off/unreachable — same rule as groups). */
+async function dmEnglishQuery(chatJid, q){
+  try { return await textToEnglish(chatJid, getChatLang(chatJid), q); }
+  catch (e) { return q; }
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -7428,11 +7616,33 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
       (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply');
     if (handled) return;
   }
+  /* ═══ v92.2 SHORT COMMANDS — .play / nsfw.play / nsfw.see / nsfw.gif ═══
+   * Super-easy downloads with no ! — the boss asked for them to feel the
+   * same everywhere. NSFW ones are admin + activated-group only; a
+   * whitelisted DM gets pointed at .play instead. */
+  const dmShort = parseShortMediaCommand(text);
+  if (dmShort){
+    if (dmShort.kind !== 'play'){
+      pushLog('info','access','nsfw short command in DM — admin/activated group only: ' + pushName);
+      await sendBuffer(chatJid, { text: 'NSFW commands work for the admin and in the activated group — use .play <song> [mp3|mp4] here.' }, 2, 'slow', 'dmreply', true);
+      return;
+    }
+    const handled = await runShortMediaCommand(chatJid, dmShort, {
+      replyFn: (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true),
+      taskType: 'dmreply', senderJid,
+      cat: localCat(senderJid, chatJid)
+    });
+    if (handled) return;
+  }
   const intent = detectMediaIntent(text);
   if (!intent || isVague(intent.query)){       /* not a command → silence */
     pushLog('info','access','whitelisted DM, non-command — silent: ' + pushName);
     return;
   }
+  /* v92.2 FIX: searchQ was referenced but never defined (ReferenceError
+   * killed EVERY DM media request). Define it here: display keeps the
+   * speaker's words, the search runs the English translation. */
+  const searchQ = await dmEnglishQuery(chatJid, intent.query);
   const prefer = getUserSitePref(senderJid);
   pushLog('info','access','whitelisted DM command: ' + intent.type + ' "' + intent.query + '"' + (prefer ? ' [' + prefer + ']' : ''));
   if (intent.type === 'music'){
@@ -7692,10 +7902,11 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div id="taResult" style="font-size:11px;line-height:1.7;max-height:300px;overflow-y:auto;display:none;background:#0d1117;border-radius:6px;padding:8px"></div>
 </div>
 <div class="card"><h2>💾 Session Backup — never re-scan after a deploy</h2>
-<div style="font-size:11px;line-height:1.65;color:#8b949e">Render wipes the session on EVERY deploy → QR re-scan hell → "bot not receiving messages". Fix: when an account is connected, copy its blob below into Render env <b>SESSION_B64_GROUPS</b> (one time). Every future boot auto-restores — no QR, no phone.</div>
+<div style="font-size:11px;line-height:1.65;color:#8b949e">v92.3 — AUTOMATIC: with <b>GITHUB_TOKEN</b> (+ recommended <b>SESSION_SECRET</b>) in Render env, the connected session pushes itself (AES-256-GCM encrypted) to a secret gist on every change and every future deploy restores it — no blob copying, no QR. Manual mode still works: copy the blob below into Render env <b>SESSION_B64_GROUPS</b> (one time).</div>
 <div id="sbStatus" style="font-size:12px;line-height:1.8;margin:8px 0;color:#8b949e">click Check / Refresh…</div>
 <button onclick="loadSessionBackup()">Check / Refresh</button>
 <button onclick="copySessionBlob('groups')">Copy GROUPS blob</button>
+<button onclick="pushSessionNow()">Push to GitHub now</button><span id="psStatus" style="font-size:11px;color:#8b949e;margin-left:8px"></span>
 
 <div style="margin-top:8px"><textarea id="sbPaste" placeholder="…or paste a saved blob here and restore it into THIS deployment (no redeploy needed)" style="width:100%;height:54px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;font-size:11px;font-family:monospace"></textarea>
 <select id="sbSlot" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;margin:4px 0"><option value="groups">groups (QR 1)</option></select>
@@ -8138,6 +8349,9 @@ async function restoreSessionBlobUi(){var blob=$('sbPaste').value.trim();if(!blo
 var r=await api('session-restore','POST',{slot:$('sbSlot').value,blob:blob});
 $('sbStatus').innerHTML=r.ok?'<span style="color:#3fb950">'+esc(r.note||'restored')+'</span>':'<span style="color:#f85149">'+esc(r.error||'failed')+'</span>';
 setTimeout(loadSessionBackup,2000);}
+async function pushSessionNow(){var b=$('psStatus');b.innerHTML='pushing…';try{var r=await api('session-push','POST',{});
+if(r.ok){b.innerHTML='<span style="color:#3fb950">'+esc(r.action||'pushed')+' — future deploys auto-restore this session</span>';}
+else{b.innerHTML='<span style="color:#d29922">'+esc(r.error||'not pushed — add GITHUB_TOKEN in Render env')+'</span>';}}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 function logRow(en){var div=document.createElement('div');var t=new Date(en.ts).toLocaleTimeString();
 var src=esc(en.source);var platBadge='';if(src==='twitter')platBadge='<span style="color:#58a6ff">🐦</span>';else if(src==='facebook')platBadge='<span style="color:#1877f2">📘</span>';else if(src==='youtube')platBadge='<span style="color:#f00">▶️</span>';else if(src==='tiktok')platBadge='<span style="color:#ee1d46">🎵</span>';else if(src==='whatsapp'||src==='groups')platBadge='<span style="color:#25d366">📱</span>';
 div.innerHTML='<span style="color:#484f58">'+t+'</span> '+platBadge+' <span style="color:#58a6ff">['+en.level+']</span> <span style="color:#8b949e">'+src+'</span> '+esc(en.message);return div;}
@@ -8768,8 +8982,47 @@ if (!app._router || !app._router.stack || !app._router.stack.some(function(l) { 
 }
 
 
-app.get('/', function(req,res){ res.send(PANEL_HTML); });
+/* v92.4 CRON FIX — cron-job.org pings GET / and got the WHOLE panel HTML
+ * ("output too large" → job failing). Browsers get the panel (Accept:
+ * text/html), everything else (cron, curl, uptime pings) gets a tiny
+ * JSON 200. ?panel=1 forces the panel for anyone. */
+app.get('/', function(req,res){
+  const accept = String(req.headers.accept || '');
+  const ua = String(req.headers['user-agent'] || '');
+  /* v92.4: cron-job.org was failing with "output too large" — the panel
+   * HTML is huge. Browsers (Accept: text/html) get the full panel; ANY
+   * monitor/cron/curl UA (or a non-browser accept header) gets a tiny
+   * 200 JSON instead. The cron can keep pinging / — it always answers
+   * small now; /ping stays as the ultra-small option. */
+  const isCron = /cron-job|cronjob|uptime|ping|monitor|curl|wget|python-requests|go-http/i.test(ua);
+  if (isCron) return res.json({ ok: true, bot: connectionStatus, ping: 'pong', ts: new Date().toISOString() });
+  if (accept.includes('text/html') || req.query.panel === '1') return res.send(PANEL_HTML);
+  res.json({ ok: true, bot: connectionStatus, ts: new Date().toISOString() });
+});
 app.get('/admin', function(req,res){ res.send(PANEL_HTML); });
+
+/* v92.2 targeted single-message injection — runs ONE message through the
+ * REAL handler pipeline (dedup, gates, dispatch) with the stub socket:
+ * POST /loadtest/one { text, dm:true|false, fromMe:true|false, jid } */
+app.post('/loadtest/one', async function(req,res){
+  if (!LOADTEST) return res.status(400).json({ error:'Start the server with LOADTEST=1' });
+  const body = req.body || {};
+  const text = String(body.text || '');
+  if (!text) return res.status(400).json({ error:'text required' });
+  const fromMe = body.fromMe !== false;                 /* default: speak as the boss */
+  const dm = !!body.dm;
+  const jid = String(body.jid || (dm ? '263777627210@s.whatsapp.net' : mainGroupJid));
+  const id = 'one-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
+  const fake = {
+    key: { id, remoteJid: jid, participant: dm ? undefined : '263777627210@s.whatsapp.net', fromMe },
+    pushName: 'Admin',
+    message: { conversation: text }
+  };
+  const before = lt.rec.sends.length;
+  try { await handleMessage(fake); } catch(e){ return res.json({ ok:false, error:e.message }); }
+  const sends = lt.rec.sends.slice(before);
+  res.json({ ok:true, id, jid, dm, fromMe, handled: true, sends: sends.map(s=>({ jid:s.jid, media: s.media || 'text', text: s.text })) });
+});
 
 /* v67: LOADTEST endpoints (only exist when LOADTEST=1 is meaningful) */
 app.post('/loadtest/inject', function(req,res){
@@ -9003,8 +9256,16 @@ app.get('/admin/pair-status', function(req,res){
 /* ═══ v70 SESSION BACKUP endpoints ═══ */
 app.get('/admin/session-backup', function(req,res){
   try {
-    res.json({ groups: sessionInfo(AUTH_FOLDER, 'SESSION_B64_GROUPS') });
+    res.json({ groups: sessionInfo(AUTH_FOLDER, 'SESSION_B64_GROUPS'), cloud: sessionStore.status() });
   } catch(e){ res.json({ error:e.message }); }
+});
+/* v92.3: force-push the CURRENT authentic session to the secret gist */
+app.post('/admin/session-push', async function(req,res){
+  try {
+    const r = await sessionStore.pushSessionBlob(AUTH_FOLDER);
+    if (r.ok) pushLog('success','session','session pushed to GitHub gist (' + r.action + ') — future deploys auto-restore it');
+    res.json({ ...r, cloud: sessionStore.status() });
+  } catch(e){ res.json({ ok:false, error:e.message, cloud: sessionStore.status() }); }
 });
 app.post('/admin/session-restore', async function(req,res){
   const slot  = 'groups';   /* v92: single account */
@@ -10350,9 +10611,9 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   pushLog('info','env','SCRAPER='+SCRAPER_URL);
   pushLog('info','env','MY LINKS: ' + (MY_LINKS_ENV.length ? MY_LINKS_ENV.length + ' url(s) — sent with every search, YOUR sites tried FIRST' : 'none — add MYLINKS=https://yoursite.com in env to download from your websites'));
   pushLog('info','session',
-    'groups: ' + (fs.existsSync(path.join(AUTH_FOLDER,'creds.json')) ? 'creds on disk' : (process.env.SESSION_B64_GROUPS ? 'will RESTORE from env' : 'no session — QR scan needed'))
+    'groups: ' + (fs.existsSync(path.join(AUTH_FOLDER,'creds.json')) ? 'creds on disk' : (process.env.SESSION_B64_GROUPS ? 'will RESTORE from env' : (sessionStore.status().configured ? 'will RESTORE from GitHub gist' : 'no session — QR scan needed')))
 
-    + ' — after pairing, copy the blobs (panel 💾 card) into SESSION_B64_* env to survive redeploys');
+    + ' — v92.3: with GITHUB_TOKEN in env the session backs ITSELF up (auto gist) and every deploy restores it; manual fallback is still the panel blob into SESSION_B64_*');
   pushLog('info','admin','LID-aware detection enabled');
   pushLog('info','ai','DM batch: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' per '+(DM_CYCLE_MS/1000)+'s');
 
@@ -10381,22 +10642,47 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   })();
 
   /* v70: restore saved sessions BEFORE connecting — kills the
-   * re-scan-after-every-deploy cycle on Render's ephemeral disk. */
+   * re-scan-after-every-deploy cycle on Render's ephemeral disk.
+   * v92.3: the chain is now env blob → GitHub gist (the encrypted
+   * auto-backup of the CURRENT authentic session). The gist wins when
+   * both exist — it is refreshed on every creds change automatically.
+   * v92.4: connectBot WAITS for the cloud restore now — before, the
+   * async restore raced the QR and the bot could show a QR for a
+   * session that was about to come back from the gist. */
   ensureSessionFromEnv('groups', AUTH_FOLDER, 'SESSION_B64_GROUPS');
-
-  /* v82: School account DISABLED by default — single account mode.
-   * The school account code is kept for !school on/off toggle but
-   * does NOT auto-start. This removes the second QR card and the
-   * "Initializing school account..." log noise. Re-enable with
-   * ADMIN env: ENABLE_SCHOOL=true or panel toggle. */
-  if (LOADTEST){
-    makeLoadtestStub();
-    // School stub skipped in v82 (single-account mode by default)
-  } else {
-    connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
-    /* v92: the school account is REMOVED (boss: "totally remove the
-     * school buddy") — single manager bot, nothing to enable. */
-  }
+  (async () => {
+    try {
+      if (!fs.existsSync(path.join(AUTH_FOLDER, 'creds.json'))){
+        const r = await sessionStore.restoreLatest(AUTH_FOLDER);
+        if (r && r.ok){
+          pushLog('success','session','groups: session RESTORED from GitHub gist (auto-backup of ' + new Date(r.ts).toISOString() + ') — NO QR scan needed');
+        } else if (r && r.reason && r.reason !== 'no backup gist yet' && r.reason !== 'local session already on disk'){
+          pushLog('warn','session','cloud restore did not apply: ' + r.reason);
+        }
+      }
+      sessionStore.startAutoBackup(AUTH_FOLDER);
+      if (sessionStore.status().configured){
+        pushLog('info','session','auto-backup ON — the session pushes itself to the secret gist on every change (restore source for future deploys)');
+      } else {
+        pushLog('info','session','auto-backup OFF — add GITHUB_TOKEN (+ recommended SESSION_SECRET) in Render env and the session backs itself up automatically');
+      }
+    } catch(e){
+      pushLog('info','session','cloud session restore skipped: ' + e.message);
+    }
+    /* v82: School account DISABLED by default — single account mode.
+     * The school account code is kept for !school on/off toggle but
+     * does NOT auto-start. This removes the second QR card and the
+     * "Initializing school account..." log noise. Re-enable with
+     * ADMIN env: ENABLE_SCHOOL=true or panel toggle. */
+    if (LOADTEST){
+      makeLoadtestStub();
+      // School stub skipped in v82 (single-account mode by default)
+    } else {
+      connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
+      /* v92: the school account is REMOVED (boss: "totally remove the
+       * school buddy") — single manager bot, nothing to enable. */
+    }
+  })();
 });
 /* v84.3: double-boot used to crash-loop (EADDRINUSE → exit 1 → your
  * process manager restarts → forever). Now: detect the sibling, say so,

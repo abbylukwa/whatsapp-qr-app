@@ -4354,33 +4354,6 @@ async function processDM(item){
  *  hour — same 5-message memory + greeting-restart rules. The boss
  *  is exempt from the DM window and quiet hours, 24/7.
  * ══════════════════════════════════════════════════════════════ */
-async function adminDmChat(chatJid, text){
-  if (isGreetingRestart(text)) resetConversation(chatJid, 'admin greeting restart');
-  const hist = userHistories.get(chatJid) || [];
-  const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
-  const transcript = recentTurns.map(h => (h.role === 'bot' ? AI_NAME : 'Them') + ': ' + h.text).join('\n');
-  const fullPrompt = transcript
-    ? ('Recent conversation:\n' + transcript + '\n\nNew message they just sent:\nThem: ' + text + '\n\nReply to the LATEST message as ' + AI_NAME + '. This is a NEW reply. Send only the message itself.')
-    : text;
-  /* v70: same persona as user DMs (message-only format, same safety
-   * rails) with one admin-specific line bolted on. */
-  const sys = aiPersonaSys('English')
-    + ' You are chatting with the admin (the boss) — be helpful and on their side. '
-    + 'If their latest message is a greeting (hey/hi/hello/mhoro), it is a NEW conversation: greet back fresh and NEVER bring up old topics.';
-  let aiReply = await askAI(fullPrompt, sys);
-  if (!aiReply){
-    await adminReply(chatJid, '(AI is down right now — but I got your message. Run !test for diagnostics.)');
-    return;
-  }
-  aiReply = sanitizeAiReply(aiReply);   /* v70: format rule enforced in code */
-  hist.push({ role:'user', text, ts:Date.now() });
-  hist.push({ role:'bot',  text:aiReply, ts:Date.now() });
-  while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
-  userHistories.set(chatJid, hist);
-  persistDmHistories();
-  await sendBuffer(chatJid, { text: informalize(aiReply) }, 0, 'fast', 'admin', false);
-  resetDailyStats(); dailyStats.dmsReplied++;
-}
 
 /* ══════════════════════════════════════════════════════════════
  *  PENDING REQUESTS

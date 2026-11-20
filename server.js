@@ -1707,6 +1707,41 @@ async function resolveInviteToJid(link){
 /* ══════════════════════════════════════════════════════════════
  *  MEDIA DOWNLOAD + SEND
  * ══════════════════════════════════════════════════════════════ */
+/* v89 IMAGE REALNESS — magic-byte sniffing + dimension gate. The boss
+ * got "dummy variables" in results: 1px placeholders, 614x213 scraper
+ * banners, 200px thumbnails. Anything under 300px wide/tall is junk to
+ * the members — rejected at DELIVERY time, not just in tests. */
+function mediaSniff(buf){
+  if (!buf || buf.length < 16) return { kind: null };
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF){
+    for (let i = 2; i < buf.length - 9;){
+      if (buf[i] !== 0xFF){ i++; continue; }
+      const m = buf[i + 1];
+      if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC){
+        return { kind: 'jpeg', w: buf.readUInt16BE(i + 5), h: buf.readUInt16BE(i + 7) };
+      }
+      if (m === 0xD8 || (m >= 0xD0 && m <= 0xD9)){ i += 2; continue; }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+    return { kind: 'jpeg' };
+  }
+  if (buf[0] === 0x89 && buf[1] === 0x50) return { kind: 'png', w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  if (buf.slice(0, 3).toString() === 'GIF') return { kind: 'gif', w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+  if (buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP') return { kind: 'webp' };
+  if (buf.slice(4, 8).toString() === 'ftyp') return { kind: 'mp4' };
+  if (buf[0] === 0x1A && buf[1] === 0x45) return { kind: 'webm' };
+  return { kind: null };
+}
+const MEDIA_MIN_DIM = parseInt(process.env.MEDIA_MIN_DIM || '300', 10);
+function imageTooSmall(buf){
+  const s = mediaSniff(buf);
+  if (!s.kind) return 'not-an-image (magic bytes)';
+  if (s.w && s.h){
+    if (s.w < MEDIA_MIN_DIM || s.h < MEDIA_MIN_DIM) return `tiny-dims(${s.w}x${s.h} — logo/placeholder?)`;
+    if (Math.max(s.w, s.h) / Math.min(s.w, s.h) > 4) return `banner-ratio(${s.w}x${s.h})`;
+  }
+  return null;
+}
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
   const resp = await axios.get(url, {
     responseType: 'arraybuffer', timeout: 60000,
@@ -1718,6 +1753,11 @@ async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'i
   if (buf.length > maxBytes) throw new Error(`Media too big (${(buf.length/1024/1024).toFixed(1)}MB > 34MB)`);
   if (buf.length < 32) throw new Error('Media empty');
   const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
+  /* v89: image realness gate — logos/placeholders/banners never reach a member */
+  if (expectType === 'image'){
+    const junk = imageTooSmall(buf);
+    if (junk) throw new Error('dummy result rejected: ' + junk);
+  }
   return { buffer: buf, mimetype, sizeBytes: buf.length };
 }
 /* ═══ v68.5 NO-REPEAT DOWNLOADS — per-chat memory of recently sent media.
@@ -2914,6 +2954,18 @@ function detectMediaIntent(text){
     q = cleanQuery(q);
     return { type:'image', query: q || 'naija' };
   }
+  /* v90 MULTILINGUAL — nothing English matched: try the localized verb
+   * table (fa/ar/hi/sn/nd/zu/sw/es/fr/pt/ru/tr + non-QWERTY recovery).
+   * 'عکس جنیفر' or garbled 'sdi sjanifr' from a Persian keyboard both
+   * land here as a picture intent. */
+  const loc = multilang.localIntent(text);
+  if (loc){
+    if (loc.type === 'download'){
+      /* bare "دانلود" with no word after it → treat as picture request */
+      return { type:'image', query: loc.query || 'trending' };
+    }
+    return { type: loc.type, query: cleanQuery(loc.query) || (multilang.DEFAULTS[loc.type] || 'trending') };
+  }
   return null;
 }
 function detectNsfw(text){
@@ -4044,7 +4096,8 @@ async function processDM(item){
 
   if (intent && intent.type === 'music'){
     try {
-      const r = await musicDownload(intent.query, 'audio');
+      const qr = await mediaQueue.run(chatJid, 'music', intent.query, async () => musicDownload(intent.query, 'audio'));
+      const r = qr.result;
       if (!r.ok){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow', 'dmreply', true); return; }
       await sendBuffer(chatJid, { text:'Found '+r.title+'. Sending...' }, 2, 'slow', 'dmreply', true);
       await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -4087,7 +4140,9 @@ async function processDM(item){
           await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 2, 'slow', 'dmreply', true);
           return;
         }
-        const rv = await scraperVideo(intent.query, null, null, localCat(senderJid, chatJid));
+        const qrv = await mediaQueue.run(chatJid, 'video', intent.query, async () =>
+          scraperVideo(intent.query, null, null, localCat(senderJid, chatJid)));
+        const rv = qrv.result;
         if (rv.ok){
           if (!dmAdmin) videoScheduler.recordRequest(senderJid);
           await sendMediaUrl(chatJid, rv.mediaUrl, {
@@ -4099,14 +4154,18 @@ async function processDM(item){
           return;
         }
       } else if (intent.type === 'gif'){
-        const r = await scraperGif(intent.query, false, null, localCat(senderJid, chatJid));
+        const qrg = await mediaQueue.run(chatJid, 'gif', intent.query, async () =>
+          scraperGif(intent.query, false, null, localCat(senderJid, chatJid)));
+        const r = qrg.result;
         if (r.ok && r.gifs.length){
           await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
           resetDailyStats(); dailyStats.picsSent++;
           return;
         }
       } else {
-        const r = await scraperSearch(intent.query, false, null, localCat(senderJid, chatJid));
+        const qri = await mediaQueue.run(chatJid, 'image', intent.query, async () =>
+          scraperSearch(intent.query, false, null, localCat(senderJid, chatJid)));
+        const r = qri.result;
         if (r.ok && r.images.length){
           await sendImageSafe(chatJid, pickFresh(r.images, chatJid), '', 2, 'slow', 'dmreply', true);
           resetDailyStats(); dailyStats.picsSent++;
@@ -4756,7 +4815,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
 
   /* v66: school instance = read-only monitor. Mass-messaging, joining,
    * downloads and NSFW are disabled there; reports work everywhere. */
-  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick','allow','deny','allowgroup','nsfwgroup','reloadaccess','sitehealth'];
+  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick','allow','deny','allowgroup','nsfwgroup','reloadaccess','sitehealth','engage','silence','listen','listener'];
   const schoolBlockedNow = SCHOOL_MODE || (opts && opts.account === 'school');
   if (schoolBlockedNow && SCHOOL_BLOCKED.includes(cmd)){
     await reply('🏫 School mode — this instance only READS groups and sends reports.\nUse: !today · !week · !timetable · !weather');
@@ -5994,6 +6053,34 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply('🔄 Access files reloaded — ' + accessCtl.allowedNumbers().length + ' numbers, ' + (accessCtl.allowedGroupCodes().length + accessCtl.allowedGroupJids().length) + ' groups. NSFW: ' + (accessCtl.isNsfwActivated() ? 'ACTIVE' : 'silent'));
       break;
     }
+    case 'engage': {
+      /* v90: force full service in this group (overrides the listener) */
+      groupListener.setMode(chatJid, 'engage');
+      await reply('✅ Full service ON here — auto media + replies active.');
+      break;
+    }
+    case 'silence': {
+      /* v90: bot reads the group but auto-replies to nothing; explicit
+       * commands (and localized verbs) still work */
+      groupListener.setMode(chatJid, 'silent');
+      await reply('🤫 Listening mode — I will read but not auto-reply here. Commands still work (!… and words like عکس / picha / foto).');
+      break;
+    }
+    case 'listen': {
+      /* v90: back to observe — the bot re-profiles from the next messages */
+      groupListener.clearMode(chatJid);
+      await reply('👂 Listening again — I will profile the next few messages and decide engage vs silent.');
+      break;
+    }
+    case 'listener': {
+      const p = groupListener.profileSummary(chatJid);
+      const s = groupListener.summary();
+      if (!p){ await reply('No profile yet for this group — send a few messages.'); break; }
+      await reply('👂 *LISTEN-FIRST*\nThis group: ' + p.mode + ' · ' + p.msgs + ' msgs observed · ' + p.intents + ' bot-directed · ' + p.senders + ' speakers · langs: ' + p.langs +
+        '\nAll groups: ' + s.byMode.observe + ' observing · ' + s.byMode.engage + ' engaged · ' + s.byMode.silent + ' silent (' + s.overrides + ' admin-set)' +
+        '\n\nForce: !engage · !silence · !listen');
+      break;
+    }
     case 'sitehealth': {
       /* v88: registry + music provider health — !sitehealth [check] */
       if ((args[1] || '').toLowerCase() === 'check'){
@@ -6091,9 +6178,11 @@ async function brainHandleGroup(chatJid, dec, opts){
   if (dec.action === 'music'){
     let acked = false;
     try {
-      const r = await musicDownload(q, 'audio');
+      /* v90: queue + coalesce — same song asked twice shares one fetch */
+      const qr = await mediaQueue.run(chatJid, 'music', q, async () => musicDownload(q, 'audio'));
+      const r = qr.result;
       if (r.ok){
-        await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
+        await sendBuffer(chatJid, { text: await t2(chatJid, (qr.shared ? 'Already fetching that — ' : '') + r.title+' - sending...') }, 3, 'slow', 'group', true);
         acked = true;
         /* v72.2: once the ack is out, this message is CONSUMED — a failed
          * send must not fall back to the legacy chain (it would re-ack
@@ -6111,7 +6200,9 @@ async function brainHandleGroup(chatJid, dec, opts){
   }
   if (dec.action === 'gif'){
     try {
-      const r = await scraperGif(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang));
+      const qr = await mediaQueue.run(chatJid, 'gif', q, async () =>
+        scraperGif(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang)));
+      const r = qr.result;
       if (r.ok && r.gifs.length){
         await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
         resetDailyStats(); dailyStats.picsSent++;
@@ -6133,7 +6224,9 @@ async function brainHandleGroup(chatJid, dec, opts){
     }
     await sendBuffer(chatJid, { text:'🎬 Finding "' + q + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
     try {
-      const r = await scraperVideo(q, null, null, localCat(senderJid, chatJid, opts && opts.lang));
+      const qr = await mediaQueue.run(chatJid, 'video', q, async () =>
+        scraperVideo(q, null, null, localCat(senderJid, chatJid, opts && opts.lang)));
+      const r = qr.result;
       if (r.ok){
         if (!isAdmin && senderJid) videoScheduler.recordRequest(senderJid);
         await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -6154,7 +6247,9 @@ async function brainHandleGroup(chatJid, dec, opts){
   }
   if (dec.action === 'media'){
     try {
-      const r = await scraperSearch(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang));
+      const qr = await mediaQueue.run(chatJid, 'image', q, async () =>
+        scraperSearch(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang)));
+      const r = qr.result;
       if (r.ok && r.images.length){
         await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
         resetDailyStats(); dailyStats.picsSent++;
@@ -6569,6 +6664,21 @@ async function handleMessage(msg){
       return;
     }
 
+    /* ═══ v90 LISTEN-FIRST ═══
+     * Every whitelisted group is observed first. Ordinary chatter in a
+     * group the bot doesn't know yet → NO auto-reply at all (commands
+     * and localized verbs still work). Once the profile shows someone
+     * actually asking the bot for something, full service switches on. */
+    groupListener.observe(chatJid, { senderJid, text, lang: gLang });
+    const explicitRequest = text.startsWith('!') || !!multilang.localIntent(text);
+    if (!isAdmin && !explicitRequest && !groupListener.canAutoEngage(chatJid)){
+      const p = groupListener.profileSummary(chatJid);
+      if (groupListener.isObserving(chatJid)){
+        pushLog('info', 'listener', `observing ${getGroupName(chatJid) || chatJid} — ${p.msgs} msg(s), ${p.intents} bot-directed so far`);
+      }
+      return;                                     /* listening, not talking */
+    }
+
     /* v87: the AI brain and the scrapers read the ENGLISH version
      * (a Persian request becomes English search terms); every reply
      * goes back out in the group's own language via t2()/replyInLang. */
@@ -6605,10 +6715,16 @@ async function handleMessage(msg){
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
           try {
-            /* v88: online downloader chain (y2mate style) first — MP3 */
-            const r = await musicDownload(gIntent.query, 'audio');
+            /* v90: through the queue — two members asking the same song
+             * share one fetch instead of double-sending */
+            const qr = await mediaQueue.run(chatJid, 'music', gIntent.query, async () => {
+              /* v88: online downloader chain (y2mate style) first — MP3 */
+              return musicDownload(gIntent.query, 'audio');
+            });
+            const r = qr.result;
             if (r.ok){
-              await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
+              if (qr.shared) await sendBuffer(chatJid, { text: await t2(chatJid, 'Same song is already being fetched — one copy coming for everyone') }, 3, 'slow', 'group', true);
+              else await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
               await sendMediaUrl(chatJid, r.mediaUrl, {
                 kind:'audio', mimetype:r.mimetype, caption:r.title,
                 priority:3, lane:'slow', taskType:'group', typing:true
@@ -6618,7 +6734,9 @@ async function handleMessage(msg){
           } catch(e){ pushLog('error','music',e.message); }
         }
         if (gIntent.type === 'gif'){
-          const r = await scraperGif(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang));
+          const qr = await mediaQueue.run(chatJid, 'gif', gIntent.query, async () =>
+            scraperGif(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
+          const r = qr.result;
           if (r.ok && r.gifs.length){
             await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
             resetDailyStats();
@@ -6638,7 +6756,9 @@ async function handleMessage(msg){
           }
           if (!isVague(gIntent.query)){
             await sendBuffer(chatJid, { text:'🎬 Finding "' + gIntent.query + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
-            const r = await scraperVideo(gIntent.query, null, null, localCat(senderJid, chatJid, gLang));
+            const qr = await mediaQueue.run(chatJid, 'video', gIntent.query, async () =>
+              scraperVideo(gIntent.query, null, null, localCat(senderJid, chatJid, gLang)));
+            const r = qr.result;
             if (r.ok){
               if (!isAdmin) videoScheduler.recordRequest(senderJid);
               await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -6654,7 +6774,9 @@ async function handleMessage(msg){
             return;
           }
         } else if (gIntent.type === 'image') {
-          const r = await scraperSearch(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang));
+          const qr = await mediaQueue.run(chatJid, 'image', gIntent.query, async () =>
+            scraperSearch(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
+          const r = qr.result;
           if (r.ok && r.images.length){
             await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
             resetDailyStats(); dailyStats.picsSent++;
@@ -7697,6 +7819,21 @@ siteHealth.init(pushLog);
  * self-healing provider chain, 32MB pre-send cap (see music.js) */
 const musicEngine = require('./music');
 musicEngine.init(pushLog);
+/* v90 MULTILINGUAL COMMANDS — fa/ar/hi/sn/nd/zu/sw/es/fr/pt/ru/tr verbs,
+ * no '!' needed, non-QWERTY layout recovery (see multilang.js) */
+const multilang = require('./multilang');
+/* v90 LISTEN-FIRST — observe groups before auto-replying; decide engage
+ * vs silent from a couple of messages (see group-listener.js) */
+const groupListener = require('./group-listener');
+groupListener.init({
+  log: pushLog,
+  intentFn: (t) => detectMediaIntent(t),
+  commandFn: (t) => /^!\w/.test(String(t || '').trim())
+});
+/* v90 MEDIA QUEUE — concurrent member requests coalesce + cap at 2
+ * parallel fetches so conversations keep flowing (see media-queue.js) */
+const mediaQueue = require('./media-queue');
+mediaQueue.init(pushLog);
 
 /* ══════════════════════════════════════════════════════════════
  *  v86 AUTO-TRANSLATE — the bot speaks EVERY language
@@ -7959,8 +8096,10 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
   pushLog('info','access','whitelisted DM command: ' + intent.type + ' "' + intent.query + '"' + (prefer ? ' [' + prefer + ']' : ''));
   if (intent.type === 'music'){
     try {
-      /* v88: online downloader chain (y2mate style) first — MP3 */
-      const r = await musicDownload(intent.query, 'audio');
+      /* v88: online downloader chain (y2mate style) first — MP3
+       * v90: through the queue (DMs share the same concurrency cap) */
+      const qr = await mediaQueue.run(chatJid, 'music', intent.query, async () => musicDownload(intent.query, 'audio'));
+      const r = qr.result;
       if (!r.ok){ await sendBuffer(chatJid, { text: await t2(chatJid, 'Could not find "' + intent.query + '"') }, 2, 'slow', 'dmreply', true); return; }
       await sendBuffer(chatJid, { text: await t2(chatJid, 'Found ' + r.title + '. Sending...') }, 2, 'slow', 'dmreply', true);
       await sendMediaUrl(chatJid, r.mediaUrl, { kind: 'audio', mimetype: r.mimetype, caption: r.title, priority: 2, lane: 'slow', taskType: 'dmreply', typing: true });
@@ -7972,7 +8111,9 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
       await sendBuffer(chatJid, { text: await t2(chatJid, '⏳ You have used your 3 video requests for this hour — try again later.') }, 2, 'slow', 'dmreply', true);
       return;
     }
-    const rv = await scraperVideo(intent.query, null, prefer, localCat(senderJid, chatJid));
+    const qr = await mediaQueue.run(chatJid, 'video', intent.query, async () =>
+      scraperVideo(intent.query, null, prefer, localCat(senderJid, chatJid)));
+    const rv = qr.result;
     if (rv.ok){
       videoScheduler.recordRequest(senderJid);
       await sendMediaUrl(chatJid, rv.mediaUrl, { kind: 'video', mimetype: rv.mimetype || 'video/mp4',
@@ -7984,7 +8125,9 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
     return;
   }
   if (intent.type === 'gif'){
-    const r = await scraperGif(intent.query, false, prefer, localCat(senderJid, chatJid));
+    const qr = await mediaQueue.run(chatJid, 'gif', intent.query, async () =>
+      scraperGif(intent.query, false, prefer, localCat(senderJid, chatJid)));
+    const r = qr.result;
     if (r.ok && r.gifs.length){
       /* v88: damaged-result defense — try up to 3 gifs before giving up */
       const res = await sendFirstWorking(chatJid, [pickFresh(r.gifs, chatJid)].concat(r.gifs.slice(0, 3)), 'gif', '', { taskType: 'dmreply' });
@@ -7996,7 +8139,9 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
     return;
   }
   /* default: images — v88: candidates until one actually sends */
-  const r = await scraperSearch(intent.query, false, prefer, localCat(senderJid, chatJid));
+  const qr = await mediaQueue.run(chatJid, 'image', intent.query, async () =>
+    scraperSearch(intent.query, false, prefer, localCat(senderJid, chatJid)));
+  const r = qr.result;
   if (r.ok && r.images.length){
     const first = pickFresh(r.images, chatJid);
     const res = await sendFirstWorking(chatJid, [first].concat(r.images.filter(u => u !== first).slice(0, 2)), 'image', '', { taskType: 'dmreply' });
@@ -8025,6 +8170,8 @@ app.get('/api/site-health', function(req, res){
     byCategory: siteHealth.perCategory(),
     musicProviders: musicEngine.providerStats(),
     musicMaxBytes: musicEngine.MAX_BYTES,
+    listener: groupListener.summary(),
+    queue: { pending: mediaQueue.pending(), maxActive: mediaQueue.MAX_ACTIVE },
     ts: new Date().toISOString()
   });
 });

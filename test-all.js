@@ -280,6 +280,78 @@ async function main() {
     assert(/quietFail/.test(src), 'quietFail option missing in safe senders');
   });
 
+  /* ── 9c. v90: multilingual commands + listen-first + media queue ── */
+  await test('multilang: localized verbs fire intents in native scripts', () => {
+    const M = require('./multilang');
+    const fa = M.localIntent('عکس جنیفر لوپز');
+    assert(fa && fa.type === 'image' && /جنیفر/.test(fa.query), 'fa pic verb failed: ' + JSON.stringify(fa));
+    const faV = M.localIntent('فیلم طنز');
+    assert(faV && faV.type === 'video', 'fa video verb failed');
+    const ar = M.localIntent('اغنية جديدة');
+    assert(ar && ar.type === 'music', 'ar music verb failed');
+    const hi = M.localIntent('गाना सुनाओ');
+    assert(hi && hi.type === 'music', 'hi music verb failed');
+    const sn = M.localIntent('mufananidzo wemusha');
+    assert(sn && sn.type === 'image', 'shona pic verb failed');
+    const es = M.localIntent('una foto de messi');
+    assert(es && es.type === 'image', 'es pic verb failed');
+    /* a media verb beats the generic download verb */
+    const dl = M.localIntent('دانلود فیلم');
+    assert(dl && dl.type === 'video', 'media verb must beat download verb');
+    /* english-only text stays null (english path handled elsewhere) */
+    assert(M.localIntent('hello everyone how are you') === null, 'false positive on english chatter');
+  });
+  await test('listen-first: observe → engage on request, silent on chatter', () => {
+    const GL = require('./group-listener');
+    GL.init({ log: function(){}, intentFn: (t) => /song|pic|photo/i.test(t) ? { type: 'image', query: 'x' } : null, commandFn: (t) => /^!/.test(t) });
+    const g = 'testgroup-listen@g.us';
+    /* ordinary chatter → never auto-engage */
+    GL.observe(g, { senderJid: '1@s.whatsapp.net', text: 'hey how are you' });
+    GL.observe(g, { senderJid: '2@s.whatsapp.net', text: 'good, you?' });
+    assert(GL.canAutoEngage(g) === false, 'chatter group must NOT auto-engage');
+    /* a bot-directed request flips it to engage */
+    GL.observe(g, { senderJid: '1@s.whatsapp.net', text: 'send a pic of harare' });
+    assert(GL.canAutoEngage(g) === true, 'request in group must engage');
+    /* admin overrides */
+    assert(GL.setMode(g, 'silent') === true, 'setMode silent failed');
+    assert(GL.modeOf(g) === 'silent', 'override not applied');
+    assert(GL.canAutoEngage(g) === false, 'override silent must gate auto');
+    GL.setMode(g, 'engage');
+    assert(GL.canAutoEngage(g) === true, 'override engage must allow auto');
+    GL.clearMode(g);
+    /* fresh group with pure chatter must not engage */
+    const g2 = 'quiet-listen@g.us';
+    GL.observe(g2, { senderJid: '3@s.whatsapp.net', text: 'anyone there' });
+    GL.observe(g2, { senderJid: '4@s.whatsapp.net', text: 'yes just talking' });
+    assert(GL.modeOf(g2) !== 'engage', 'quiet chatter group must not engage');
+  });
+  await test('media-queue: coalesces duplicates, caps concurrency', async () => {
+    const MQ = require('./media-queue');
+    MQ.init(function(){});
+    let concurrent = 0, maxConcurrent = 0, runs = 0;
+    const job = (ms, out) => async () => {
+      runs++; concurrent++;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await new Promise(r => setTimeout(r, ms));
+      concurrent--;
+      return out;
+    };
+    /* two identical requests at once → ONE run, both get the result */
+    const [a, b] = await Promise.all([
+      MQ.run('coalesce@x', 'image', 'same query', job(120, 'RESULT')),
+      MQ.run('coalesce@x', 'image', 'same query', job(120, 'RESULT'))
+    ]);
+    assert(a.result === 'RESULT' && b.result === 'RESULT', 'both callers must get the result');
+    assert(runs === 1, 'duplicate was fetched twice (' + runs + ' runs)');
+    /* different queries run for real, never more than MAX_ACTIVE at once */
+    const many = [];
+    for (let i = 0; i < 6; i++) many.push(MQ.run('cap@x', 'image', 'query ' + i, job(30, 'ok' + i)));
+    const all = await Promise.all(many);
+    assert(all.every(r => typeof r.result === 'string'), 'results lost');
+    assert(maxConcurrent <= MQ.MAX_ACTIVE, 'concurrency cap blown: ' + maxConcurrent);
+    assert(runs >= 2, 'different queries must actually run');
+  });
+
   /* ── 10. videoScheduler config-driven queries ──────────── */
   await test('videoScheduler: no hardcoded NSFW query list ships in source', () => {
     const src = fs.readFileSync('./videoScheduler.js', 'utf8');

@@ -276,7 +276,6 @@ const WEATHER_LOCATIONS   = [
   { key:'harare',  label:'Harare (home)',  lat:-17.8252, lon:31.0335 },
   { key:'bindura', label:'Bindura (BUSE)', lat:-17.3264, lon:31.3306 }
 ];
-const SCHOOL_DATA_FILE    = path.join(__dirname,'school_data.json');
 const GROUP_REGISTRY_FILE = path.join(__dirname,'group_registry.json');
 const DM_HISTORIES_FILE   = path.join(__dirname,'dm_histories.json');
 
@@ -294,7 +293,6 @@ const ADMIN_LOG_DIGEST_MIN= Math.max(1, parseInt(process.env.ADMIN_LOG_DIGEST_MI
  * of "unnecessary messages" in the admin's DM. */
 const LOG_TO_ADMIN        = (process.env.LOG_TO_ADMIN || 'false') === 'true';
 const CONFUSION_WINDOW_MS = 10 * 60 * 1000;
-const SCHOOL_AUTH_FOLDER  = process.env.SCHOOL_AUTH_FOLDER || 'auth_info_school';
 
 /* ═══ v70 SESSION BACKUP — never re-scan after a redeploy ═══
  * WHY THE BOT "STOPPED RECEIVING MESSAGES": Render's free disk is
@@ -2160,11 +2158,6 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   });
 }
 function adminReply(jid, text){
-  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
-    .catch(e => pushLog('warn','adminreply',e.message));
-}
-/* v92: single account — schoolReply is now a plain admin reply */
-function schoolReply(jid, text){
   return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
     .catch(e => pushLog('warn','adminreply',e.message));
 }
@@ -6531,10 +6524,6 @@ async function handleMessage(msg){
    *  · unknown numbers never got here — the access gate returned them
    *    unread at the top of handleMessage. */
   if (!isGroup && !isAdmin && text){
-    if (SCHOOL_MODE){
-      pushLog('info','school','DM recorded (school mode — no reply): ' + pushName);
-      return;
-    }
     await serveDmCommand(chatJid, senderJid, msg, text, pushName, phone);
     return;
   }
@@ -7142,35 +7131,6 @@ function makeLoadtestStub(){
     groupRegistry.set(j, { subject:'Other ' + i, size:50, announce:false, botAdmin:false, participants:[] });
   }
   pushLog('success','loadtest','Stub connected as ' + botNumber + ' — main group set');
-}
-
-/* v68.5: SCHOOL stub — the dual-account realistic sim needs BOTH accounts
- * live. The school login IS the admin's number (that's the real setup). */
-function makeSchoolLoadtestStub(){
-  if (true) return;   /* v92: school stub removed */
-  schoolSock = {
-    user: { id: ADMIN_PHONE + ':1@s.whatsapp.net' },
-    sendPresenceUpdate: async (state, jid)=>{ if (state === 'composing') ltRec('school','typings', jid); },
-    readMessages: async (keys)=>{ ltRec('school','reads', (keys && keys[0] && keys[0].remoteJid) || ''); },
-    updateOnlinePrivacy: async ()=>{}, updateLastSeenPrivacy: async ()=>{},
-    groupMetadata: async (jid)=>({ id:jid, subject:'School Group ' + String(jid).slice(-3), participants: [] }),
-    groupFetchAllParticipating: async ()=>({}),
-    sendMessage: async (jid, content)=>{ ltRec('school','sends', jid, content); return { key:{ id:'stub-s-'+Date.now()+'-'+Math.random().toString(36).slice(2,8), remoteJid:jid, fromMe:true } }; },
-    groupAcceptInvite: async (code)=>{ ltRec('school','invites', code); return null; },
-    fetchStatus: async ()=>({ status:'loadtest' }),
-    end: ()=>{}, ev: { on: ()=>{} }
-  };
-  schoolNumber = ADMIN_PHONE;
-  schoolStatus = 'connected'; schoolIsConnecting = false;
-  schoolRegistry.set('120000000000901@g.us', 'BSC 2.1 Botany');
-  schoolRegistry.set('120000000000902@g.us', 'Staff Announcements');
-  pushLiveMessage({
-    id: 'school-boot-' + Date.now(), ts: new Date().toISOString(),
-    chatJid: ADMIN_JID, chatType: 'system', senderJid: schoolSock.user.id,
-    senderName: 'SCHOOL ACCOUNT ONLINE', phone: schoolNumber,
-    text: 'School stub ONLINE as ' + schoolNumber, mediaType: 'text', isAdmin: true, account: 'school'
-  });
-  pushLog('success','loadtest','School stub connected as ' + schoolNumber + ' (2 school groups registered)');
 }
 
 /* ══════════════════════════════════════════════════════════════

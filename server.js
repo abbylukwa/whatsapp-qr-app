@@ -1741,16 +1741,52 @@ function imageTooSmall(buf){
   return null;
 }
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
-  const resp = await axios.get(url, {
-    responseType: 'arraybuffer', timeout: 60000,
-    maxContentLength: maxBytes + 1, maxBodyLength: maxBytes + 1,
-    validateStatus: s => s >= 200 && s < 300,
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BreadBot/1.0)' }
-  });
-  const buf = Buffer.from(resp.data);
+  async function grab(u){
+    const resp = await axios.get(u, {
+      responseType: 'arraybuffer', timeout: 60000,
+      maxContentLength: maxBytes + 1, maxBodyLength: maxBytes + 1,
+      validateStatus: s => s >= 200 && s < 300,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BreadBot/1.0)' }
+    });
+    return Buffer.from(resp.data);
+  }
+  let buf = null;
+  try {
+    buf = await grab(url);
+  } catch (e1){
+    /* v92.6 HOTLINK DEFENSE — CDNs like athumbs.pornpics.com 403/429
+     * plain bots. Retry like a real browser (UA + same-origin Referer),
+     * and if THAT still fails, proxy the bytes through OUR scraper's
+     * /download endpoint (its UA+Referer chain is proven on Render and
+     * returns a temp copy we can fetch freely). */
+    let origin = '';
+    try { origin = new URL(url).origin; } catch(_) {}
+    try {
+      const resp = await axios.get(url, {
+        responseType: 'arraybuffer', timeout: 60000,
+        maxContentLength: maxBytes + 1, maxBodyLength: maxBytes + 1,
+        validateStatus: s => s >= 200 && s < 300,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+                   'Referer': origin + '/', 'Accept': 'image/*,video/*,*/*' }
+      });
+      buf = Buffer.from(resp.data);
+    } catch (e2){
+      try {
+        const r = await axios.post(SCRAPER_URL + '/download', { url }, { timeout: 90000 });
+        const proxied = r.data && r.data.mediaUrl;
+        if (!proxied) throw new Error('scraper proxy gave no mediaUrl');
+        buf = await grab(proxied);
+        pushLog('info','media','hotlink proxy used for ' + hostOf(url) + ' (' + buf.length + ' bytes)');
+      } catch (e3){
+        throw new Error('download failed (direct: ' + (e1.response ? e1.response.status : e1.message) +
+                        ', browser-UA: ' + (e2.response ? e2.response.status : e2.message) +
+                        ', proxy: ' + e3.message + ')');
+      }
+    }
+  }
   if (buf.length > maxBytes) throw new Error(`Media too big (${(buf.length/1024/1024).toFixed(1)}MB > 34MB)`);
   if (buf.length < 32) throw new Error('Media empty');
-  const mimetype = resp.headers['content-type'] || (expectType === 'gif' ? 'video/mp4' : 'image/jpeg');
+  const mimetype = expectType === 'gif' ? 'video/mp4' : 'image/jpeg';
   /* v89: image realness gate — logos/placeholders/banners never reach a member */
   if (expectType === 'image'){
     const junk = imageTooSmall(buf);
@@ -6354,11 +6390,15 @@ async function handleMessage(msg){
   if (rawMsg.stickerMessage) return;
   if (msg.messageStubType){
     /* v92.5 BAD-MAC VISIBILITY: messages that arrive encrypted with keys
-     * this session does not have (almost always: sent while the service
-     * was ASLEEP — Render spun it down and the pre-keys rotated away;
-     * WhatsApp protocol cannot re-deliver them) used to vanish SILENTLY
-     * — the boss just saw "the bot ignores me". Count them and surface
-     * a throttled, human explanation on the panel. */
+     * this session does not have (sent while the service was ASLEEP —
+     * Render spun it down and the pre-keys rotated away) used to vanish
+     * SILENTLY — the boss just saw "the bot ignores me".
+     * v92.7 STORM DETECTION: when the failures KEEP COMING after the
+     * connect backlog (≥15 within 10 min of connect with ZERO real
+     * messages decrypted), the restored session snapshot itself is
+     * STALE — no amount of waiting fixes that; the bot needs ONE
+     * re-pair (panel QR / pairing code). Outgoing still works, so the
+     * bot texts the admin directly with the exact fix. */
     const stubParam = String(msg.messageStubParameter || '');
     if (/Bad MAC|No session|decrypt/i.test(stubParam)){
       undecryptableCount++;
@@ -6367,9 +6407,32 @@ async function handleMessage(msg){
         pushLog('warn','crypto',
           undecryptableCount + ' message(s) arrived with keys this session does not have (sent while I was offline/asleep — WhatsApp cannot re-deliver them). NEW messages sent while I am awake arrive normally.');
       }
+      if (!badMacStormWarned && undecryptableCount >= 15 && (Date.now() - connectedAtMs) < 10 * 60 * 1000 && decryptedSinceConnect === 0){
+        badMacStormWarned = true;
+        pushLog('error','crypto','BAD-MAC STORM: ' + undecryptableCount + ' undecryptable messages within ' + Math.round((Date.now()-connectedAtMs)/1000) + 's of connect and ZERO real messages decrypted — the restored session snapshot is STALE. ONE re-pair fixes it permanently: open the panel → scan the QR (or phone pairing code) → the auto-backup then keeps the fresh session forever.');
+        (async () => {
+          try {
+            const { S } = adminAccountSock();
+            if (S && S.sendMessage){
+              await S.sendMessage(ADMIN_JID, { text:
+                '⚠️ My session is STALE — messages sent to me arrive encrypted with keys I no longer have, so I cannot read ANY of them (outgoing still works, which is why you get this).\n\n' +
+                'ONE-TIME FIX (2 minutes):\n' +
+                '1. Open ' + (SELF_KEEPALIVE_URL || 'your panel URL') + '/admin\n' +
+                '2. Scan the QR card with the BOT phone (WhatsApp → Linked devices → Link a device)\n' +
+                '3. Done — with GITHUB_TOKEN set, the fresh session backs itself up and every future deploy restores it automatically. No QR again.\n\n' +
+                'Messages you sent while I was asleep are lost (WhatsApp deleted the keys) — send them again after re-pairing.' });
+              pushLog('success','crypto','Re-pair guidance texted to the admin (outgoing works even with a stale session)');
+            }
+          } catch(e){ pushLog('warn','crypto','storm warning send failed: ' + e.message); }
+        })();
+      }
     }
     return;
   }
+
+  /* v92.7: this message DECRYPTED — real inbound. Counts against the
+   * storm detector (a stale session decrypts NOTHING). */
+  decryptedSinceConnect++;
 
   let m = rawMsg; let guard=0;
   while (m && guard++<10){
@@ -7032,6 +7095,7 @@ async function connectBot(){
         qrDataUri = null;   /* v71.2: drop the QR once paired — panel hides it */
         lastStatusChangeAt = Date.now();
         reconnectAttempts = 0; botStartTime = Date.now();
+        connectedAtMs = Date.now(); decryptedSinceConnect = 0; badMacStormWarned = false;   /* v92.7: fresh storm window per connect */
         botQrCount = 0; botCloseTimes = [];   /* v68.3: fresh cycle */
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';
@@ -7799,7 +7863,7 @@ app.get('/api/site-health', function(req, res){
 });
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5.4</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v92.7</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -7820,7 +7884,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v84.5.4</h1>
+<h1>BreadBot v92.7</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -10161,7 +10225,7 @@ function renderSceneSvg(spec){
 }
 function buildBpyScript(spec){
   const th = spec.theme, L = [];
-  L.push('# ' + spec.topic + ' — BreadBot v84.5.4 scene preview script');
+  L.push('# ' + spec.topic + ' — BreadBot v92.7 scene preview script');
   L.push('# Deterministic: the same topic always regenerates this exact scene.');
   L.push('# Run inside Blender:   blender --background --python THIS_FILE.py');
   L.push('# It renders preview.png (1920x1080) next to the script.');
@@ -10654,6 +10718,9 @@ const SELF_KEEPALIVE_URL = (process.env.RENDER_EXTERNAL_URL || process.env.SELF_
 const SELF_KEEPALIVE_MS  = Math.max(3, parseInt(process.env.SELF_KEEPALIVE_MIN || '10', 10) || 10) * 60 * 1000;
 let undecryptableCount = 0;        /* v92.5: messages dropped with Bad MAC (sent while asleep) */
 let lastUndecryptableLogAt = 0;
+let badMacStormWarned = false;     /* v92.7: one-time stale-session warning */
+let decryptedSinceConnect = 0;     /* v92.7: real messages decrypted since the last connect */
+let connectedAtMs = 0;             /* v92.7: when the socket last opened */
 function startSelfKeepAlive(){
   if (!SELF_KEEPALIVE_URL){
     pushLog('warn','keepalive','self-keepalive OFF — RENDER_EXTERNAL_URL/SELF_URL missing (local run? cron-job.org must cover the pings)');
@@ -10681,6 +10748,7 @@ function startSelfKeepAlive(){
 
 const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);
+  console.log('BreadBot v92.7 — short commands · session auto-backup · self-keepalive · NSFW 24/7 · hotlink-proxy downloads');
   console.log('Mode: MANAGER (group management — school buddy removed v92)');
   console.log('Admin: '+ADMIN_PHONE);
   console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));

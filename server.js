@@ -6844,8 +6844,8 @@ async function connectBot(){
 
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v82.0.0 ONLINE\n' +
-            'Mode: ' + BOT_MODE.toUpperCase() + '\n' +
+            'BreadBot v92 ONLINE\n' +
+            'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
@@ -8950,19 +8950,16 @@ app.post('/admin/pair-code', async function(req,res){
 app.get('/admin/pair-status', function(req,res){
   res.json({ ok:true, pendingPhone: pendingPairPhone, lastPairCode, status: connectionStatus, registered: !!(sock && sock.authState?.creds?.registered) });
 });
-/* v67: SCHOOL account QR + control (second WhatsApp, same process) */
-app.post('/admin/clear-session-school', function(req,res){ try { fs.rmSync(SCHOOL_AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
 /* ═══ v70 SESSION BACKUP endpoints ═══ */
 app.get('/admin/session-backup', function(req,res){
   try {
-    res.json({ groups: sessionInfo(AUTH_FOLDER, 'SESSION_B64_GROUPS'),
-               school: sessionInfo(SCHOOL_AUTH_FOLDER, 'SESSION_B64_SCHOOL') });
+    res.json({ groups: sessionInfo(AUTH_FOLDER, 'SESSION_B64_GROUPS') });
   } catch(e){ res.json({ error:e.message }); }
 });
 app.post('/admin/session-restore', async function(req,res){
-  const slot  = req.body?.slot === 'school' ? 'school' : 'groups';
+  const slot  = 'groups';   /* v92: single account */
   const blob  = String(req.body?.blob || '').trim();
-  const folder = slot === 'school' ? SCHOOL_AUTH_FOLDER : AUTH_FOLDER;
+  const folder = AUTH_FOLDER;
   if (!blob) return res.json({ ok:false, error:'Empty blob — copy the session text from the OTHER deployment first.' });
   if (!restoreSessionBlob(folder, blob)) return res.json({ ok:false, error:'Invalid blob — it must contain creds.json (copy it again from the panel\'s Session Backup card).' });
   pushLog('success','session', slot + ': session restored via panel — reconnecting without QR…');
@@ -10213,8 +10210,7 @@ app.get('/admin/stats', function(req,res){
   const age = getAccountAgeDays();
   res.json({
     status: connectionStatus, botNumber, botLid,
-    school: { status: schoolStatus, number: schoolNumber, groups: schoolRegistry.size },
-    mode: BOT_MODE,
+    mode: 'manager',
     uptime: Math.floor((Date.now()-botStartTime)/1000),
     dmCount: activeDMs.size, groupCount: joinedGroups.size,
     joinedGroups: joinedGroups.size, queueSize: joinQueue.length,
@@ -10285,7 +10281,7 @@ loadDmHistories();     /* v66 */
 
 const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);
-  console.log('Mode: '+BOT_MODE.toUpperCase()+(SCHOOL_MODE ? ' (read-only monitor + reports)' : ' (group management)'));
+  console.log('Mode: MANAGER (group management — school buddy removed v92)');
   console.log('Admin: '+ADMIN_PHONE);
   console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));
   console.log('AI: dynamic pool — ' + (AI_POOL.length ? AI_POOL.map(function(p){ return p.name; }).join(', ') : 'no keys') + ' (tasks round-robin across healthy APIs)');
@@ -10307,7 +10303,7 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   pushLog('info','env','MY LINKS: ' + (MY_LINKS_ENV.length ? MY_LINKS_ENV.length + ' url(s) — sent with every search, YOUR sites tried FIRST' : 'none — add MYLINKS=https://yoursite.com in env to download from your websites'));
   pushLog('info','session',
     'groups: ' + (fs.existsSync(path.join(AUTH_FOLDER,'creds.json')) ? 'creds on disk' : (process.env.SESSION_B64_GROUPS ? 'will RESTORE from env' : 'no session — QR scan needed'))
-    + ' · school: ' + (fs.existsSync(path.join(SCHOOL_AUTH_FOLDER,'creds.json')) ? 'creds on disk' : (process.env.SESSION_B64_SCHOOL ? 'will RESTORE from env' : 'no session — QR scan needed'))
+
     + ' — after pairing, copy the blobs (panel 💾 card) into SESSION_B64_* env to survive redeploys');
   pushLog('info','admin','LID-aware detection enabled');
   pushLog('info','ai','DM batch: '+DM_BATCH_MIN+'-'+DM_BATCH_MAX+' per '+(DM_CYCLE_MS/1000)+'s');
@@ -10317,13 +10313,9 @@ const HTTP_SERVER = app.listen(PORT, async function(){
    * "AI: NONE" even with working keys. Detection is account-independent. */
   detectAIBackend().catch(function(){});
 
-  if (SCHOOL_MODE){
-    pushLog('info','system','SCHOOL MODE — greetings / joins / DM-AI / broadcasts disabled (read-only monitor)');
-  } else {
-    scheduleGreetings();
-    scheduleGroupJoins();
-    startDmAiCycle();
-  }
+  scheduleGreetings();
+  scheduleGroupJoins();
+  startDmAiCycle();
   scheduleDailyReport();
   scheduleHumanPresence();
   startSelfMonitor();   /* v66: health + error prediction */
@@ -10343,7 +10335,6 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   /* v70: restore saved sessions BEFORE connecting — kills the
    * re-scan-after-every-deploy cycle on Render's ephemeral disk. */
   ensureSessionFromEnv('groups', AUTH_FOLDER, 'SESSION_B64_GROUPS');
-  ensureSessionFromEnv('school', SCHOOL_AUTH_FOLDER, 'SESSION_B64_SCHOOL');
 
   /* v82: School account DISABLED by default — single account mode.
    * The school account code is kept for !school on/off toggle but

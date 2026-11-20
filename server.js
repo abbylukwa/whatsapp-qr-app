@@ -415,6 +415,57 @@ const MY_LINKS_ENV = (process.env.MYLINKS || '')
   .filter(function(s){ return /^https?:\/\//i.test(s); })
   .filter(function(s, i, a){ return a.indexOf(s) === i; });
 
+/* ═══ v86 MY SITES REGISTRY — config/sites.json (user-editable) ═══
+ * MYLINKS env stays, but the everyday way to add your own pic/gif/
+ * video/music sources is the JSON registry: hundreds of entries, each
+ * { name, url, kind, nsfw }. Loaded at boot; /api/sites (GET/POST/
+ * DELETE) reads and rewrites the SAME file, so the panel's 🌐 My Sites
+ * card and any script can manage the list without touching code. */
+const SITES_FILE = path.join(__dirname, 'config', 'sites.json');
+let SITE_REGISTRY = [];
+function loadSiteRegistry(){
+  try {
+    const raw = JSON.parse(fs.readFileSync(SITES_FILE, 'utf8'));
+    const arr = Array.isArray(raw) ? raw : (Array.isArray(raw.sites) ? raw.sites : []);
+    SITE_REGISTRY = arr
+      .filter(function(s){ return s && /^https?:\/\//i.test(String(s.url || '')); })
+      .map(function(s, i){
+        return {
+          name: String(s.name || ('site_' + (i + 1))).slice(0, 60),
+          url:  String(s.url),
+          kind: ['images', 'gifs', 'videos', 'music', 'any'].includes(String(s.kind)) ? String(s.kind) : 'any',
+          nsfw: !!s.nsfw
+        };
+      });
+  } catch (e) {
+    pushLog('warn', 'sites', 'config/sites.json unreadable — registry empty (' + e.message + ')');
+    SITE_REGISTRY = [];
+  }
+  return SITE_REGISTRY;
+}
+function saveSiteRegistry(list){
+  const clean = (Array.isArray(list) ? list : [])
+    .filter(function(s){ return s && /^https?:\/\//i.test(String(s.url || '')); })
+    .slice(0, 2000)
+    .map(function(s, i){
+      return {
+        name: String(s.name || ('site_' + (i + 1))).slice(0, 60),
+        url:  String(s.url),
+        kind: ['images', 'gifs', 'videos', 'music', 'any'].includes(String(s.kind)) ? String(s.kind) : 'any',
+        nsfw: !!s.nsfw
+      };
+    });
+  fs.writeFileSync(SITES_FILE, JSON.stringify({ sites: clean }, null, 2));
+  SITE_REGISTRY = clean;
+  return clean;
+}
+function siteUrlsFor(kind, nsfw){
+  return SITE_REGISTRY
+    .filter(function(s){ return (s.kind === 'any' || s.kind === kind) && (nsfw || !s.nsfw); })
+    .map(function(s){ return s.url; });
+}
+loadSiteRegistry();
+
 /* v73: NO hard-coded scraper sites anymore — every source lives in
  * the scraper's my_links.json or the MYLINKS env. This array stays
  * as a fallback view for the panel (it is empty by default and only
@@ -1010,8 +1061,20 @@ brain.initBrain({
  * automation controlled via WhatsApp admin commands.
  * Each platform is isolated: own browser, data, schedule, rate limits.
  * Commands: !fb/yt/tw/tt on|off|status|login, !platforms, !broadcastall ═══ */
-const MultiPlatformManager = require('./multi-platform');
-const multiPlatform = new MultiPlatformManager({ dataDir: './data', log: pushLog });
+/* ═══ v86 PLATFORM REMOVAL — WhatsApp ONLY ═══
+ * Twitter / Facebook / YouTube / TikTok browser automation is GONE.
+ * The MultiPlatformManager (multi-platform.js) used to boot platform
+ * logins, cookies and cross-posting; it is replaced by this inert
+ * stub so every old reference answers harmlessly instead of crashing.
+ * The app now runs: WhatsApp bot (both accounts) + the admin panel
+ * + media downloads (pics / gifs / videos / music via the scraper).
+ * YouTube auto-drop scheduler is force-disabled at boot (see below). */
+const multiPlatform = {
+  close: async function(){},
+  handleCommand: async function(){ return 'Platform removed in v86 — WhatsApp only.'; },
+  getPlatform: function(){ return null; },
+  onNSFWVideoSent: function(){}
+};
 
 /* ═══ v72 MAIN-GROUP VIDEO SCHEDULER — 6 drops/day (Harare time),
  * 15 videos per run, human-like delays, different query → different
@@ -1028,12 +1091,15 @@ videoScheduler.initVideoScheduler({
   },
   fetchVideo: (query, exclude) => scraperVideo(query, exclude),
   log: pushLog,
-  // ═══ NSFW CROSS-POST HOOK ═══════════════════════════════════
-  // When a video is sent to WhatsApp, also cross-post to Twitter
+  // ═══ NSFW CROSS-POST HOOK — dead since v86 (platforms removed) ═══
   onVideoSent: (videoData) => {
     try { multiPlatform.onNSFWVideoSent(videoData); } catch (e) {}
   }
 });
+/* v86: YouTube auto-drop is OFF at every boot — videos now flow ONLY
+ * when members/DMs request them (scraperVideo). The rate limiter
+ * (canRequest/recordRequest) stays active for those downloads. */
+videoScheduler.disable();
 function recentGroupTexts(jid, n){
   const d = learningData.get(jid);
   if (!d || !d.messages || !d.messages.length) return [];
@@ -2488,9 +2554,11 @@ async function scraperSearch(query, nsfw=false){
   resetDailyStats(); dailyStats.scraperSearches++;
   try {
     /* v70: pass YOUR sites (MYLINKS env) with every search — the
-     * scraper puts their results FIRST in the returned array. */
+     * scraper puts their results FIRST in the returned array.
+     * v86: plus the config/sites.json registry, kind-matched. */
     const body = { query, site, nsfw: !!nsfw };
-    if (MY_LINKS_ENV.length) body.myLinks = MY_LINKS_ENV;
+    const myLinks = [...new Set([].concat(MY_LINKS_ENV, siteUrlsFor('images', !!nsfw)))];
+    if (myLinks.length) body.myLinks = myLinks;
     const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 45000 });
     return { ok:true, images: r.data?.images || [], site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
@@ -2503,11 +2571,13 @@ async function scraperGif(query, nsfw=false){
   resetDailyStats(); dailyStats.scraperGifs++;
   try {
     /* v70: MY LINKS rides along on GIF searches too — the scraper tries
-     * your GIF sites FIRST, same as image searches. */
+     * your GIF sites FIRST, same as image searches.
+     * v86: plus the config/sites.json registry (gifs kind). */
     const params = { q: query, site };
     /* v72.3: explicit nsfw flag — kept for scraper compatibility. */
     if (nsfw) params.nsfw = '1';
-    if (MY_LINKS_ENV.length) params.myLinks = MY_LINKS_ENV.join(',');
+    const gifLinks = [...new Set([].concat(MY_LINKS_ENV, siteUrlsFor('gifs', !!nsfw)))];
+    if (gifLinks.length) params.myLinks = gifLinks.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
     return { ok:true, gifs: r.data?.gifs || [], site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
@@ -2587,6 +2657,9 @@ async function scraperVideo(query, exclude, site){
     const body = { query };
     /* v71.1: pass already-sent ids/titles so multi-video runs never repeat */
     if (Array.isArray(exclude) && exclude.length) body.exclude = exclude.slice(-10);
+    /* v86: your video sites from config/sites.json ride along too */
+    const vidLinks = [...new Set([].concat(MY_LINKS_ENV, siteUrlsFor('videos', false)))];
+    if (vidLinks.length) body.myLinks = vidLinks;
     /* v73.1: optional site pick — "yona" / "pornpics" / slot number.
      * Absent = the scraper's file order (YonaYethuu first). */
     if (site) body.site = String(site).trim();
@@ -3775,8 +3848,23 @@ async function runDmAiBatch(){
  * ══════════════════════════════════════════════════════════════ */
 async function processDM(item){
   const { msg, text, chatJid, senderJid, pushName, phone, lang } = item;
-  const langName = LANG_NAMES[lang] || 'English';
-  if (containsForbidden(text)) return;
+  /* ═══ v86 AUTO-TRANSLATE: know the contact's language before the AI runs ═══
+   * Legacy local heuristic (en/sn/nd/mixed) wins when it says Shona/Ndebele —
+   * it knows the Zimbabwe mix natively. Everything else (French, Portuguese,
+   * Swahili, …) comes from network detection, cached 24h per chat. */
+  const legacyNonEn = lang && lang !== 'en' && lang !== 'mixed';
+  let chatLang, langName;
+  if (legacyNonEn){
+    chatLang = lang;   /* sn / nd */
+    langName = LANG_NAMES[lang] || translator.langName(lang) || 'English';
+  } else {
+    chatLang = await learnChatLang(chatJid, text);
+    langName = (lang === 'mixed') ? (LANG_NAMES.mixed || 'Shona-English mix')
+             : (translator.langName(chatLang) || LANG_NAMES[lang] || 'English');
+  }
+  /* English version of what they wrote — the AI brain + persona read THIS */
+  const aiText = await textToEnglish(chatJid, chatLang, text);
+  if (containsForbidden(text) || containsForbidden(aiText)) return;
 
   /* ═══ v71.5 AI BRAIN — one call decides what this DM means ═══
    * The brain understands English/Shona/slang INTENT, so "ndipe
@@ -3786,7 +3874,7 @@ async function processDM(item){
   let brainDec = null;
   if (brain.isEnabled()){
     try {
-      brainDec = await brain.aiDecide(text, {
+      brainDec = await brain.aiDecide(aiText, {
         mode:'dm', senderName:pushName,
         recent: (item.messages || []).slice(-6).map(m => String(m.text || '').slice(0, 120)),
         nsfwWindow: isNsfwWindow()
@@ -3805,7 +3893,7 @@ async function processDM(item){
   /* a brain "chat" verdict flows to the persona chat at the bottom;
    * a media verdict with an empty query degrades to chat too */
   const brainChat = !brainMedia && brainDec && brainDec.action === 'chat';
-  const nsfwHit  = brainDec ? (brainChat && brainDec.nsfw === true) : detectNsfw(text);
+  const nsfwHit  = brainDec ? (brainChat && brainDec.nsfw === true) : (detectNsfw(text) || detectNsfw(aiText));
   const linkHit  = brainDec ? (brainDec.action === 'link') : detectGroupLinkRequest(text);
 
   if (intent && intent.type === 'music'){
@@ -3823,7 +3911,10 @@ async function processDM(item){
 
   if (nsfwHit && nsfwRoleplayEnabled){
     if (isNsfwWindow() || isAdminSender(msg, senderJid)){
-      const rp = await nsfwRoleplay(pushName, text);
+      /* v86: roleplay reads the English version, replies in the chat's language */
+      const rp = await nsfwRoleplay(pushName, aiText).then(function(t){
+        return t ? replyInLang(chatJid, chatLang, t) : t;
+      });
       if (rp){ await sendBuffer(chatJid, { text: rp }, 2, 'slow', 'dmreply', true); resetDailyStats(); dailyStats.dmsReplied++; }
       return;
     } else {
@@ -3887,7 +3978,7 @@ async function processDM(item){
    * "hey", "hello", "mhoro", "wassup"… — any greeting wipes the remembered
    * conversation for this contact. The AI starts fresh: no old topics,
    * no half-finished stories from yesterday. */
-  if (isGreetingRestart(text)){
+  if (isGreetingRestart(text) || isGreetingRestart(aiText)){
     resetConversation(senderJid, 'greeting restart');
   }
 
@@ -3904,7 +3995,7 @@ async function processDM(item){
     : ('Them: ' + text);   /* v68.5 FIX: a single new text was LOST when a
                             * transcript existed — the AI got history but
                             * never saw what the person just said */
-  let fullPrompt = text;
+  let fullPrompt = aiText;   /* v86: the AI reads the English version */
   const ctxParts = [];
   if (transcript) ctxParts.push('Recent conversation:\n' + transcript);
   if (pooled) ctxParts.push('New messages they just sent (latest last):\n' + pooled);
@@ -3930,12 +4021,16 @@ async function processDM(item){
   }
 
   hist.push({ role:'user', text, ts:Date.now() });
-  hist.push({ role:'bot',  text:aiReply, ts:Date.now() });
+  /* v86 AUTO-TRANSLATE OUT: the AI's English reply goes out in the
+   * contact's own language; the SENT text is what the memory keeps,
+   * so the next dedup check compares like with like. */
+  const outText = await replyInLang(chatJid, chatLang, informalize(aiReply));
+  hist.push({ role:'bot',  text:outText, ts:Date.now() });
   while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
   userHistories.set(senderJid, hist);
   persistDmHistories();
 
-  await sendBuffer(chatJid, { text: informalize(aiReply) }, 2, 'slow', 'dmreply', true);
+  await sendBuffer(chatJid, { text: outText }, 2, 'slow', 'dmreply', true);
   resetDailyStats(); dailyStats.dmsReplied++;
 }
 
@@ -5941,6 +6036,10 @@ async function handleMessage(msg){
   if (!fromBotPhone && isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
 
+  /* v86 auto-translate: learn this chat's language early (fire-and-forget
+   * — network detection runs once per chat per day, never delays handling) */
+  if (text && !isAdmin){ learnChatLang(chatJid, text).catch(function(){}); }
+
   /* v66: live panel enrichment — group name for groups; phone / name /
    * contact status / common groups for DMs ("app aware of everything") */
   let liveEntry = {
@@ -7281,6 +7380,66 @@ app.set('trust proxy', true);   /* v84.2: req.protocol=https behind Render's pro
 app.use(express.json());
 const translator = require('./translator');   /* v85: free no-signup translation (see translator.js) */
 
+/* ══════════════════════════════════════════════════════════════
+ *  v86 AUTO-TRANSLATE — the bot speaks EVERY language
+ *  "too many pipo on WhatsApp in different languages": contacts write
+ *  in their own language; the AI (Rewind pool) thinks in English.
+ *  · learnChatLang  — detects each chat's language ONCE (cached 24h,
+ *                     network detection is one free request per chat)
+ *  · textToEnglish — inbound message → English for the AI brain
+ *  · replyInLang   — AI reply → the contact's language before sending
+ *  Every step FAILS OPEN: on any error the original text flows through,
+ *  so a dead network can never break a reply. Set AUTO_TRANSLATE=false
+ *  in env to switch the whole layer off.
+ * ══════════════════════════════════════════════════════════════ */
+const AUTO_TRANSLATE = process.env.AUTO_TRANSLATE !== 'false';
+const chatLangMem = new Map();                    /* chatJid -> { lang, ts } */
+const CHAT_LANG_TTL = 24 * 3600 * 1000;           /* re-detect daily */
+function getChatLang(chatJid){
+  const hit = chatLangMem.get(chatJid);
+  if (hit && (Date.now() - hit.ts) < CHAT_LANG_TTL) return hit.lang;
+  if (hit) chatLangMem.delete(chatJid);
+  return 'en';
+}
+function rememberChatLang(chatJid, lang){
+  if (lang && lang !== 'auto') chatLangMem.set(chatJid, { lang: lang, ts: Date.now() });
+}
+async function learnChatLang(chatJid, text){
+  if (!AUTO_TRANSLATE) return getChatLang(chatJid);
+  const known = getChatLang(chatJid);
+  /* texts shorter than ~25 chars detect unreliably — keep what we know */
+  if (!text || String(text).trim().length < 25) return known;
+  if (chatLangMem.get(chatJid) && (Date.now() - chatLangMem.get(chatJid).ts) < CHAT_LANG_TTL) return known;
+  try {
+    const det = await translator.detectLanguage(text);
+    if (det && det !== 'auto') rememberChatLang(chatJid, det);
+    return getChatLang(chatJid);
+  } catch (e) { return known; }
+}
+/* inbound: make sure the AI reads English — translates only when the
+ * chat's language differs from English */
+async function textToEnglish(chatJid, lang, text){
+  if (!AUTO_TRANSLATE || !text) return text;
+  const eff = (lang && lang !== 'auto') ? lang : getChatLang(chatJid);
+  if (eff === 'en' || eff.startsWith('en-')) return text;
+  try {
+    const r = await translator.translate(text, { source: eff, target: 'en' });
+    if (r && r.ok && r.translated) return r.translated;
+  } catch (e) { pushLog('warn','autotranslate','in: ' + e.message); }
+  return text;
+}
+/* outbound: deliver the AI's reply in the contact's language */
+async function replyInLang(chatJid, lang, text){
+  if (!AUTO_TRANSLATE || !text) return text;
+  const eff = (lang && lang !== 'auto') ? lang : getChatLang(chatJid);
+  if (eff === 'en' || eff.startsWith('en-')) return text;
+  try {
+    const r = await translator.translate(text, { source: 'en', target: eff });
+    if (r && r.ok && r.translated) return r.translated;
+  } catch (e) { pushLog('warn','autotranslate','out: ' + e.message); }
+  return text;
+}
+
 /* ═══ v84.5: ADMIN SIGN-IN REMOVED (owner's call) ═══
  * The v84.3 token gate (ADMIN_TOKEN / bb_auth cookie / /admin/login)
  * is GONE — the panel and every /admin route answer instantly, no
@@ -7326,7 +7485,8 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div class="row"><span>Paused</span><span class="val" id="pz">-</span></div>
 <div class="row"><span>Admin active</span><span class="val" id="aa">-</span></div>
 <img id="qrImg" src="" style="display:none">
-<div style="font-size:10px;color:#d29922;margin-top:4px">Scan QR with the BOT phone → WhatsApp → Linked devices.</div>
+<div id="qrPhone" style="margin-top:8px;text-align:center;font-size:13px;font-weight:600;color:#3fb950"></div>
+<div style="font-size:10px;color:#d29922;margin-top:4px">Scan QR with the BOT phone → WhatsApp → Linked devices. The bot's phone number shows below the QR while connecting and after pairing.</div>
 <div style="margin-top:10px">
 <button class="primary" onclick="a('connect')">Start</button>
 <button onclick="a('refresh-qr')">Refresh QR</button>
@@ -7343,17 +7503,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div style="margin-top:8px"><button onclick="testAI()">Test AI Pool</button><span style="font-size:10px;color:#8b949e;margin-left:8px">tasks round-robin across every healthy API</span></div></div>
 
 <div class="card"><h2>🔑 Account Setup</h2>
-<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:8px">Set credentials for each platform. Values are saved to the <b>env</b> file on the server (never sent to browser). Click Save after editing.</div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-<div><label style="font-size:10px;color:#8b949e">🐦 Twitter Username</label><input id="cfgTwUser" placeholder="@username" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">Twitter Password</label><input id="cfgTwPass" type="password" placeholder="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">📘 Facebook Email</label><input id="cfgFbEmail" placeholder="email" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">Facebook Password</label><input id="cfgFbPass" type="password" placeholder="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">▶️ YouTube Email</label><input id="cfgYtEmail" placeholder="email" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">YouTube Password</label><input id="cfgYtPass" type="password" placeholder="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">🎵 TikTok Username</label><input id="cfgTtUser" placeholder="@username" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-<div><label style="font-size:10px;color:#8b949e">TikTok Password</label><input id="cfgTtPass" type="password" placeholder="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"></div>
-</div>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:8px">Paste an AI provider key into a slot (Rewind / OpenRouter / OpenAI / Gemini / Groq — auto-detected from its shape). Values are saved to the <b>env</b> file on the server (never sent to browser). Click Save after editing. <b>v86: Twitter / Facebook / YouTube / TikTok setup was removed — this app runs WhatsApp only.</b></div>
 <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
 <input id="cfgApiKey" placeholder="API key (e.g. sk-rewind-... or sk-or-v1-...)" style="flex:1;min-width:200px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px">
 <select id="cfgApiSlot" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 8px;font-family:inherit;font-size:11px"><option value="API_1">API_1</option><option value="API_2">API_2</option><option value="API_3">API_3</option><option value="API_4">API_4</option><option value="API_5">API_5</option><option value="API_6">API_6</option><option value="API_7">API_7</option><option value="API_8">API_8</option></select>
@@ -7362,17 +7512,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div id="cfgResult" style="font-size:11px;margin-top:6px;color:#8b949e"></div>
 </div>
 
-<div class="card"><h2>🛡️ Bot Detection Meter</h2>
-<div style="font-size:11px;color:#8b949e;margin-bottom:6px">Real-time detection risk score across all platforms. Lower = safer.</div>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<div style="text-align:center"><div id="bdTwitter" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">Twitter</div></div>
-<div style="text-align:center"><div id="bdFacebook" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">Facebook</div></div>
-<div style="text-align:center"><div id="bdYoutube" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">YouTube</div></div>
-<div style="text-align:center"><div id="bdTiktok" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">TikTok</div></div>
-<div style="text-align:center"><div id="bdWhatsapp" style="font-size:24px;font-weight:700;color:#3fb950">-</div><div style="font-size:10px;color:#8b949e">WhatsApp</div></div>
-</div>
-<div style="margin-top:6px;font-size:10px;color:#8b949e">0-30: safe (green) · 31-60: caution (yellow) · 61-100: danger (red) · Anti-detect: 16 Puppeteer evasions + fingerprint rotation + human behavior</div>
-</div>
+<!-- v86: platform risk-score card was removed here — this app runs WhatsApp only. -->
 <div class="card"><h2>📅 Post Scheduler</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Recurring scraper posts (video/image/gif/music). Each fire drops <b>N</b> items into the main group at random human-paced gaps. Stored in <b>schedules.json</b>. Chat: <code>!schedule 6 videos of horse racing daily at 20:00</code></div>
 <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
@@ -7415,27 +7555,14 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 </div>
 <div id="scResult" style="font-size:12px;line-height:1.8;min-height:20px;color:#8b949e">Pick a type + optional site — search → download, live.</div>
 </div>
-<div class="card"><h2>🔗 Platform Connections — log the bot in</h2>
-<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">One-click login for <b>Twitter / YouTube / Facebook</b> (+ TikTok). Put each platform's env creds on Render first (<b>idLabel → passLabel</b> shown per row), press <b>Connect</b> — it runs the same login the WhatsApp commands use. First success saves <b>data/&lt;p&gt;/cookies.json</b>; every boot after reconnects from those cookies. Content to send is already built in (templates + film cache), so once a platform shows <span style="color:#3fb950">logged in</span> the schedules post on their own.</div>
-<div style="margin-bottom:6px"><button class="primary" onclick="loadPlatformStatus()">🔄 Check connections</button> <span style="font-size:10px;color:#8b949e">env creds needed: TWITTER_USERNAME/PASS · YOUTUBE_EMAIL/PASS · FB_EMAIL/PASS</span></div>
-<div id="platStatus" style="font-size:11px;line-height:1.9;max-height:320px;overflow-y:auto">click Check connections…</div>
-<div id="platOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
+<!-- v86: platform login/cookie/login-window cards were removed here — this app runs WhatsApp only. -->
+
+<div class="card"><h2>🌐 My Sites — add your own pic / video / music sources</h2>
+<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Add <b>hundreds</b> of your own sites — every entry below is sent to the scraper with every search. Entry: <code>{"name":"x","url":"https://site/search?q={query}","kind":"images|gifs|videos|music|any","nsfw":false}</code>. <code>{query}</code> is replaced with the search words (optional). <code>nsfw:true</code> sites only run in the 21:00-08:00 window. Saved to <b>config/sites.json</b>.</div>
+<textarea id="sitesBlob" placeholder='{"sites":[{"name":"my-pics","url":"https://example.com/search?q={query}","kind":"images","nsfw":false}]}' style="width:100%;height:150px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;font-size:10px"></textarea>
+<div style="margin-top:6px"><button class="primary" onclick="saveMySites()">💾 Save sites</button> <button onclick="loadMySites()">🔄 Reload from file</button> <span id="sitesOut" style="font-size:10px;color:#8b949e;margin-left:8px"></span></div>
 </div>
-<div class="card"><h2>🍪 Cookie Bypass — no CAPTCHA, ever</h2>
-<div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">First login from a <b>server IP</b> often hits a CAPTCHA/checkpoint wall (Twitter CAPTCHA, Google anti-bot, FB checkpoint). Workaround — 2 minutes, ONCE per platform: <b style="color:#a371f7">Option A (easiest): run  node login-window.js  on YOUR PC — a real Chrome window pops out, log in by hand (CAPTCHA included), cookies save automatically</b>. Option B: on your PC log into the platform in Chrome ② install the <b>EditThisCookie</b> / <b>cookie-editor</b> extension ③ Export (JSON) ④ paste below → <b>Save cookies</b> ⑤ press <b>Connect</b>. The bot loads those cookies and verifies the session — no password typing, no CAPTCHA. Persists across redeploys (data/&lt;p&gt;/cookies.json).</div>
-<div style="margin-bottom:6px"><select id="cookPlat" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px"><option value="twitter">Twitter / X</option><option value="youtube">YouTube</option><option value="facebook">Facebook</option><option value="tiktok">TikTok</option></select> <button class="primary" onclick="savePlatformCookies()">💾 Save cookies</button> <button onclick="document.getElementById('cookBlob').value='';document.getElementById('cookOut').innerHTML='';">Clear</button></div>
-<textarea id="cookBlob" placeholder='Paste the cookie export here — JSON array like [{"name":"auth_token","value":"…","domain":".x.com"}] (EditThisCookie), or raw cookies.txt lines (domain⇥flag⇥path⇥secure⇥expiry⇥name⇥value), or a simple {"name":"value"} object' style="width:100%;height:110px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;font-size:10px"></textarea>
-<div id="cookOut" style="font-size:11px;line-height:1.7;margin-top:6px;color:#8b949e"></div>
-<div style="border-top:1px solid #21262d;margin-top:8px;padding-top:8px">
-<b style="color:#a371f7">🔓 Option C — LIVE LOGIN WINDOW, right here (works on Render too)</b>
-<div style="font-size:10px;color:#8b949e;line-height:1.5;margin:4px 0 6px">Select a platform → <b>Open</b> → the REAL login page appears below, live. <b>Click on it</b>, type in the box, press Enter — the CAPTCHA is yours to solve like a human. The moment the login succeeds, cookies save automatically. Nothing to install.</div>
-<div style="margin-bottom:6px"><select id="livePlat" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px"><option value="twitter">Twitter / X</option><option value="youtube">YouTube</option><option value="facebook">Facebook</option><option value="tiktok">TikTok</option></select> <button class="primary" onclick="liveOpen()">🔓 Open live window</button> <button onclick="liveStop()">✖ Close</button> <span id="liveStatus" style="font-size:10px;color:#8b949e"></span></div>
-<div id="liveWrap" style="display:none">
-<img id="liveShot" alt="live login" onclick="liveClick(event)" style="width:100%;border:1px solid #30363d;border-radius:6px;cursor:crosshair;display:block">
-<div style="margin-top:4px;display:flex;gap:4px"><input id="liveText" placeholder="type here (username / password / search)… then Enter" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px;font-family:monospace;font-size:11px" onkeydown="if(event.key==='Enter'){liveType();}"> <button onclick="liveType()">Send ⏎</button> <button onclick="liveKey('Tab')">⇥</button> <button onclick="liveKey('Backspace')">⌫</button></div>
-</div>
-</div>
-</div>
+
 <div class="card"><h2>📁 Media Cache — files you can actually open</h2>
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Every panel download (image/gif/video/music) and every generated audio/prompt lands here as <b>your own copy</b> — openable for 24h, instead of dying with the scraper's 1-hour temp links (the old "things not found" bug).</div>
 <div style="margin-bottom:6px"><button onclick="loadMediaCache()">🔄 Refresh</button> <button onclick="mediaCleanup()" style="font-size:10px">🧹 Clean expired</button> <button onclick="verifyLogins()" style="font-size:10px">🔐 Verify logins</button></div>
@@ -7495,22 +7622,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
      These MODIFY the existing interface, not replace it.
      ═══════════════════════════════════════════════════════════════ -->
 
-<div class="card"><h2>🐦 Twitter — Independent NSFW Bot</h2>
-<div style="font-size:11px;line-height:1.65;color:#8b949e">
-<b style="color:#3fb950">INDEPENDENT</b> from WhatsApp — no cross-posting dependency.<br>
-<b>Persona:</b> Excited girl who woke up in the mood — posts NSFW on her OWN schedule (1-3hr random intervals).<br>
-<b>DMs:</b> Handles DMs independently with flirty "this could be us" style + media.<br>
-<b>Comments:</b> Replies to other people's posts on her own.<br>
-<b>Rate limits:</b> 5 tweets/hr, 8 replies/hr, 3 DMs/hr (conservative, 30% below limits).<br>
-<b>Anti-detect:</b> Puppeteer stealth (16 evasions) + fingerprint rotation (3-6hr) + circadian rhythm posting.
-</div>
-<div style="margin-top:8px">
-<div class="row"><span>NSFW schedule</span><span class="val" id="twNsfw">1-3hr random</span></div>
-<div class="row"><span>DM handling</span><span class="val" id="twDm">Independent</span></div>
-<div class="row"><span>Source</span><span class="val" style="color:#3fb950">OWN content (not WhatsApp)</span></div>
-</div>
-<div style="margin-top:8px"><button onclick="runCrapTest('twitter')" style="font-size:10px">🧪 Test Twitter</button></div>
-</div>
+<!-- v86: Twitter Independent NSFW Bot card removed — WhatsApp only. -->
 
 <div class="card"><h2>📱 WhatsApp — Admin-Gated NSFW</h2>
 <div style="font-size:11px;line-height:1.65;color:#8b949e">
@@ -7617,7 +7729,6 @@ Runs <b>REAL</b> checks — not fake/simulated. Actually pings services, validat
 </div>
 <div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
 <button onclick="runCrapTest('config')" style="font-size:10px">⚙️ Config</button>
-<button onclick="runCrapTest('twitter')" style="font-size:10px">🐦 Twitter</button>
 <button onclick="runCrapTest('whatsapp')" style="font-size:10px">📱 WhatsApp</button>
 <button onclick="runCrapTest('core')" style="font-size:10px">🧠 Core</button>
 <button onclick="runCrapTest('deps')" style="font-size:10px">📦 Deps</button>
@@ -7882,11 +7993,17 @@ var pr=(d.ai&&d.ai.providers)||{};var act=d.ai&&d.ai.active;var h='';
 for(var k in pr){var x=pr[k];
   h+='<div>'+(x&&x.ok?'<span style="color:#3fb950">OK</span>':'<span style="color:#f85149">FAIL</span>')+' '+esc(k)+(act===k?' <span class="ai-badge">ACTIVE</span>':'')+(x&&x.ok?' '+x.ms+'ms':' '+esc((x&&x.status?x.status+' ':'')+(x&&x.error||'')))+'</div>';}
 $('aiList').innerHTML=h||'<div style="opacity:0.5">Not tested</div>';
-var q=await api('qr-data');if(q.qr){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
+var q=await api('qr-data');var qp=$('qrPhone');
+if(q.qr){$('qrImg').src='/admin/qr?t='+Date.now();$('qrImg').style.display='block';}
 else $('qrImg').style.display='none';
+/* v86: bot phone number below the QR while connecting + after pairing */
+if(qp){qp.textContent='📲 '+(q.botNumber||'number appears once the QR is scanned')+' · '+(q.status||'-');}
 /* Bot Detection Meter */
 try{var bd=await fetch('/admin/bot-detect');var bdD=await bd.json();setBdMeter('bdTwitter',bdD.twitter||0);setBdMeter('bdFacebook',bdD.facebook||0);setBdMeter('bdYoutube',bdD.youtube||0);setBdMeter('bdTiktok',bdD.tiktok||0);setBdMeter('bdWhatsapp',bdD.whatsapp||0);$('bdm').textContent='Bot Detect: '+(bdD.overall||0);}catch(e){}}catch(e){}}
 function setBdMeter(id,v){var el=$(id);if(!el)return;el.textContent=v;el.style.color=v<=30?'#3fb950':v<=60?'#d29922':'#f85149';}
+/* ═══ v86 MY SITES panel card — load/save config/sites.json over HTTP ═══ */
+async function loadMySites(){var el=$('sitesBlob');var out=$('sitesOut');if(!el)return;out.textContent='loading…';try{var r=await fetch('/api/sites');var d=await r.json();el.value=JSON.stringify({sites:d.sites||[]},null,2);out.textContent=(d.count||0)+' sites loaded';}catch(e){out.textContent='load failed: '+esc(e.message);}}
+async function saveMySites(){var el=$('sitesBlob');var out=$('sitesOut');if(!el)return;out.textContent='saving…';try{var parsed=JSON.parse(el.value);var res=await fetch('/api/sites?replace=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});var d=await res.json();out.textContent=d.ok?((d.count||0)+' sites saved ✓ — live immediately'):'error: '+esc(d.error||'failed');}catch(e){out.textContent='invalid JSON: '+esc(e.message);}}
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
 /* ═══ v70 SESSION BACKUP — copy blobs into env, restore without QR ═══ */
 var sbCache=null;
@@ -7956,7 +8073,7 @@ async function runDeepResearch(){var t=document.getElementById('drTopic').value.
 async function runCrapTest(section){section=section||'all';var s=document.getElementById('ctStatus');var r=document.getElementById('ctResult');s.textContent='Running '+(section==='all'?'all':'['+section+']')+' crap tests…';r.style.display='block';r.innerHTML='<span style="color:#d29922">⏳ '+(section==='all'?'Full system test':'Testing ['+section+']')+' — real checks only…</span>';try{var res=await fetch('/admin/crap-test?section='+encodeURIComponent(section));var d=await res.json();var h='<b>Crap Test '+(d.section==='all'?'— ALL':(' — ['+esc(d.section)+']'))+'</b> ('+d.passed+'/'+d.total+' passed, avg '+d.avgScore+'%)<br>';if(d.sections&&d.sections.length){h+='<span style="color:#8b949e">Sections: '+d.sections.map(esc).join(', ')+'</span><br>';}h+='<br>';if(d.results&&d.results.length){var lastSec='';for(var i=0;i<d.results.length;i++){var t=d.results[i];if(t.section&&t.section!==lastSec){if(lastSec)h+='<br>';h+='<b style="color:#58a6ff">['+esc(t.section)+']</b><br>';lastSec=t.section;}var c=t.passed?'#3fb950':'#f85149';var icon=t.passed?'✅':'❌';h+='<span style="color:'+c+'">'+icon+' '+esc(t.name)+'</span> — '+Math.round(t.score||0)+'%';if(t.details)h+=' <span style="color:#8b949e">('+esc(t.details)+')</span>';if(t.error)h+=' <span style="color:#f85149">('+esc(t.error)+')</span>';h+='<br>';}}r.innerHTML=h;s.textContent='Done — '+d.passed+'/'+d.total+' passed';}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';s.textContent='Failed';}}
 
 /* ═══ v81: Account Setup + Per-Site Test + Bot Detection ═══ */
-async function saveAccountSetup(){var r=$('cfgResult');r.innerHTML='<span style="color:#d29922">Saving…</span>';try{var data={};var tw=$('cfgTwUser').value.trim();var twp=$('cfgTwPass').value;var fbe=$('cfgFbEmail').value.trim();var fbp=$('cfgFbPass').value;var yte=$('cfgYtEmail').value.trim();var ytp=$('cfgYtPass').value;var ttu=$('cfgTtUser').value.trim();var ttp=$('cfgTtPass').value;var ak=$('cfgApiKey').value.trim();var as=$('cfgApiSlot').value;if(tw)data.TWITTER_USERNAME=tw;if(twp)data.TWITTER_PASSWORD=twp;if(fbe)data.FB_EMAIL=fbe;if(fbp)data.FB_PASSWORD=fbp;if(yte)data.YOUTUBE_EMAIL=yte;if(ytp)data.YOUTUBE_PASSWORD=ytp;if(ttu)data.TIKTOK_USERNAME=ttu;if(ttp)data.TIKTOK_PASSWORD=ttp;if(ak)data[as]=ak;var res=await fetch('/admin/save-env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});var d=await res.json();r.innerHTML=d.ok?'<span style="color:#3fb950">Saved ✓ — restart server for changes to take effect.</span>':'<span style="color:#f85149">'+esc(d.error||'failed')+'</span>';}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function saveAccountSetup(){var r=$('cfgResult');r.innerHTML='<span style="color:#d29922">Saving…</span>';try{var data={};var ak=$('cfgApiKey').value.trim();var as=$('cfgApiSlot').value;if(ak)data[as]=ak;var res=await fetch('/admin/save-env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});var d=await res.json();r.innerHTML=d.ok?'<span style="color:#3fb950">Saved ✓ — restart server for changes to take effect.</span>':'<span style="color:#f85149">'+esc(d.error||'failed')+'</span>';}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 async function testAllScraperSites(){var r=$('siteTestResult');r.innerHTML='<span style="color:#d29922">Testing all sites…</span>';try{var res=await fetch('/admin/test-scraper-sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});var d=await res.json();var h='<b>Per-Site Test Results</b> ('+d.passed+'/'+d.total+' OK)<br>';for(var i=0;i<d.results.length;i++){var s=d.results[i];h+='<span style="color:'+(s.ok?'#3fb950':'#f85149')+'">'+(s.ok?'✅':'❌')+'</span> <b>'+esc(s.name||s.url)+'</b> ('+esc(s.type||'?')+') — '+(s.ok?s.results+' results, '+s.ms+'ms':esc(s.error||'failed'))+'<br>';}r.innerHTML=h;}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 async function loadFreeApis(){var el=$('freeApiList');if(!el)return;try{var r=await fetch('/admin/free-apis');var d=await r.json();var h='';for(var i=0;i<d.apis.length;i++){var a=d.apis[i];h+='<div style="border-top:1px solid #21262d;padding:2px 0"><span style="color:#58a6ff">'+esc(a.name)+'</span> <span style="color:#8b949e">['+esc(a.category)+']</span> <span style="color:#3fb950">'+esc(a.limit)+'</span></div>';}el.innerHTML=h||'none';}catch(e){el.innerHTML='<span style="color:#f85149">failed</span>';}}
 async function testFreeApis(){var r=$('freeApiResult');r.innerHTML='<span style="color:#d29922">Pinging all free APIs…</span>';try{var r1=await fetch('/admin/free-apis');var d=await r1.json();var h='';var ok=0;for(var i=0;i<d.apis.length;i++){var a=d.apis[i];try{var t0=Date.now();await fetch(a.url,{mode:'no-cors',signal:AbortSignal.timeout(5000)});var ms=Date.now()-t0;h+='<span style="color:#3fb950">✅</span> '+esc(a.name)+' ('+ms+'ms)<br>';ok++;}catch(e){h+='<span style="color:#f85149">❌</span> '+esc(a.name)+' — '+esc(e.message||'timeout')+'<br>';}}r.innerHTML='<b>Free API Test: '+ok+'/'+d.apis.length+' reachable</b><br>'+h;}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
@@ -8677,6 +8794,49 @@ async function apiTranslateHandler(req, res){
 app.get('/api/translate', apiTranslateHandler);
 app.post('/api/translate', apiTranslateHandler);
 app.get('/api/translate/languages', function(req, res){ res.json({ languages: translator.LANGUAGES }); });
+
+/* ═══ v86 MY SITES — manage config/sites.json over HTTP ═══
+ * GET    /api/sites           → { ok, count, sites:[...] }
+ * POST   /api/sites           → add entries: { "sites":[...] } or one {...}
+ * POST   /api/sites?replace=1 → REPLACE the whole list (panel Save uses this)
+ * DELETE /api/sites/<name>    → remove one entry by name
+ * Entry shape: { "name":"x", "url":"https://…/{query}", "kind":"images|gifs|videos|music|any", "nsfw":false } */
+app.get('/api/sites', function(req, res){
+  res.json({ ok: true, count: SITE_REGISTRY.length, sites: SITE_REGISTRY, file: 'config/sites.json' });
+});
+app.post('/api/sites', function(req, res){
+  try {
+    const b = req.body || {};
+    const incoming = Array.isArray(b) ? b : (Array.isArray(b.sites) ? b.sites : (b.url ? [b] : null));
+    if (!incoming) return res.status(400).json({ ok: false, error: 'send { "sites": [...] } or a single { "name","url","kind","nsfw" }' });
+    const replace = req.query.replace === '1' || req.query.replace === 'true';
+    const base = replace ? [] : SITE_REGISTRY.slice();
+    const byName = new Map(base.map(function(s){ return [s.name, s]; }));
+    let added = 0;
+    for (const s of incoming){
+      if (!s || !/^https?:\/\//i.test(String(s.url || ''))) continue;
+      const name = String(s.name || ('site_' + (byName.size + 1))).slice(0, 60);
+      byName.set(name, {
+        name: name,
+        url:  String(s.url),
+        kind: ['images', 'gifs', 'videos', 'music', 'any'].includes(String(s.kind)) ? String(s.kind) : 'any',
+        nsfw: !!s.nsfw
+      });
+      added++;
+    }
+    const saved = saveSiteRegistry([...byName.values()]);
+    res.json({ ok: true, added: added, count: saved.length, sites: saved });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+app.delete('/api/sites/:name', function(req, res){
+  const before = SITE_REGISTRY.length;
+  const left = SITE_REGISTRY.filter(function(s){ return s.name !== req.params.name; });
+  if (left.length === before) return res.status(404).json({ ok: false, error: 'no site named "' + req.params.name + '"' });
+  const saved = saveSiteRegistry(left);
+  res.json({ ok: true, removed: req.params.name, count: saved.length });
+});
 
 app.get('/admin/qr', async function(req,res){
   if (!qrDataUri) return res.status(404).json({ error:'No QR' });

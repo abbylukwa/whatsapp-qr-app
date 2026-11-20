@@ -1,0 +1,28 @@
+{
+  "sites": [
+    {
+      "name": "openverse-images",
+      "url": "https://api.openverse.org/v1/images/?q={query}",
+      "kind": "images",
+      "nsfw": false
+    },
+    {
+      "name": "wikimedia-commons",
+      "url": "https://commons.wikimedia.org/w/index.php?search={query}",
+      "kind": "images",
+      "nsfw": false
+    },
+    {
+      "name": "archive-videos",
+      "url": "https://archive.org/advancedsearch.php?q={query}+AND+mediatype:movies&fl%5B%5D=identifier&rows=20&output=json",
+      "kind": "videos",
+      "nsfw": false
+    },
+    {
+      "name": "archive-music",
+      "url": "https://archive.org/advancedsearch.php?q={query}+AND+mediatype:audio&fl%5B%5D=identifier&rows=20&output=json",
+      "kind": "music",
+      "nsfw": false
+    }
+  ]
+}

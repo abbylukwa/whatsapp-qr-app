@@ -204,6 +204,82 @@ async function main() {
     assert(s.myLinks.length === 2, 'myLinks parse failed');
   });
 
+  /* ── 9b. v88/v89: site health + localization + registry ── */
+  await test('site-health: registry integrity — 7 majors, all nsfw, share map', () => {
+    const SH = require('./site-health');
+    const reg = JSON.parse(fs.readFileSync(SH.REGISTRY_FILE, 'utf8'));
+    assert(reg.sites.length >= 190, 'registry shrank: ' + reg.sites.length);
+    const cats = new Set(reg.sites.map(s => s.category));
+    for (const m of ['zimbabwe', 'southafrica', 'arab', 'persian', 'indian', 'africa', 'euro'])
+      assert(cats.has(m), 'missing major category: ' + m);
+    assert(reg.sites.every(s => s.nsfw === true), 'non-nsfw entry found');
+    for (const s of reg.sites) assert(/\{query\}/.test(s.url), 'site without {query} template: ' + s.name);
+    assert((reg.categoryShares || {}).zimbabwe && reg.categoryShares.zimbabwe.includes('southafrica'),
+      'zimbabwe must share southafrica sites');
+    const zimg = reg.sites.filter(s => s.category === 'zimbabwe' && s.kind === 'images').length;
+    const zgif = reg.sites.filter(s => s.category === 'zimbabwe' && s.kind === 'gifs').length;
+    assert(zimg >= 2 && zgif >= 2, 'zimbabwe image/gif coverage thin: ' + zimg + '/' + zgif);
+  });
+  await test('site-health: localization — phone + language → category', () => {
+    const SH = require('./site-health');
+    SH.loadRegistry();                        /* loads categoryShares too */
+    assert(SH.categoryByPhone('263771234567') === 'zimbabwe', '263 must map to zimbabwe');
+    assert(SH.categoryByPhone('27821234567') === 'southafrica', '27 must map to southafrica');
+    assert(SH.categoryByPhone('989121234567') === 'persian', '98 must map to persian');
+    assert(SH.categoryByPhone('919812345678') === 'indian', '91 must map to indian');
+    assert(SH.categoryByPhone('201001234567') === 'arab', '20 must map to arab');
+    assert(SH.categoryByPhone('4915123456789') === 'euro', '49 must map to euro');
+    assert(SH.categoryByLang('sn') === 'zimbabwe', 'shona must map to zimbabwe');
+    assert(SH.categoryByLang('fa') === 'persian', 'fa must map to persian');
+    /* share map: zimbabwe chain includes southafrica sites */
+    const cats = SH.categoriesFor('zimbabwe');
+    assert(cats.includes('southafrica'), 'share map not applied');
+    /* boosted ordering: zimbabwe sites ride first for a zimbabwean sender */
+    const links = SH.healthyLinks('videos', true, null, 'zimbabwe');
+    const zwFirst = links.slice(0, 6).some(u => /zimbabwe|harare|mzansi|south african/.test(u));
+    assert(zwFirst, 'localized chain does not ride zimbabwe/mzansi sites first');
+  });
+  await test('site-health: dead sites are skipped, cooldown revive works', () => {
+    const SH = require('./site-health');
+    SH.loadRegistry(); SH.loadHealth();
+    const reg = SH.registry();
+    const target = reg.find(s => s.kind === 'videos');
+    const before = SH.healthyLinks('videos', true);
+    assert(before.includes(target.url), 'healthy site missing from chain');
+    SH.markFail(target.url, 'test-493');
+    const after = SH.healthyLinks('videos', true);
+    assert(!after.includes(target.url), 'dead site still in chain after markFail');
+    SH.markOk(target.url, 100);
+    assert(SH.healthyLinks('videos', true).includes(target.url), 'revived site not back in chain');
+  });
+  await test('server: junk/dummy URL filter kills 1px + logos + sprites', () => {
+    const src = fs.readFileSync('./server.js', 'utf8');
+    assert(/JUNK_URL_RE/.test(src), 'JUNK_URL_RE filter missing from server.js');
+    assert(/cleanResults/.test(src), 'cleanResults() missing from server.js');
+    assert(src.includes('1px'), 'known junk pattern (1px.png) not covered');
+  });
+  await test('music engine: provider chain + 32MB WhatsApp cap', () => {
+    const M = require('./music');
+    assert(M.MAX_BYTES <= 34 * 1024 * 1024, 'music cap must stay under WhatsApp 34MB');
+    assert(typeof M.getMusic === 'function' && typeof M.convert === 'function', 'engine API missing');
+    const src = fs.readFileSync('./music.js', 'utf8');
+    assert(/y2mate/i.test(src), 'y2mate (the boss rule) not in the chain');
+    assert(/vevioz|cobalt/i.test(src), 'fallback converters missing');
+    assert(/markFail|providerDead/.test(src), 'provider self-healing missing');
+  });
+  await test('server: storage-based clearing at 300MB cap', () => {
+    const src = fs.readFileSync('./server.js', 'utf8');
+    assert(/MEDIA_STORAGE_CAP_MB/.test(src), 'storage cap missing');
+    assert(src.includes('STORAGE CAP HIT'), 'cap-hit wipe log missing');
+    assert(/mediaStorageMB/.test(src), 'storage meter missing');
+  });
+  await test('server: damaged-result defense wired (sendFirstWorking + forgetMedia)', () => {
+    const src = fs.readFileSync('./server.js', 'utf8');
+    assert(/async function sendFirstWorking/.test(src), 'sendFirstWorking missing');
+    assert(/function forgetMedia/.test(src), 'forgetMedia missing');
+    assert(/quietFail/.test(src), 'quietFail option missing in safe senders');
+  });
+
   /* ── 10. videoScheduler config-driven queries ──────────── */
   await test('videoScheduler: no hardcoded NSFW query list ships in source', () => {
     const src = fs.readFileSync('./videoScheduler.js', 'utf8');

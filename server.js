@@ -1745,6 +1745,40 @@ function pickFresh(list, jid){
   rememberMedia(jid, url);
   return url;
 }
+/* v88: a candidate that failed to send gets FORGOTTEN so pickFresh never
+ * hands the same dead URL to this chat again */
+function forgetMedia(jid, url){
+  const a = recentMedia.get(jid);
+  if (!a || !url) return;
+  const i = a.lastIndexOf(url);
+  if (i >= 0) a.splice(i, 1);
+}
+/* v89 LOCALIZATION — which country's sites should ride first for this
+ * sender: their phone country code (263=ZW→shares Mzansi, 27=ZA, 98=IR,
+ * 91=IN, arab/euro blocks…), else the chat's detected language */
+function localCat(senderJid, chatJid, lang){
+  return siteHealth.categoryByPhone(senderJid) || siteHealth.categoryByLang(lang) || siteHealth.categoryByPhone(chatJid) || null;
+}
+/* v88 DAMAGED-RESULT DEFENSE — try candidates until one actually sends;
+ * a URL that dies is forgotten for this chat (and quietly skipped, no
+ * "here is the link instead" spam). send*Safe return true/false. */
+async function sendFirstWorking(jid, candidates, kind, caption, opts = {}){
+  const tried = [];
+  for (const url of (candidates || []).slice(0, 3)){
+    if (!url) continue;
+    tried.push(url);
+    let ok = false;
+    try {
+      if (kind === 'image')      ok = await sendImageSafe(jid, url, caption, 2, 'slow', opts.taskType || 'dmreply', true, { quietFail: true });
+      else if (kind === 'gif')   ok = await sendGifSafe(jid, url, caption, 2, 'slow', opts.taskType || 'dmreply', true, { quietFail: true });
+      else if (kind === 'video') { await sendMediaUrl(jid, url, { kind: 'video', mimetype: 'video/mp4', caption, priority: 2, lane: 'slow', taskType: opts.taskType || 'dmreply' }); ok = true; }
+      else                       { await sendMediaUrl(jid, url, { kind: 'audio', mimetype: 'audio/mpeg', caption, priority: 2, lane: 'slow', taskType: opts.taskType || 'dmreply' }); ok = true; }
+    } catch (e) { pushLog('warn', 'media', 'candidate failed (' + kind + '): ' + e.message); ok = false; }
+    if (ok) return { ok: true, url, tried: tried.length };
+    forgetMedia(jid, url);
+  }
+  return { ok: false, tried: tried.length };
+}
 
 async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
@@ -1753,6 +1787,9 @@ async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', task
     return true;
   } catch(e){
     pushLog('warn','media',`image skip: ${e.message}`);
+    /* v88: quietFail — the fallback loop tries the next candidate itself,
+     * so don't spam the chat with a raw link here */
+    if (opts && opts.quietFail) return false;
     try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane, taskType, typing); } catch(_){}
     return false;
   }
@@ -1764,6 +1801,7 @@ async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskTy
     return true;
   } catch(e){
     pushLog('warn','media',`gif skip: ${e.message}`);
+    if (opts && opts.quietFail) return false;
     try { await sendBuffer(jid, { text: `${caption}\n${url}`.trim() }, priority, lane, taskType, typing); } catch(_){}
     return false;
   }
@@ -2549,6 +2587,18 @@ function listFilmFiles(){
       .sort((a, b) => b.mtime - a.mtime);
   } catch(e){ return []; }
 }
+/* v89 STORAGE-BASED CLEARING — the boss: the cache must not just wait
+ * 24h; when media storage fills up to the cap (default 300MB) EVERYTHING
+ * is cleared immediately (300–400MB zone). Age rule still applies under
+ * the cap. MEDIA_STORAGE_CAP_MB env to tune. */
+const MEDIA_STORAGE_CAP_MB = Math.max(50, parseInt(process.env.MEDIA_STORAGE_CAP_MB || '300', 10));
+function mediaStorageMB(){
+  let total = 0;
+  try { for (const f of fs.readdirSync(MEDIA_DIR)){
+    try { total += fs.statSync(path.join(MEDIA_DIR, f)).size; } catch(e){}
+  } } catch(e){}
+  return total / (1024 * 1024);
+}
 function mediaSweep(){
   try {
     const files = fs.readdirSync(MEDIA_DIR); const now = Date.now(); let deleted = 0;
@@ -2557,10 +2607,21 @@ function mediaSweep(){
       try { if (now - fs.statSync(p).mtimeMs > MEDIA_MAX_AGE_MS) { fs.unlinkSync(p); deleted++; } } catch(e){}
     }
     if (deleted) pushLog('info','media','swept ' + deleted + ' old media file(s) (24h cap)');
+    /* v89: the storage trigger — 300MB reached → clear EVERYTHING */
+    let mb = mediaStorageMB();
+    if (mb >= MEDIA_STORAGE_CAP_MB){
+      let wiped = 0;
+      for (const f of files){
+        const p = path.join(MEDIA_DIR, f);
+        try { fs.unlinkSync(p); wiped++; } catch(e){}
+      }
+      pushLog('warn', 'media', 'STORAGE CAP HIT — ' + Math.round(mb) + 'MB ≥ ' + MEDIA_STORAGE_CAP_MB + 'MB → cleared ALL ' + wiped + ' media file(s)');
+      mb = 0; deleted += wiped;
+    }
     return deleted;
   } catch(e){ return 0; }
 }
-setInterval(mediaSweep, 3600 * 1000).unref();
+setInterval(mediaSweep, 15 * 60 * 1000).unref();     /* v89: every 15min (was hourly) */
 function guessMediaKind(file){
   const m = /_(video|audio|music|image|gif|prompt|script|blender|scene|film)_/.exec(file);
   if (m) return m[1] === 'music' ? 'audio' : m[1];
@@ -2589,7 +2650,15 @@ async function scrapperFetch(pathname, body, timeoutMs = 30000){
   return r.data;
 }
 
-async function scraperSearch(query, nsfw=false, prefer=null){
+/* v89 DUMMY-RESULT FILTER — the boss found junk in results: 1px
+ * placeholders (static.pornpics.com/style/img/1px.png), logos, sprites,
+ * loading images. Filtered BEFORE anything is picked or sent. */
+const JUNK_URL_RE = /1px\.png|\/style\/img\/|sprite|logo|blank|placeholder|spacer|loading\.|default\.(png|jpe?g)|pixel\.|\.svg($|\?)|transparent/i;
+function cleanResults(list){
+  return (Array.isArray(list) ? list : []).filter(u =>
+    typeof u === 'string' && u.startsWith('http') && !JUNK_URL_RE.test(u));
+}
+async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
   /* v73: site 'auto' — the scraper is MYLINKS-ONLY (zero built-in
    * sites), so results come exclusively from the configured slots. */
   const site = nsfw ? (SCRAPER_NSFW_SITE || 'nsfw') : 'auto';
@@ -2598,18 +2667,20 @@ async function scraperSearch(query, nsfw=false, prefer=null){
     /* v70: pass YOUR sites (MYLINKS env) with every search — the
      * scraper puts their results FIRST in the returned array.
      * v86: plus the config/sites.json registry, kind-matched.
-     * v87: plus the user's !site <name> pick, ahead of everything. */
+     * v87: plus the user's !site <name> pick, ahead of everything.
+     * v88: the registry rides through the self-healing health map —
+     * dead sites excluded, healthy ones ordered fastest-first. */
     const body = { query, site, nsfw: !!nsfw };
-    const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteUrlsFor('images', !!nsfw)))];
+    const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('images', !!nsfw, null, boostCat)))];
     if (myLinks.length) body.myLinks = myLinks;
     const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 45000 });
-    return { ok:true, images: r.data?.images || [], site, myLinks: r.data?.myLinks || 0 };
+    return { ok:true, images: cleanResults(r.data?.images), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`${nsfw?'NSFW':'SFW'} "${query}": ${e.message}`);
     return { ok:false, error:e.message, images:[], site };
   }
 }
-async function scraperGif(query, nsfw=false, prefer=null){
+async function scraperGif(query, nsfw=false, prefer=null, boostCat=null){
   const site = nsfw ? SCRAPER_NSFW_SITE : SCRAPER_SFW_SITE;
   resetDailyStats(); dailyStats.scraperGifs++;
   try {
@@ -2620,10 +2691,10 @@ async function scraperGif(query, nsfw=false, prefer=null){
     const params = { q: query, site };
     /* v72.3: explicit nsfw flag — kept for scraper compatibility. */
     if (nsfw) params.nsfw = '1';
-    const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteUrlsFor('gifs', !!nsfw)))];
+    const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('gifs', !!nsfw, null, boostCat)))];
     if (gifLinks.length) params.myLinks = gifLinks.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
-    return { ok:true, gifs: r.data?.gifs || [], site, myLinks: r.data?.myLinks || 0 };
+    return { ok:true, gifs: cleanResults(r.data?.gifs), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`GIF "${query}": ${e.message}`);
     return { ok:false, error:e.message, gifs:[], site };
@@ -2695,7 +2766,34 @@ async function scraperMusic(query){
     return { ok:false, error:e.message };
   }
 }
-async function scraperVideo(query, exclude, site){
+/* ═══ v88 MUSIC DOWNLOAD — the boss's rule: online downloader sites
+ * (y2mate-style chain in music.js) FIRST, the old scraper slot last.
+ * mode: 'audio' = MP3 · 'video' = MP4 (quality ladder 720→480→360 keeps
+ * every file under WhatsApp's 34MB rule BEFORE we ever try to send). ═══ */
+async function musicDownload(query, mode = 'audio'){
+  resetDailyStats(); dailyStats.scraperMusic++;
+  try {
+    const r = await musicEngine.getMusic(query, mode);
+    /* local copy first — converter links die within minutes */
+    const local = await downloadToLocalMedia(r.mediaUrl, mode === 'audio' ? 'audio' : 'video');
+    if (local) return { ok: true, mediaUrl: local.url, sourceUrl: r.mediaUrl, localFile: local.file,
+      title: r.title || query, mimetype: local.mimetype || (mode === 'audio' ? 'audio/mpeg' : 'video/mp4'),
+      sizeBytes: local.size, provider: r.provider, engine: 'converter' };
+    /* no local copy — only send the direct URL when it provably fits the 34MB rule */
+    if (r.sizeBytes && r.sizeBytes > musicEngine.MAX_BYTES) throw new Error('file too big for WhatsApp (34MB rule) — tried ' + r.provider);
+    return { ok: true, mediaUrl: r.mediaUrl, sourceUrl: r.mediaUrl, title: r.title || query,
+      mimetype: r.mimetype || (mode === 'audio' ? 'audio/mpeg' : 'video/mp4'),
+      sizeBytes: r.sizeBytes || 0, provider: r.provider, engine: 'converter', tempLink: true };
+  } catch (e) {
+    pushLog('warn', 'music', `engine ${mode} "${query}": ${e.message}`);
+    if (mode === 'audio') {
+      const m = await scraperMusic(query);        /* old slot — final fallback */
+      if (m.ok) { m.engine = 'scraper-fallback'; return m; }
+    }
+    return { ok: false, error: e.message };
+  }
+}
+async function scraperVideo(query, exclude, site, boostCat=null){
   resetDailyStats(); dailyStats.scraperVideos++;
   try {
     const body = { query };
@@ -2704,7 +2802,7 @@ async function scraperVideo(query, exclude, site){
     /* v87: a registry name/URL passed as `site` rides FIRST in myLinks
      * (the scraper-side slot pick still applies when it knows the name) */
     const preferUrl = resolvePreferUrl(site);
-    const vidLinks = [...new Set([].concat(preferUrl || [], MY_LINKS_ENV, siteUrlsFor('videos', false)))];
+    const vidLinks = [...new Set([].concat(preferUrl || [], MY_LINKS_ENV, siteHealth.healthyLinks('videos', false, null, boostCat)))];
     if (vidLinks.length) body.myLinks = vidLinks;
     /* v73.1: optional site pick — "yona" / "pornpics" / slot number.
      * Absent = the scraper's file order (YonaYethuu first). */
@@ -3401,11 +3499,12 @@ async function tickTasks(){
       if (now < t.nextSendAt) continue;
       /* fetch the next item — never repeat one already sent */
       let r = null;
+      const tCat = localCat(t.chatJid, t.chatJid);      /* v89: localized chain */
       for (let tries = 0; tries < 2; tries++){
-        r = t.kind === 'music' ? await scraperMusic(t.query)
-          : t.kind === 'video' ? await scraperVideo(t.query, t.sentKeys || [])
-          : t.kind === 'gif'   ? await scraperGif(t.query)
-          : await scraperSearch(t.query);
+        r = t.kind === 'music' ? await musicDownload(t.query, 'audio')
+          : t.kind === 'video' ? await scraperVideo(t.query, t.sentKeys || [], null, tCat)
+          : t.kind === 'gif'   ? await scraperGif(t.query, false, null, tCat)
+          : await scraperSearch(t.query, false, null, tCat);
         if (r && r.ok) break;
       }
       let url = null, caption = t.query, mimetype = '', dedupKey = null;
@@ -3945,7 +4044,7 @@ async function processDM(item){
 
   if (intent && intent.type === 'music'){
     try {
-      const r = await scraperMusic(intent.query);
+      const r = await musicDownload(intent.query, 'audio');
       if (!r.ok){ await sendBuffer(chatJid, { text:'Could not find "'+intent.query+'"' }, 2, 'slow', 'dmreply', true); return; }
       await sendBuffer(chatJid, { text:'Found '+r.title+'. Sending...' }, 2, 'slow', 'dmreply', true);
       await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -3988,7 +4087,7 @@ async function processDM(item){
           await sendBuffer(chatJid, { text:'⏳ You have used your 3 video requests for this hour — try again later.' }, 2, 'slow', 'dmreply', true);
           return;
         }
-        const rv = await scraperVideo(intent.query);
+        const rv = await scraperVideo(intent.query, null, null, localCat(senderJid, chatJid));
         if (rv.ok){
           if (!dmAdmin) videoScheduler.recordRequest(senderJid);
           await sendMediaUrl(chatJid, rv.mediaUrl, {
@@ -4000,14 +4099,14 @@ async function processDM(item){
           return;
         }
       } else if (intent.type === 'gif'){
-        const r = await scraperGif(intent.query, false);
+        const r = await scraperGif(intent.query, false, null, localCat(senderJid, chatJid));
         if (r.ok && r.gifs.length){
           await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
           resetDailyStats(); dailyStats.picsSent++;
           return;
         }
       } else {
-        const r = await scraperSearch(intent.query, false);
+        const r = await scraperSearch(intent.query, false, null, localCat(senderJid, chatJid));
         if (r.ok && r.images.length){
           await sendImageSafe(chatJid, pickFresh(r.images, chatJid), '', 2, 'slow', 'dmreply', true);
           resetDailyStats(); dailyStats.picsSent++;
@@ -4144,9 +4243,10 @@ async function resolvePending(id, action, payload, adminChatJid){
       return { ok:true };
     }
     const query = payload || p.intent.query;
+    const pCat = localCat(p.userJid, p.userJid);
     if (p.intent.type === 'video'){
       /* v72.2: pending video requests resolve to a REAL video (was gif). */
-      const r = await scraperVideo(query);
+      const r = await scraperVideo(query, null, null, pCat);
       if (!r.ok){ adminReply(adminChatJid, 'No video.'); return { ok:false }; }
       await sendMediaUrl(p.userJid, r.mediaUrl, {
         kind: 'video', mimetype: r.mimetype || 'video/mp4',
@@ -4154,15 +4254,15 @@ async function resolvePending(id, action, payload, adminChatJid){
         priority: 2, lane: 'slow', taskType: 'dmreply', typing: false
       });
     } else if (p.intent.type === 'gif'){
-      const r = await scraperGif(query);
+      const r = await scraperGif(query, false, null, pCat);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendGifSafe(p.userJid, pickFresh(r.gifs, p.userJid), '', 2, 'slow', 'dmreply', true);
     } else if (p.intent.type === 'music'){
-      const r = await scraperMusic(query);
+      const r = await musicDownload(query, 'audio');
       if (!r.ok){ adminReply(adminChatJid, 'Music failed.'); return { ok:false }; }
       await sendMediaUrl(p.userJid, r.mediaUrl, { kind:'audio', mimetype:r.mimetype, caption:r.title, priority:2, lane:'slow', taskType:'dmreply', typing:true });
     } else {
-      const r = await scraperSearch(query);
+      const r = await scraperSearch(query, false, null, pCat);
       if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendImageSafe(p.userJid, pickFresh(r.images, p.userJid), '', 2, 'slow', 'dmreply', true);
     }
@@ -4656,7 +4756,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
 
   /* v66: school instance = read-only monitor. Mass-messaging, joining,
    * downloads and NSFW are disabled there; reports work everywhere. */
-  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick','allow','deny','allowgroup','nsfwgroup','reloadaccess'];
+  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick','allow','deny','allowgroup','nsfwgroup','reloadaccess','sitehealth'];
   const schoolBlockedNow = SCHOOL_MODE || (opts && opts.account === 'school');
   if (schoolBlockedNow && SCHOOL_BLOCKED.includes(cmd)){
     await reply('🏫 School mode — this instance only READS groups and sends reports.\nUse: !today · !week · !timetable · !weather');
@@ -5215,7 +5315,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Usage: !pic <query>'); return; }
       /* v72.3: NSFW-aware — explicit pic requests use the NSFW index */
-      const r = await scraperSearch(q, detectNsfw(q));
+      const r = await scraperSearch(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
       if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
@@ -5239,7 +5339,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (!q){ await reply('Usage: !gif <query>'); return; }
       /* v73: NSFW-aware — explicit gif requests use the NSFW path so
        * the scraper serves adult slots for them. */
-      const r = await scraperGif(q, detectNsfw(q));
+      const r = await scraperGif(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
@@ -5362,7 +5462,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply('Searching "'+q+'" via scrapper...');
       /* v72.2: music only — a failed SONG request never falls back to
        * the video channel (no wrong-kind media). */
-      const r = await scraperMusic(q);
+      const r = await musicDownload(q, 'audio');
       if (!r.ok){ await reply('Err: '+r.error); return; }
       await sendMediaUrl(chatJid, r.mediaUrl, {
         kind: r.mimetype?.startsWith('audio/') ? 'audio' : 'video',
@@ -5389,7 +5489,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const q = args.slice(1).join(' ').trim();
       if (!q){ await reply('Usage: !music <song>'); return; }
       await reply('Searching "'+q+'" via scrapper...');
-      const r = await scraperMusic(q);
+      const r = await musicDownload(q, 'audio');
       if (!r.ok){ await reply('Err: '+r.error); return; }
       await sendMediaUrl(chatJid, r.mediaUrl, {
         kind: 'audio', mimetype: r.mimetype, caption: r.title,
@@ -5503,7 +5603,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Give query.'); return; }
       /* v72.3: NSFW-aware diagnostics too */
-      const r = cmd === 'scrapersearch' ? await scraperSearch(q, detectNsfw(q)) : await scraperGif(q, detectNsfw(q));
+      const r = cmd === 'scrapersearch' ? await scraperSearch(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid)) : await scraperGif(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
       if (!r.ok){ await reply('Err: '+r.error); return; }
       const items = r.images || r.gifs || [];
       await reply(items.length+' results\nFirst: '+(items[0]||'none'));
@@ -5894,6 +5994,29 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply('🔄 Access files reloaded — ' + accessCtl.allowedNumbers().length + ' numbers, ' + (accessCtl.allowedGroupCodes().length + accessCtl.allowedGroupJids().length) + ' groups. NSFW: ' + (accessCtl.isNsfwActivated() ? 'ACTIVE' : 'silent'));
       break;
     }
+    case 'sitehealth': {
+      /* v88: registry + music provider health — !sitehealth [check] */
+      if ((args[1] || '').toLowerCase() === 'check'){
+        await reply('🔎 Probing all registry sites…');
+        const r = await siteHealth.probeAll({ all: true, timeout: 15000 });
+        await reply('✅ Sweep done in ' + Math.round(r.ms/1000) + 's — ' + r.alive + ' alive, ' + r.dead + ' down');
+        break;
+      }
+      const s = siteHealth.summary();
+      const cats = siteHealth.perCategory();
+      const catLines = Object.entries(cats).map(([c, v]) =>
+        '· ' + c + ': ' + v.alive + '/' + v.total + ' alive' + (v.down ? ' (' + v.down + ' down)' : '')).join('\n');
+      const provs = Object.entries(musicEngine.providerStats());
+      const provLines = provs.length
+        ? provs.map(([p, v]) => '· ' + p + ': ' + (v.fails ? '⚠ ' + v.fails + ' fails — ' + (v.lastError || '') : 'ok')).join('\n')
+        : '· none tried yet';
+      await reply('🌐 *SITE HEALTH*\nRegistry: ' + s.alive + '/' + s.total + ' alive, ' + s.dead + ' down' + (s.never ? ', ' + s.never + ' unprobed' : '') +
+        (s.deadList.length ? '\nDown: ' + s.deadList.slice(0, 6).join(', ') : '') +
+        '\n\n*By category*\n' + catLines +
+        '\n\n*Music providers*\n' + provLines +
+        '\n\nRe-probe now: !sitehealth check');
+      break;
+    }
     default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
   }
   } catch(e){
@@ -5968,7 +6091,7 @@ async function brainHandleGroup(chatJid, dec, opts){
   if (dec.action === 'music'){
     let acked = false;
     try {
-      const r = await scraperMusic(q);
+      const r = await musicDownload(q, 'audio');
       if (r.ok){
         await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
         acked = true;
@@ -5988,7 +6111,7 @@ async function brainHandleGroup(chatJid, dec, opts){
   }
   if (dec.action === 'gif'){
     try {
-      const r = await scraperGif(q, nsfw);
+      const r = await scraperGif(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang));
       if (r.ok && r.gifs.length){
         await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
         resetDailyStats(); dailyStats.picsSent++;
@@ -6010,7 +6133,7 @@ async function brainHandleGroup(chatJid, dec, opts){
     }
     await sendBuffer(chatJid, { text:'🎬 Finding "' + q + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
     try {
-      const r = await scraperVideo(q);
+      const r = await scraperVideo(q, null, null, localCat(senderJid, chatJid, opts && opts.lang));
       if (r.ok){
         if (!isAdmin && senderJid) videoScheduler.recordRequest(senderJid);
         await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -6031,7 +6154,7 @@ async function brainHandleGroup(chatJid, dec, opts){
   }
   if (dec.action === 'media'){
     try {
-      const r = await scraperSearch(q, nsfw);
+      const r = await scraperSearch(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang));
       if (r.ok && r.images.length){
         await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
         resetDailyStats(); dailyStats.picsSent++;
@@ -6482,7 +6605,8 @@ async function handleMessage(msg){
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
           try {
-            const r = await scraperMusic(gIntent.query);
+            /* v88: online downloader chain (y2mate style) first — MP3 */
+            const r = await musicDownload(gIntent.query, 'audio');
             if (r.ok){
               await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
               await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -6494,7 +6618,7 @@ async function handleMessage(msg){
           } catch(e){ pushLog('error','music',e.message); }
         }
         if (gIntent.type === 'gif'){
-          const r = await scraperGif(gIntent.query, isNsfw);
+          const r = await scraperGif(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang));
           if (r.ok && r.gifs.length){
             await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
             resetDailyStats();
@@ -6514,7 +6638,7 @@ async function handleMessage(msg){
           }
           if (!isVague(gIntent.query)){
             await sendBuffer(chatJid, { text:'🎬 Finding "' + gIntent.query + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
-            const r = await scraperVideo(gIntent.query);
+            const r = await scraperVideo(gIntent.query, null, null, localCat(senderJid, chatJid, gLang));
             if (r.ok){
               if (!isAdmin) videoScheduler.recordRequest(senderJid);
               await sendMediaUrl(chatJid, r.mediaUrl, {
@@ -6530,7 +6654,7 @@ async function handleMessage(msg){
             return;
           }
         } else if (gIntent.type === 'image') {
-          const r = await scraperSearch(gIntent.query, isNsfw);
+          const r = await scraperSearch(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang));
           if (r.ok && r.images.length){
             await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
             resetDailyStats(); dailyStats.picsSent++;
@@ -7565,6 +7689,15 @@ pushLog('info', 'access', `whitelist loaded — ${accessInfo.numbers} numbers, $
  * (designated group + activation survive reboots) */
 applyNsfwActivation();
 
+/* v88 SITE HEALTH — self-healing registry: dead sites get probed out of
+ * every media chain, healthy ones ride first (see site-health.js) */
+const siteHealth = require('./site-health');
+siteHealth.init(pushLog);
+/* v88 MUSIC ENGINE — MP3/MP4 via online downloader sites (y2mate style),
+ * self-healing provider chain, 32MB pre-send cap (see music.js) */
+const musicEngine = require('./music');
+musicEngine.init(pushLog);
+
 /* ══════════════════════════════════════════════════════════════
  *  v86 AUTO-TRANSLATE — the bot speaks EVERY language
  *  "too many pipo on WhatsApp in different languages": contacts write
@@ -7766,6 +7899,26 @@ async function serveUniversalCommand(chatJid, senderJid, text, isAdmin, mode){
     }
     return true;
   }
+  /* !mp3 <query|youtube url> / !mp4 <query|youtube url> — v88 the online
+   * downloader chain (y2mate style), MP3 or MP4, 34MB rule enforced */
+  const mMp = /^!(mp3|mp4)\s+(.+)$/i.exec(t0);
+  if (mMp){
+    const mode = mMp[1].toLowerCase() === 'mp3' ? 'audio' : 'video';
+    if (!fetchLimitOk(senderJid, isAdmin)){
+      await sendBuffer(chatJid, { text: '⏳ Limit reached (' + FETCH_LIMIT_PER_HOUR + '/hour) — try later' }, 3, 'slow', mode, true);
+      return true;
+    }
+    await sendBuffer(chatJid, { text: '🎧 Searching YouTube converters (' + mMp[1].toUpperCase() + ')…' }, 3, 'slow', mode, true);
+    const r = await musicDownload(mMp[2].trim(), mode);
+    if (!r.ok){
+      await sendBuffer(chatJid, { text: '❌ ' + r.error }, 3, 'slow', mode, true);
+      return true;
+    }
+    await sendBuffer(chatJid, { text: '✅ ' + (r.title || mMp[2]).slice(0, 80) + ' — via ' + (r.provider || 'converter') }, 3, 'slow', mode, true);
+    await sendMediaUrl(chatJid, r.mediaUrl, { kind: mode === 'audio' ? 'audio' : 'video',
+      mimetype: r.mimetype, caption: '🎵 ' + (r.title || mMp[2]).slice(0, 90), priority: 2, lane: 'slow', taskType: mode, typing: false });
+    return true;
+  }
   return false;
 }
 
@@ -7806,8 +7959,9 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
   pushLog('info','access','whitelisted DM command: ' + intent.type + ' "' + intent.query + '"' + (prefer ? ' [' + prefer + ']' : ''));
   if (intent.type === 'music'){
     try {
-      const r = await scraperMusic(intent.query);
-      if (!r.ok){ await sendBuffer(chatJid, { text: 'Could not find "' + intent.query + '"' }, 2, 'slow', 'dmreply', true); return; }
+      /* v88: online downloader chain (y2mate style) first — MP3 */
+      const r = await musicDownload(intent.query, 'audio');
+      if (!r.ok){ await sendBuffer(chatJid, { text: await t2(chatJid, 'Could not find "' + intent.query + '"') }, 2, 'slow', 'dmreply', true); return; }
       await sendBuffer(chatJid, { text: await t2(chatJid, 'Found ' + r.title + '. Sending...') }, 2, 'slow', 'dmreply', true);
       await sendMediaUrl(chatJid, r.mediaUrl, { kind: 'audio', mimetype: r.mimetype, caption: r.title, priority: 2, lane: 'slow', taskType: 'dmreply', typing: true });
     } catch (e) { await sendBuffer(chatJid, { text: 'Err: ' + e.message }, 2, 'slow', 'dmreply', true); }
@@ -7818,7 +7972,7 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
       await sendBuffer(chatJid, { text: await t2(chatJid, '⏳ You have used your 3 video requests for this hour — try again later.') }, 2, 'slow', 'dmreply', true);
       return;
     }
-    const rv = await scraperVideo(intent.query, null, prefer);
+    const rv = await scraperVideo(intent.query, null, prefer, localCat(senderJid, chatJid));
     if (rv.ok){
       videoScheduler.recordRequest(senderJid);
       await sendMediaUrl(chatJid, rv.mediaUrl, { kind: 'video', mimetype: rv.mimetype || 'video/mp4',
@@ -7830,20 +7984,24 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
     return;
   }
   if (intent.type === 'gif'){
-    const r = await scraperGif(intent.query, false, prefer);
+    const r = await scraperGif(intent.query, false, prefer, localCat(senderJid, chatJid));
     if (r.ok && r.gifs.length){
-      await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
-      resetDailyStats(); dailyStats.picsSent++;
+      /* v88: damaged-result defense — try up to 3 gifs before giving up */
+      const res = await sendFirstWorking(chatJid, [pickFresh(r.gifs, chatJid)].concat(r.gifs.slice(0, 3)), 'gif', '', { taskType: 'dmreply' });
+      if (res.ok){ resetDailyStats(); dailyStats.picsSent++; }
+      else await sendBuffer(chatJid, { text: await t2(chatJid, 'No working gif found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
     } else {
       await sendBuffer(chatJid, { text: await t2(chatJid, 'No gif found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
     }
     return;
   }
-  /* default: images */
-  const r = await scraperSearch(intent.query, false, prefer);
+  /* default: images — v88: candidates until one actually sends */
+  const r = await scraperSearch(intent.query, false, prefer, localCat(senderJid, chatJid));
   if (r.ok && r.images.length){
-    await sendImageSafe(chatJid, pickFresh(r.images, chatJid), '', 2, 'slow', 'dmreply', true);
-    resetDailyStats(); dailyStats.picsSent++;
+    const first = pickFresh(r.images, chatJid);
+    const res = await sendFirstWorking(chatJid, [first].concat(r.images.filter(u => u !== first).slice(0, 2)), 'image', '', { taskType: 'dmreply' });
+    if (res.ok){ resetDailyStats(); dailyStats.picsSent++; }
+    else await sendBuffer(chatJid, { text: await t2(chatJid, 'No working picture found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
   } else {
     await sendBuffer(chatJid, { text: await t2(chatJid, 'No picture found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
   }
@@ -7859,6 +8017,17 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
  * (escHtml stays — /admin/generate-prompt escapes through it.) */
 function escHtml(s){ return String(s || '').replace(/[&<>"']/g, function(c){ return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
 app.get('/healthz', function(req, res){ res.json({ ok: true, uptime: Math.round(process.uptime()), ts: new Date().toISOString() }); });
+/* v88: registry health + music provider status — panel + crash tests read this */
+app.get('/api/site-health', function(req, res){
+  res.json({
+    ok: true,
+    registry: siteHealth.summary(),
+    byCategory: siteHealth.perCategory(),
+    musicProviders: musicEngine.providerStats(),
+    musicMaxBytes: musicEngine.MAX_BYTES,
+    ts: new Date().toISOString()
+  });
+});
 
 const PANEL_HTML = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v84.5.4</title>
@@ -7970,6 +8139,9 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <div style="font-size:11px;color:#8b949e;line-height:1.5;margin-bottom:6px">Add <b>hundreds</b> of your own sites — every entry below is sent to the scraper with every search. Entry: <code>{"name":"x","url":"https://site/search?q={query}","kind":"images|gifs|videos|music|any","nsfw":false}</code>. <code>{query}</code> is replaced with the search words (optional). <code>nsfw:true</code> sites only run in the 21:00-08:00 window. Saved to <b>config/sites.json</b>.</div>
 <textarea id="sitesBlob" placeholder='{"sites":[{"name":"my-pics","url":"https://example.com/search?q={query}","kind":"images","nsfw":false}]}' style="width:100%;height:150px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:8px;font-family:monospace;font-size:10px"></textarea>
 <div style="margin-top:6px"><button class="primary" onclick="saveMySites()">💾 Save sites</button> <button onclick="loadMySites()">🔄 Reload from file</button> <span id="sitesOut" style="font-size:10px;color:#8b949e;margin-left:8px"></span></div>
+<div style="margin-top:8px"><h2>🩺 Site health <span id="shSummary" style="color:#c9d1d9"></span></h2>
+<div id="siteHealth" style="font-size:11px;line-height:1.8;max-height:200px;overflow-y:auto;color:#8b949e">loading…</div>
+<div style="margin-top:4px"><button onclick="loadSiteHealth()">🔄 Refresh health</button> <span style="font-size:10px">auto-probes every 6h · dead sites are skipped automatically</span></div></div>
 </div>
 
 <div class="card"><h2>📁 Media Cache — files you can actually open</h2>
@@ -8412,6 +8584,8 @@ try{var bd=await fetch('/admin/bot-detect');var bdD=await bd.json();setBdMeter('
 function setBdMeter(id,v){var el=$(id);if(!el)return;el.textContent=v;el.style.color=v<=30?'#3fb950':v<=60?'#d29922':'#f85149';}
 /* ═══ v86 MY SITES panel card — load/save config/sites.json over HTTP ═══ */
 async function loadMySites(){var el=$('sitesBlob');var out=$('sitesOut');if(!el)return;out.textContent='loading…';try{var r=await fetch('/api/sites');var d=await r.json();el.value=JSON.stringify({sites:d.sites||[]},null,2);out.textContent=(d.count||0)+' sites loaded';}catch(e){out.textContent='load failed: '+esc(e.message);}}
+async function loadSiteHealth(){var el=$('siteHealth');var sum=$('shSummary');if(!el)return;try{var r=await fetch('/api/site-health');var d=await r.json();var reg=d.registry||{};sum.textContent='('+reg.alive+'/'+reg.total+' alive)';var lines=[];var cats=d.byCategory||{};Object.keys(cats).forEach(function(c){var v=cats[c];lines.push(c+': '+v.alive+'/'+v.total+' alive'+(v.down?(' — '+v.down+' DOWN'):''));});var provs=d.musicProviders||{};Object.keys(provs).forEach(function(p){var v=provs[p];lines.push('♪ '+(v.fails?('FAILING '+p+' ('+v.lastError+')'):'ok '+p));});el.innerHTML=lines.map(function(l){return esc(l);}).join('<br>')||'no data yet';}catch(e){el.textContent='load failed: '+e.message;}}
+loadSiteHealth();
 async function saveMySites(){var el=$('sitesBlob');var out=$('sitesOut');if(!el)return;out.textContent='saving…';try{var parsed=JSON.parse(el.value);var res=await fetch('/api/sites?replace=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});var d=await res.json();out.textContent=d.ok?((d.count||0)+' sites saved ✓ — live immediately'):'error: '+esc(d.error||'failed');}catch(e){out.textContent='invalid JSON: '+esc(e.message);}}
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
 /* ═══ v70 SESSION BACKUP — copy blobs into env, restore without QR ═══ */
@@ -8506,7 +8680,7 @@ async function generateAudio(){var topic=$('audioTopic').value.trim();var voice=
 
 /* ═══ v82: Erotic Comment Style ═══ */
 var eroticStyle='excited';
-async function loadMediaCache(){var b=$('mediaCache');if(!b)return;b.innerHTML='<span style="color:#d29922">loading…</span>';try{var r=await api('media');if(!r.ok){b.innerHTML='<span style="color:#f85149">'+esc(r.error||'failed')+'</span>';return;}if(!r.items.length){b.innerHTML='<span style="color:#8b949e">Empty — run a Scraper Test or generate audio; your openable copies will appear here (kept 24h).</span>';return;}var h='';for(var i=0;i<r.items.length;i++){var m=r.items[i];h+='<div>🔗 <a href="'+esc(m.url)+'" target="_blank" style="color:#58a6ff">'+esc(m.file)+'</a> — '+esc(m.kind)+' · '+esc(m.sizeHuman)+' · '+esc(m.ageHours)+'h old</div>';}b.innerHTML=h;}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
+async function loadMediaCache(){var b=$('mediaCache');if(!b)return;b.innerHTML='<span style="color:#d29922">loading…</span>';try{var r=await api('media');if(!r.ok){b.innerHTML='<span style="color:#f85149">'+esc(r.error||'failed')+'</span>';return;}var st='<div style="margin-bottom:6px;color:'+(r.storageMB>=r.capMB*0.9?'#f85149':'#8b949e')+'">💾 Storage: <b>'+r.storageMB+'MB / '+r.capMB+'MB cap</b> — auto-clears EVERYTHING when full (v89 storage rule)</div>';if(!r.items.length){b.innerHTML=st+'<span style="color:#8b949e">Empty — run a Scraper Test or generate audio; your openable copies will appear here (kept 24h).</span>';return;}var h='';for(var i=0;i<r.items.length;i++){var m=r.items[i];h+='<div>🔗 <a href="'+esc(m.url)+'" target="_blank" style="color:#58a6ff">'+esc(m.file)+'</a> — '+esc(m.kind)+' · '+esc(m.sizeHuman)+' · '+esc(m.ageHours)+'h old</div>';}b.innerHTML=st+h;}catch(e){b.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function mediaCleanup(){try{await api('media/cleanup','POST',{});loadMediaCache();}catch(e){}}
 async function renderBlenderPreview(){var t=$('bpTopic').value.trim()||'water cycle for kids';var o=$('bpOut');o.innerHTML='<span style="color:#d29922">Rendering view preview…</span>';try{var r=await api('blender/preview','POST',{topic:t});if(!r.ok){o.innerHTML='<span style="color:#f85149">❌ '+esc(r.error||'failed')+'</span>';return;}o.innerHTML='<img src="'+esc(r.previewUrl)+'" alt="scene preview" style="max-width:100%;border-radius:6px"><div style="margin-top:5px">Objects: '+esc((r.objects||[]).join(', '))+' · theme: '+esc(r.theme||'')+'</div><div><a href="'+esc(r.bpyUrl)+'" target="_blank" style="color:#58a6ff">open the real .bpy Blender script ↗</a> <a href="'+esc(r.previewUrl)+'" target="_blank" style="color:#58a6ff;margin-left:8px">full size ↗</a></div><div style="color:#8b949e">'+esc(r.note||'')+'</div>';}catch(e){o.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}}
 async function uploadFilm(){var inp=document.getElementById('filmFile');var o=document.getElementById('filmOut');var f=inp&&inp.files&&inp.files[0];if(!f){o.innerHTML='<span style="color:#d29922">Choose an .mp4 first.</span>';return;}o.innerHTML='<span style="color:#d29922">Uploading '+esc(f.name)+' ('+Math.round(f.size/1048576)+'MB)…</span>';try{var r=await fetch('/admin/film/upload?name='+encodeURIComponent(f.name),{method:'POST',headers:{'Content-Type':'video/mp4'},body:f});var d=await r.json();if(d.ok){o.innerHTML='<span style="color:#3fb950">✅ Film in the cache: '+esc(d.file)+' ('+Math.round(d.size/1048576)+'MB)</span>';loadFilms();}else{o.innerHTML='<span style="color:#f85149">❌ '+esc(d.error||'upload failed')+'</span>';}}catch(e){o.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
@@ -9622,7 +9796,8 @@ app.get('/admin/media', function(req, res){
                ageHours: Math.round((now - st.mtimeMs)/360000)/10,
                mimetype: MEDIA_MIME[ext] || 'application/octet-stream' };
     }).sort((a, b) => a.file < b.file ? 1 : -1);
-    res.json({ ok: true, count: items.length, maxAgeHours: MEDIA_MAX_AGE_MS/3600000, items });
+    res.json({ ok: true, count: items.length, maxAgeHours: MEDIA_MAX_AGE_MS/3600000,
+               storageMB: Math.round(mediaStorageMB()), capMB: MEDIA_STORAGE_CAP_MB, items });
   } catch(e){ res.json({ ok:false, error: e.message }); }
 });
 app.get('/admin/media/:file', function(req, res){
@@ -10648,17 +10823,11 @@ const HTTP_SERVER = app.listen(PORT, async function(){
 
   /* v79: Initialize multi-platform manager — auto-starts platforms
    * that have credentials, begins auto-posting from content pipeline.
-   * Previously multiPlatform was created but never init'd — nothing ran. */
+   * Previously multiPlatform was created but never init'd — nothing ran.
+   * v89: platforms were REMOVED in v86 (WhatsApp only) — the stub has no
+   * init() and no platforms; calling it just logged an error every boot. */
   (async () => {
-    try {
-      await multiPlatform.init();
-      const activeNames = Object.entries(multiPlatform.platforms || {})
-        .filter(([,b]) => b._chromeAvailable !== false && b.schedule && b.schedule.isEnabled())
-        .map(([n]) => n);
-      pushLog('info', 'multi-platform', 'Multi-platform manager initialized — active: ' + (activeNames.length ? activeNames.join(', ') + ' (auto-posting started)' : 'none (add credentials to enable)'));
-    } catch (e) {
-      pushLog('error', 'multi-platform', 'Init failed: ' + e.message);
-    }
+    pushLog('info', 'multi-platform', 'platforms removed in v86 — WhatsApp only, nothing to init');
   })();
 
   /* v70: restore saved sessions BEFORE connecting — kills the

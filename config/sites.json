@@ -1,1468 +1,1096 @@
 {
- "sites": [
-  {
-   "name": "global-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k={query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/{query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-eporner-gifs",
-   "url": "https://www.eporner.com/search/{query} gif/",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-sexcom-gifs",
-   "url": "https://www.sex.com/?s={query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "persian-xvideos-persian-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=fa",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-xhamster-persian",
-   "url": "https://xhamster.com/search/persian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-pornhub-iranian",
-   "url": "https://www.pornhub.com/video/search?search=iranian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-eporner-persian",
-   "url": "https://www.eporner.com/search/persian {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-xnxx-persian",
-   "url": "https://www.xnxx.com/search/persian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-pornhub-persian",
-   "url": "https://www.pornhub.com/video/search?search=persian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-xnxx-iranian",
-   "url": "https://www.xnxx.com/search/iranian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-xvideos-iranian",
-   "url": "https://www.xvideos.com/?k=iranian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-xhamster-iranian",
-   "url": "https://xhamster.com/search/iranian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-eporner-iranian",
-   "url": "https://www.eporner.com/search/iranian {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-img-imagefap",
-   "url": "https://www.imagefap.com/?s=persian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-gif-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/persian {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "arab-arabysexy",
-   "url": "https://arabysexy.com/?q={query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-sexsaoy",
-   "url": "https://www.sexsaoy.com/?s={query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-alohatube",
-   "url": "https://www.alohatube.com/?s={query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-xvideos-arabic-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=ar",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-xhamster-arab",
-   "url": "https://xhamster.com/search/arab {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-pornhub-arab",
-   "url": "https://www.pornhub.com/video/search?search=arab {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-xnxx-arab",
-   "url": "https://www.xnxx.com/search/arab {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-eporner-arab",
-   "url": "https://www.eporner.com/search/arab {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-xvideos-hijab",
-   "url": "https://www.xvideos.com/?k=hijab {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-xnxx-hijab",
-   "url": "https://www.xnxx.com/search/hijab {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-img-imagefap",
-   "url": "https://www.imagefap.com/?s=arab {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "southafrica-xvideos-southafrican",
-   "url": "https://www.xvideos.com/?k=south african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-xhamster-mzansi",
-   "url": "https://xhamster.com/search/south african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-pornhub-southafrican",
-   "url": "https://www.pornhub.com/video/search?search=south african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-xnxx-southafrican",
-   "url": "https://www.xnxx.com/search/south african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-eporner-southafrican",
-   "url": "https://www.eporner.com/search/south african {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-xvideos-mzansi",
-   "url": "https://www.xvideos.com/?k=mzansi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-xnxx-mzansi",
-   "url": "https://www.xnxx.com/search/mzansi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-eporner-mzansi",
-   "url": "https://www.eporner.com/search/mzansi {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-pornhub-mzansi",
-   "url": "https://www.pornhub.com/video/search?search=mzansi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-xhamster-southafrican",
-   "url": "https://xhamster.com/search/mzansi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-img-imagefap",
-   "url": "https://www.imagefap.com/?s=south african {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-img-sexcom",
-   "url": "https://www.sex.com/?s=south african {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "southafrica-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=south african {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "africa-darknaija",
-   "url": "https://www.darknaija.com/?s={query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-xvideos-african",
-   "url": "https://www.xvideos.com/?k=african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-xhamster-african",
-   "url": "https://xhamster.com/search/african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-pornhub-african",
-   "url": "https://www.pornhub.com/video/search?search=african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-xnxx-african",
-   "url": "https://www.xnxx.com/search/african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-eporner-african",
-   "url": "https://www.eporner.com/search/african {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-xxxbunker-african",
-   "url": "https://www.xxxbunker.com/?s=african {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-xvideos-black",
-   "url": "https://www.xvideos.com/?k=black {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-xnxx-black",
-   "url": "https://www.xnxx.com/search/black {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-pornhub-black",
-   "url": "https://www.pornhub.com/video/search?search=black {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-img-imagefap",
-   "url": "https://www.imagefap.com/?s=african {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-img-sexcom",
-   "url": "https://www.sex.com/?s=african {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=african {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "german-xvideos-german-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=de",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-xhamster-deutsch",
-   "url": "https://xhamster.com/search/deutsch {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-pornhub-german",
-   "url": "https://www.pornhub.com/video/search?search=german {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-xnxx-deutsch",
-   "url": "https://www.xnxx.com/search/deutsch {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-eporner-german",
-   "url": "https://www.eporner.com/search/german {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-xvideos-deutsch",
-   "url": "https://www.xvideos.com/?k=deutsch {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-xnxx-german",
-   "url": "https://www.xnxx.com/search/german {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-eporner-deutsch",
-   "url": "https://www.eporner.com/search/deutsch {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-xhamster-german",
-   "url": "https://xhamster.com/search/german {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-pornhub-deutsch",
-   "url": "https://www.pornhub.com/video/search?search=deutsch {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-img-imagefap",
-   "url": "https://www.imagefap.com/?s=german {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-img-sexcom",
-   "url": "https://www.sex.com/?s=german {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "german-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=german {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "de"
-  },
-  {
-   "name": "french-xvideos-french-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=fr",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-xhamster-french",
-   "url": "https://xhamster.com/search/french {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-xnxx-french",
-   "url": "https://www.xnxx.com/search/french {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-eporner-french",
-   "url": "https://www.eporner.com/search/french {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-pornhub-french",
-   "url": "https://www.pornhub.com/video/search?search=french {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-xvideos-francais",
-   "url": "https://www.xvideos.com/?k=francais {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-xhamster-francais",
-   "url": "https://xhamster.com/search/francais {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-xnxx-francais",
-   "url": "https://www.xnxx.com/search/francais {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-eporner-francais",
-   "url": "https://www.eporner.com/search/francais {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-pornhub-francais",
-   "url": "https://www.pornhub.com/video/search?search=francais {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=french {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "italian-xvideos-italian-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=it",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-xhamster-italian",
-   "url": "https://xhamster.com/search/italian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-xnxx-italian",
-   "url": "https://www.xnxx.com/search/italian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-eporner-italian",
-   "url": "https://www.eporner.com/search/italian {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-pornhub-italian",
-   "url": "https://www.pornhub.com/video/search?search=italian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-xvideos-italiano",
-   "url": "https://www.xvideos.com/?k=italiano {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-xhamster-italiano",
-   "url": "https://xhamster.com/search/italiano {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-xnxx-italiano",
-   "url": "https://www.xnxx.com/search/italiano {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-eporner-italiano",
-   "url": "https://www.eporner.com/search/italiano {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-pornhub-italiano",
-   "url": "https://www.pornhub.com/video/search?search=italiano {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-img-imagefap",
-   "url": "https://www.imagefap.com/?s=italian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-img-sexcom",
-   "url": "https://www.sex.com/?s=italian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "italian-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=italian {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "it"
-  },
-  {
-   "name": "spanish-xvideos-spanish-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=es",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-xhamster-spanish",
-   "url": "https://xhamster.com/search/spanish {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-xnxx-spanish",
-   "url": "https://www.xnxx.com/search/spanish {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-eporner-spanish",
-   "url": "https://www.eporner.com/search/spanish {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-pornhub-spanish",
-   "url": "https://www.pornhub.com/video/search?search=spanish {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-xvideos-latino",
-   "url": "https://www.xvideos.com/?k=latino {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-xhamster-espanol",
-   "url": "https://xhamster.com/search/espanol {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-xnxx-espanol",
-   "url": "https://www.xnxx.com/search/espanol {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-eporner-espanol",
-   "url": "https://www.eporner.com/search/espanol {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-pornhub-espanol",
-   "url": "https://www.pornhub.com/video/search?search=espanol {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-img-imagefap",
-   "url": "https://www.imagefap.com/?s=spanish {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-img-sexcom",
-   "url": "https://www.sex.com/?s=spanish {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "spanish-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=spanish {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "es"
-  },
-  {
-   "name": "russian-xvideos-russian-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=ru",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-xhamster-russian",
-   "url": "https://xhamster.com/search/russian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-pornhub-russian",
-   "url": "https://www.pornhub.com/video/search?search=russian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-xnxx-russian",
-   "url": "https://www.xnxx.com/search/russian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-eporner-russian",
-   "url": "https://www.eporner.com/search/russian {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-xvideos-russkie",
-   "url": "https://www.xvideos.com/?k=russkie {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-xhamster-russkie",
-   "url": "https://xhamster.com/search/russkie {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-xnxx-russkie",
-   "url": "https://www.xnxx.com/search/russkie {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-eporner-russkie",
-   "url": "https://www.eporner.com/search/russkie {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-pornhub-russkie",
-   "url": "https://www.pornhub.com/video/search?search=russkie {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-img-imagefap",
-   "url": "https://www.imagefap.com/?s=russian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "russian-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=russian {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
-   "name": "turkish-xvideos-turkish-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=tr",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-xhamster-turkish",
-   "url": "https://xhamster.com/search/turkish {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-pornhub-turkish",
-   "url": "https://www.pornhub.com/video/search?search=turkish {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-xnxx-turkish",
-   "url": "https://www.xnxx.com/search/turkish {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-eporner-turkish",
-   "url": "https://www.eporner.com/search/turkish {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-xvideos-sikis",
-   "url": "https://www.xvideos.com/?k=sikis {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-xhamster-sikis",
-   "url": "https://xhamster.com/search/turk {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-xnxx-sikis",
-   "url": "https://www.xnxx.com/search/turk sicis {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-eporner-sikis",
-   "url": "https://www.eporner.com/search/turk {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-pornhub-sikis",
-   "url": "https://www.pornhub.com/video/search?search=turkish amateur {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-img-imagefap",
-   "url": "https://www.imagefap.com/?s=turkish {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-img-sexcom",
-   "url": "https://www.sex.com/?s=turkish {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "turkish-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=turkish {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "more",
-   "lang": "tr"
-  },
-  {
-   "name": "japanese-xvideos-japanese-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=ja",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-javtiful",
-   "url": "https://javtiful.com/search?q={query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-wav-tv",
-   "url": "https://www.wav.tv/?s={query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-javlast",
-   "url": "https://javlast.com/search/{query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-pornhub-jav",
-   "url": "https://www.pornhub.com/video/search?search=japanese {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-xnxx-japanese",
-   "url": "https://www.xnxx.com/search/japanese {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-eporner-japanese",
-   "url": "https://www.eporner.com/search/japanese {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-xhamster-japanese",
-   "url": "https://xhamster.com/search/japanese {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-xvideos-jav",
-   "url": "https://www.xvideos.com/?k=jav uncensored {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-gif-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/japanese {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "indian-xvideos-hindi-lang",
-   "url": "https://www.xvideos.com/?k={query}&lang=hi",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-xhamster-indian",
-   "url": "https://xhamster.com/search/indian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-pornhub-indian",
-   "url": "https://www.pornhub.com/video/search?search=indian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-xnxx-indian",
-   "url": "https://www.xnxx.com/search/indian {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-eporner-indian",
-   "url": "https://www.eporner.com/search/indian {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-xvideos-desi",
-   "url": "https://www.xvideos.com/?k=desi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-xnxx-desi",
-   "url": "https://www.xnxx.com/search/desi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-eporner-desi",
-   "url": "https://www.eporner.com/search/desi {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-xhamster-desi",
-   "url": "https://xhamster.com/search/desi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-pornhub-desi",
-   "url": "https://www.pornhub.com/video/search?search=desi {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-img-imagefap",
-   "url": "https://www.imagefap.com/?s=indian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-img-sexcom",
-   "url": "https://www.sex.com/?s=indian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=indian {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "latina-xvideos-latina",
-   "url": "https://www.xvideos.com/?k=latina {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-xhamster-latina",
-   "url": "https://xhamster.com/search/latina {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-pornhub-latina",
-   "url": "https://www.pornhub.com/video/search?search=latina {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-xnxx-latina",
-   "url": "https://www.xnxx.com/search/latina {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-eporner-latina",
-   "url": "https://www.eporner.com/search/latina {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-xvideos-colombiana",
-   "url": "https://www.xvideos.com/?k=colombiana {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-xhamster-mexicana",
-   "url": "https://xhamster.com/search/mexicana {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-xnxx-brasileira",
-   "url": "https://www.xnxx.com/search/brasileira {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-eporner-brasileira",
-   "url": "https://www.eporner.com/search/brasileira {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-pornhub-brasileiras",
-   "url": "https://www.pornhub.com/video/search?search=brasileiras {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-img-imagefap",
-   "url": "https://www.imagefap.com/?s=latina {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-img-sexcom",
-   "url": "https://www.sex.com/?s=latina {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "latina-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=latina {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "more",
-   "lang": "es-LA"
-  },
-  {
-   "name": "zw-zimbabwe-xvideos",
-   "url": "https://www.xvideos.com/?k=zimbabwe {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-zimbabwe-xnxx",
-   "url": "https://www.xnxx.com/search/zimbabwe {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-zimbabwe-xhamster",
-   "url": "https://xhamster.com/search/zimbabwe {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-zimbabwe-eporner",
-   "url": "https://www.eporner.com/search/zimbabwe {query}/",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-zimbabwe-pornhub",
-   "url": "https://www.pornhub.com/video/search?search=zimbabwe {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-harare-xvideos",
-   "url": "https://www.xvideos.com/?k=harare {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-gif-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/zimbabwe {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-gif-xvideos-gifs",
-   "url": "https://www.xvideos.com/?k=mzansi {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "southafrica-gif2-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/south african {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
-   "name": "persian-img2-imagefap",
-   "url": "https://www.imagefap.com/?s=iranian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "persian-gif2-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/iranian {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
-   "name": "indian-img2-sexcom",
-   "url": "https://www.sex.com/?s=desi {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "indian-gif2-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/indian {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "indian",
-   "lang": "hi"
-  },
-  {
-   "name": "africa-img2-sexcom",
-   "url": "https://www.sex.com/?s=black {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-gif2-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/african {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "africa-gif2-eporner-gifs",
-   "url": "https://www.eporner.com/search/black {query} gif/",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "africa",
-   "lang": "en"
-  },
-  {
-   "name": "euro-gif2-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/european {query} gif",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "eu"
-  },
-  {
-   "name": "euro-gif2-eporner-gifs",
-   "url": "https://www.eporner.com/search/european {query} gif/",
-   "kind": "gifs",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "eu"
-  }
- ],
- "categoryShares": {
-  "zimbabwe": [
-   "southafrica"
-  ],
-  "africa": [
-   "southafrica"
+  "sites": [
+    {
+      "name": "global-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k={query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "global-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/{query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "global-eporner-gifs",
+      "url": "https://www.eporner.com/search/{query} gif/",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "global-sexcom-gifs",
+      "url": "https://www.sex.com/?s={query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "persian-xvideos-persian-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=fa",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-xhamster-persian",
+      "url": "https://xhamster.com/search/persian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-pornhub-iranian",
+      "url": "https://www.pornhub.com/video/search?search=iranian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-eporner-persian",
+      "url": "https://www.eporner.com/search/persian {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-xnxx-persian",
+      "url": "https://www.xnxx.com/search/persian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-pornhub-persian",
+      "url": "https://www.pornhub.com/video/search?search=persian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-xnxx-iranian",
+      "url": "https://www.xnxx.com/search/iranian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-xvideos-iranian",
+      "url": "https://www.xvideos.com/?k=iranian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-xhamster-iranian",
+      "url": "https://xhamster.com/search/iranian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-eporner-iranian",
+      "url": "https://www.eporner.com/search/iranian {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "persian-img-imagefap",
+      "url": "https://www.imagefap.com/?s=persian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "persian-gif-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/persian {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "arab-arabysexy",
+      "url": "https://arabysexy.com/?q={query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-sexsaoy",
+      "url": "https://www.sexsaoy.com/?s={query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-alohatube",
+      "url": "https://www.alohatube.com/?s={query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-xvideos-arabic-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=ar",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-xhamster-arab",
+      "url": "https://xhamster.com/search/arab {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-pornhub-arab",
+      "url": "https://www.pornhub.com/video/search?search=arab {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-xnxx-arab",
+      "url": "https://www.xnxx.com/search/arab {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-eporner-arab",
+      "url": "https://www.eporner.com/search/arab {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-xvideos-hijab",
+      "url": "https://www.xvideos.com/?k=hijab {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-xnxx-hijab",
+      "url": "https://www.xnxx.com/search/hijab {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "arab-img-imagefap",
+      "url": "https://www.imagefap.com/?s=arab {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-xvideos-southafrican",
+      "url": "https://www.xvideos.com/?k=south african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-xhamster-mzansi",
+      "url": "https://xhamster.com/search/south african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-pornhub-southafrican",
+      "url": "https://www.pornhub.com/video/search?search=south african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-xnxx-southafrican",
+      "url": "https://www.xnxx.com/search/south african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-eporner-southafrican",
+      "url": "https://www.eporner.com/search/south african {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-xvideos-mzansi",
+      "url": "https://www.xvideos.com/?k=mzansi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-xnxx-mzansi",
+      "url": "https://www.xnxx.com/search/mzansi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-eporner-mzansi",
+      "url": "https://www.eporner.com/search/mzansi {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-pornhub-mzansi",
+      "url": "https://www.pornhub.com/video/search?search=mzansi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-xhamster-southafrican",
+      "url": "https://xhamster.com/search/mzansi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-img-imagefap",
+      "url": "https://www.imagefap.com/?s=south african {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-img-sexcom",
+      "url": "https://www.sex.com/?s=south african {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=south african {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "africa-darknaija",
+      "url": "https://www.darknaija.com/?s={query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-xvideos-african",
+      "url": "https://www.xvideos.com/?k=african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-xhamster-african",
+      "url": "https://xhamster.com/search/african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-pornhub-african",
+      "url": "https://www.pornhub.com/video/search?search=african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-xnxx-african",
+      "url": "https://www.xnxx.com/search/african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-eporner-african",
+      "url": "https://www.eporner.com/search/african {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-xxxbunker-african",
+      "url": "https://www.xxxbunker.com/?s=african {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-xvideos-black",
+      "url": "https://www.xvideos.com/?k=black {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-xnxx-black",
+      "url": "https://www.xnxx.com/search/black {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-pornhub-black",
+      "url": "https://www.pornhub.com/video/search?search=black {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "africa-img-imagefap",
+      "url": "https://www.imagefap.com/?s=african {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "africa-img-sexcom",
+      "url": "https://www.sex.com/?s=african {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "africa-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=african {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "german-xvideos-german-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=de",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-xhamster-deutsch",
+      "url": "https://xhamster.com/search/deutsch {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-pornhub-german",
+      "url": "https://www.pornhub.com/video/search?search=german {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-xnxx-deutsch",
+      "url": "https://www.xnxx.com/search/deutsch {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-eporner-german",
+      "url": "https://www.eporner.com/search/german {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-xvideos-deutsch",
+      "url": "https://www.xvideos.com/?k=deutsch {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-xnxx-german",
+      "url": "https://www.xnxx.com/search/german {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-eporner-deutsch",
+      "url": "https://www.eporner.com/search/deutsch {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-xhamster-german",
+      "url": "https://xhamster.com/search/german {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-pornhub-deutsch",
+      "url": "https://www.pornhub.com/video/search?search=deutsch {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "german-img-imagefap",
+      "url": "https://www.imagefap.com/?s=german {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "german-img-sexcom",
+      "url": "https://www.sex.com/?s=german {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "german-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=german {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "french-xvideos-french-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=fr",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-xhamster-french",
+      "url": "https://xhamster.com/search/french {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-xnxx-french",
+      "url": "https://www.xnxx.com/search/french {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-eporner-french",
+      "url": "https://www.eporner.com/search/french {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-pornhub-french",
+      "url": "https://www.pornhub.com/video/search?search=french {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-xvideos-francais",
+      "url": "https://www.xvideos.com/?k=francais {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-xhamster-francais",
+      "url": "https://xhamster.com/search/francais {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-xnxx-francais",
+      "url": "https://www.xnxx.com/search/francais {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-eporner-francais",
+      "url": "https://www.eporner.com/search/francais {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-pornhub-francais",
+      "url": "https://www.pornhub.com/video/search?search=francais {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "french-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=french {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "italian-xvideos-italian-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=it",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-xhamster-italian",
+      "url": "https://xhamster.com/search/italian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-xnxx-italian",
+      "url": "https://www.xnxx.com/search/italian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-eporner-italian",
+      "url": "https://www.eporner.com/search/italian {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-pornhub-italian",
+      "url": "https://www.pornhub.com/video/search?search=italian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-xvideos-italiano",
+      "url": "https://www.xvideos.com/?k=italiano {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-xhamster-italiano",
+      "url": "https://xhamster.com/search/italiano {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-xnxx-italiano",
+      "url": "https://www.xnxx.com/search/italiano {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-eporner-italiano",
+      "url": "https://www.eporner.com/search/italiano {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-pornhub-italiano",
+      "url": "https://www.pornhub.com/video/search?search=italiano {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "italian-img-imagefap",
+      "url": "https://www.imagefap.com/?s=italian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "italian-img-sexcom",
+      "url": "https://www.sex.com/?s=italian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "italian-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=italian {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-xvideos-spanish-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=es",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-xhamster-spanish",
+      "url": "https://xhamster.com/search/spanish {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-xnxx-spanish",
+      "url": "https://www.xnxx.com/search/spanish {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-eporner-spanish",
+      "url": "https://www.eporner.com/search/spanish {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-pornhub-spanish",
+      "url": "https://www.pornhub.com/video/search?search=spanish {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-xvideos-latino",
+      "url": "https://www.xvideos.com/?k=latino {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-xhamster-espanol",
+      "url": "https://xhamster.com/search/espanol {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-xnxx-espanol",
+      "url": "https://www.xnxx.com/search/espanol {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-eporner-espanol",
+      "url": "https://www.eporner.com/search/espanol {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-pornhub-espanol",
+      "url": "https://www.pornhub.com/video/search?search=espanol {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-img-imagefap",
+      "url": "https://www.imagefap.com/?s=spanish {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-img-sexcom",
+      "url": "https://www.sex.com/?s=spanish {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "spanish-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=spanish {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "russian-xvideos-russian-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=ru",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-xhamster-russian",
+      "url": "https://xhamster.com/search/russian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-pornhub-russian",
+      "url": "https://www.pornhub.com/video/search?search=russian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-xnxx-russian",
+      "url": "https://www.xnxx.com/search/russian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-eporner-russian",
+      "url": "https://www.eporner.com/search/russian {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-xvideos-russkie",
+      "url": "https://www.xvideos.com/?k=russkie {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-xhamster-russkie",
+      "url": "https://xhamster.com/search/russkie {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-xnxx-russkie",
+      "url": "https://www.xnxx.com/search/russkie {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-eporner-russkie",
+      "url": "https://www.eporner.com/search/russkie {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-pornhub-russkie",
+      "url": "https://www.pornhub.com/video/search?search=russkie {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "russian-img-imagefap",
+      "url": "https://www.imagefap.com/?s=russian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "russian-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=russian {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-xvideos-turkish-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=tr",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-xhamster-turkish",
+      "url": "https://xhamster.com/search/turkish {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-pornhub-turkish",
+      "url": "https://www.pornhub.com/video/search?search=turkish {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-xnxx-turkish",
+      "url": "https://www.xnxx.com/search/turkish {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-eporner-turkish",
+      "url": "https://www.eporner.com/search/turkish {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-xvideos-sikis",
+      "url": "https://www.xvideos.com/?k=sikis {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-xhamster-sikis",
+      "url": "https://xhamster.com/search/turk {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-xnxx-sikis",
+      "url": "https://www.xnxx.com/search/turk sicis {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-eporner-sikis",
+      "url": "https://www.eporner.com/search/turk {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-pornhub-sikis",
+      "url": "https://www.pornhub.com/video/search?search=turkish amateur {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-img-imagefap",
+      "url": "https://www.imagefap.com/?s=turkish {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-img-sexcom",
+      "url": "https://www.sex.com/?s=turkish {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "turkish-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=turkish {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-xvideos-japanese-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=ja",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-javtiful",
+      "url": "https://javtiful.com/search?q={query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-wav-tv",
+      "url": "https://www.wav.tv/?s={query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-javlast",
+      "url": "https://javlast.com/search/{query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-pornhub-jav",
+      "url": "https://www.pornhub.com/video/search?search=japanese {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-xnxx-japanese",
+      "url": "https://www.xnxx.com/search/japanese {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-eporner-japanese",
+      "url": "https://www.eporner.com/search/japanese {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-xhamster-japanese",
+      "url": "https://xhamster.com/search/japanese {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-xvideos-jav",
+      "url": "https://www.xvideos.com/?k=jav uncensored {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "japanese-gif-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/japanese {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "indian-xvideos-hindi-lang",
+      "url": "https://www.xvideos.com/?k={query}&lang=hi",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-xhamster-indian",
+      "url": "https://xhamster.com/search/indian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-pornhub-indian",
+      "url": "https://www.pornhub.com/video/search?search=indian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-xnxx-indian",
+      "url": "https://www.xnxx.com/search/indian {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-eporner-indian",
+      "url": "https://www.eporner.com/search/indian {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-xvideos-desi",
+      "url": "https://www.xvideos.com/?k=desi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-xnxx-desi",
+      "url": "https://www.xnxx.com/search/desi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-eporner-desi",
+      "url": "https://www.eporner.com/search/desi {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-xhamster-desi",
+      "url": "https://xhamster.com/search/desi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-pornhub-desi",
+      "url": "https://www.pornhub.com/video/search?search=desi {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "indian-img-imagefap",
+      "url": "https://www.imagefap.com/?s=indian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "indian-img-sexcom",
+      "url": "https://www.sex.com/?s=indian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "indian-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=indian {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "latina-xvideos-latina",
+      "url": "https://www.xvideos.com/?k=latina {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-xhamster-latina",
+      "url": "https://xhamster.com/search/latina {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-pornhub-latina",
+      "url": "https://www.pornhub.com/video/search?search=latina {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-xnxx-latina",
+      "url": "https://www.xnxx.com/search/latina {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-eporner-latina",
+      "url": "https://www.eporner.com/search/latina {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-xvideos-colombiana",
+      "url": "https://www.xvideos.com/?k=colombiana {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-xhamster-mexicana",
+      "url": "https://xhamster.com/search/mexicana {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-xnxx-brasileira",
+      "url": "https://www.xnxx.com/search/brasileira {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-eporner-brasileira",
+      "url": "https://www.eporner.com/search/brasileira {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-pornhub-brasileiras",
+      "url": "https://www.pornhub.com/video/search?search=brasileiras {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "latina-img-imagefap",
+      "url": "https://www.imagefap.com/?s=latina {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "latina-img-sexcom",
+      "url": "https://www.sex.com/?s=latina {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "latina-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=latina {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "zw-zimbabwe-xvideos",
+      "url": "https://www.xvideos.com/?k=zimbabwe {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "zw-zimbabwe-xnxx",
+      "url": "https://www.xnxx.com/search/zimbabwe {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "zw-zimbabwe-xhamster",
+      "url": "https://xhamster.com/search/zimbabwe {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "zw-zimbabwe-eporner",
+      "url": "https://www.eporner.com/search/zimbabwe {query}/",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "zw-zimbabwe-pornhub",
+      "url": "https://www.pornhub.com/video/search?search=zimbabwe {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "zw-harare-xvideos",
+      "url": "https://www.xvideos.com/?k=harare {query}",
+      "kind": "videos",
+      "nsfw": true
+    },
+    {
+      "name": "zw-gif-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/zimbabwe {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "zw-gif-xvideos-gifs",
+      "url": "https://www.xvideos.com/?k=mzansi {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "southafrica-gif2-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/south african {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "persian-img2-imagefap",
+      "url": "https://www.imagefap.com/?s=iranian {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "persian-gif2-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/iranian {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "indian-img2-sexcom",
+      "url": "https://www.sex.com/?s=desi {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "indian-gif2-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/indian {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "africa-img2-sexcom",
+      "url": "https://www.sex.com/?s=black {query}",
+      "kind": "images",
+      "nsfw": true
+    },
+    {
+      "name": "africa-gif2-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/african {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "africa-gif2-eporner-gifs",
+      "url": "https://www.eporner.com/search/black {query} gif/",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "euro-gif2-xnxx-gifs",
+      "url": "https://www.xnxx.com/search/european {query} gif",
+      "kind": "gifs",
+      "nsfw": true
+    },
+    {
+      "name": "euro-gif2-eporner-gifs",
+      "url": "https://www.eporner.com/search/european {query} gif/",
+      "kind": "gifs",
+      "nsfw": true
+    }
   ]
- }
 }

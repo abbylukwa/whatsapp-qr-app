@@ -1,3 +1,40 @@
+## v91 — "MOST-RELEVANT SEARCH + 5-RESULT BATCHES + NEXT + ALWAYS-ONLINE"
+### WHY (owner request): "add other things like next media send 5 relevant and make
+### the most relevant search … im deploying it now so everything needs to be intact,
+### make sure it sends that it's online and that the rules which work to the admin only"
+
+1. MOST-RELEVANT SEARCH (rankRelevant, server.js): image/gif results are now ranked
+   by how many of the query's words actually appear in the result's URL slug —
+   score = 100×word-hits + 10×all-words-present (+2 exact in-order phrase) + 1×own-chain
+   domain (tiebreak only, v90.3 authenticity kept). Zero-hit results keep scraper order.
+   Wired into scraperSearch() + scraperGif().
+2. "SEND 5 RELEVANT": every DM / group / whitelisted-DM image or gif request now sends
+   the top-5 most-relevant results in sequence (each still through the damaged-result
+   defense, 1.2-2s human pace between sends). A number in the request sets the size:
+   "send 5 pics of mbira" → 5 · "12 pics" caps at 5 · "50 cent songs" / "99 red balloons"
+   keep their numbers (artist guard). Admin !pic / !gif bumped from top-3 to top-5.
+3. "NEXT" PAGINATION: bare "next" / "more" / "another" / "next batch" / "zvimwe" serves
+   the NEXT batch from the SAME search (per-chat memory, 30-min TTL, bounded map) —
+   caught BEFORE the AI brain in DMs, groups and whitelisted-DM command service so it
+   can never become a chat reply. Admin panel: !next / !more dispatch on the current
+   preview type (nextpic / nextgif still work).
+4. PRESENCE KEEPALIVE (armPresenceKeepalive): WhatsApp drops the "online" flag after a
+   few idle minutes; 'available' was only sent once on connect. Now re-asserted every
+   4 minutes for BOTH accounts while the socket holds a logged-in user (unref'd timer —
+   can never hold the process open). The bot ALWAYS shows online.
+5. ADMIN-ONLY RULES (verified at runtime, LOADTEST stub injection through real
+   handleMessage()): admin DM !ping → serviced ✓ · unknown DM !logs → ZERO replies
+   (whitelist gate, message never even opened) ✓ · non-admin "!logs" in a group →
+   no admin data leaked ✓ · button taps + flood gate already admin-exempt.
+6. VERIFICATION: 27/27 unit tests (rankRelevant / extractCountFromQuery / isNextRequest)
+   · 44/44 endpoint+rules probe (LOADTEST boot: every safe route 2xx/4xx-correct, SSE
+   /admin/logs flowing, /admin/aitest GET, scraper-test + aitest live) · real-mode
+   boot-test.sh 19/19, zero JS errors · live source audit re-run: 7/10 AUTHENTIC,
+   0 empty (africa/indian sex.com slots foreign-attributed by the scraper's merged
+   fallback pool — relevance ranking app-side reorders what users actually receive).
+7. config/sites.json: registry restructure from the v90.3 session (202-site sweep)
+   lands with this commit so the deployed tree is complete.
+
 ## v84.5.3 — "POP-OUT LOGIN WINDOW" RELEASE
 ### WHY (owner request): "can my index file just make a pop out chrome website for all
 ### login then as soon as im done with the login it saves the crds then its logged in i

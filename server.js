@@ -1824,6 +1824,110 @@ async function sendFirstWorking(jid, candidates, kind, caption, opts = {}){
   return { ok: false, tried: tried.length };
 }
 
+/* ═══ v91 RELEVANT BATCHES + "NEXT" ═══
+ * The boss: "send 5 relevant + a next". One media request now delivers
+ * the 5 MOST RELEVANT results of its search in sequence (each still
+ * through the damaged-result defense), and "next" serves the following
+ * batch from the SAME search instead of searching again. */
+const lastSearchByChat = new Map();       /* jid -> { kind, results, idx, query, at } */
+const NEXT_TTL_MS = 30 * 60 * 1000;       /* "next" forgets a search after 30 min */
+const RELEVANT_BATCH_CAP = 5;             /* the boss's number */
+/* "send 5 pics of mbira" → count 5, query "mbira". A standalone number
+ * token 2-99 riding with the media words is the requested batch size
+ * (capped at 5). Guards: "50 cent songs" / "2 pac songs" / "99 red
+ * balloons" keep their numbers (bare number >10, or artist-name guard). */
+function extractCountFromQuery(q){
+  let count = 1;
+  const MEDIA_RE = /^(pics?|pictures?|images?|photos?|gifs?|videos?|songs?|tracks?|mapics?|mifananidzo|items?|more)\b/i;
+  const toks = String(q || '').trim().split(/\s+/).filter(Boolean);
+  for (let i = 0; i < toks.length; i++){
+    const mNum = toks[i].match(/^(\d{1,2})(?:x|×|pcs|pieces)?$/i);
+    if (!mNum) continue;
+    const n = parseInt(mNum[1], 10);
+    if (n < 2 || n > 99) continue;
+    const next = toks[i + 1] || '';
+    if (MEDIA_RE.test(next)){
+      /* "5 songs by X" / "12 pics of cats" — number + media noun = count */
+      count = Math.min(n, RELEVANT_BATCH_CAP);
+      toks.splice(i, 2);
+    } else {
+      if (n > 10) break;                            /* "99 red balloons" */
+      if (/^(cent|pac|pack)$/i.test(next)) break;   /* "50 cent", "2 pac" */
+      count = Math.min(n, RELEVANT_BATCH_CAP);
+      toks.splice(i, 1);
+    }
+    break;                                          /* one count per query */
+  }
+  return { count, query: toks.join(' ').trim() };
+}
+function rememberSearch(chatJid, kind, results, query){
+  const list = (results || []).filter(u => typeof u === 'string' && u);
+  lastSearchByChat.set(chatJid, { kind, results: list, idx: 0, query: String(query || ''), at: Date.now() });
+  if (lastSearchByChat.size > 500){        /* bound the map */
+    lastSearchByChat.delete(lastSearchByChat.keys().next().value);
+  }
+}
+/* Send the next `count` still-unsent results of THIS chat's remembered
+ * search. Returns how many actually went out. */
+async function sendRelevantBatch(chatJid, count, opts = {}){
+  const st = lastSearchByChat.get(chatJid);
+  if (!st || !st.results.length) return 0;
+  const n = Math.max(1, Math.min(count || 1, RELEVANT_BATCH_CAP));
+  let sent = 0;
+  for (let i = 0; i < n; i++){
+    if (st.idx >= st.results.length) break;
+    const url = st.results[st.idx];
+    st.idx++;
+    const label = st.idx + '/' + st.results.length;
+    const res = await sendFirstWorking(chatJid, [url], st.kind, opts.caption || label, { taskType: opts.taskType || 'group' });
+    if (res.ok) sent++;
+    if (i < n - 1) await sleepMs(1200 + Math.random() * 800);   /* human pace between sends */
+  }
+  return sent;
+}
+/* "next" / "more" — continue the last search of this chat. reply(text)
+ * is the chat's own reply helper. Returns true when "next" was handled. */
+async function handleNextMedia(chatJid, reply, taskType = 'group'){
+  const st = lastSearchByChat.get(chatJid);
+  if (!st || Date.now() - st.at > NEXT_TTL_MS){
+    reply('Say what you want first — "5 pics of mbira", "gif dance", "song Tariro" — then say "next" for more.');
+    return true;
+  }
+  if (st.idx >= st.results.length){
+    reply('That was all ' + st.results.length + ' for "' + (st.query || 'that') + '". Ask again for a fresh search.');
+    return true;
+  }
+  const sent = await sendRelevantBatch(chatJid, RELEVANT_BATCH_CAP, { taskType, caption: '' });
+  if (!sent) reply('Nothing more sent — the rest failed to download. Ask again for a fresh search.');
+  return true;
+}
+/* matches a bare "next / more / another" follow-up (not a new request) */
+function isNextRequest(text){
+  return /^(next|more|another( one)?|next (media|pic|pics|gif|gifs|one|batch|5|five)|send more|inext|zvimwe|famba mberi)$/i
+    .test(String(text || '').trim());
+}
+
+/* ═══ v91 PRESENCE KEEPALIVE — "make sure it sends that it's online" ═══
+ * WhatsApp silently drops the "online" flag after a few idle minutes.
+ * 'available' is asserted once on connect; this timer re-asserts it
+ * every 4 minutes for as long as the socket holds a logged-in user, so
+ * the bot ALWAYS shows ONLINE to contacts. Timer is unref'd — it can
+ * never hold the process open on shutdown. */
+const presenceTimers = {};
+function armPresenceKeepalive(name, getSock){
+  if (presenceTimers[name]) clearInterval(presenceTimers[name]);
+  const t = setInterval(async () => {
+    try {
+      const s = getSock();
+      if (s && s.user && typeof s.sendPresenceUpdate === 'function'){
+        await s.sendPresenceUpdate('available');
+      }
+    } catch (e) { /* offline/reconnecting — next tick retries */ }
+  }, 4 * 60 * 1000);
+  if (t.unref) t.unref();
+  presenceTimers[name] = t;
+}
+
 async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
@@ -2723,6 +2827,35 @@ function ownDomainFirst(list, chain){
   if (!mine.size) return list;
   return list.slice().sort((a, b) => (mine.has(ownerOf(b)) ? 1 : 0) - (mine.has(ownerOf(a)) ? 1 : 0));
 }
+/* v91 MOST-RELEVANT SEARCH — the boss: "make the most relevant search".
+ * Results are ranked by how many of the query's words actually appear in
+ * the result's own URL slug (the real file/album name the site gave it):
+ *   score = 100 × word-hits + 10 × (all words present, exact phrase +2)
+ *         + 1 × comes from OUR chain's domain (tiebreak, not override)
+ * A zero-hit result keeps its incoming scraper order (stable sort), and
+ * own-chain domains still win ties — v90.3's authenticity rule survives. */
+function rankRelevant(list, query, chain){
+  const arr = (Array.isArray(list) ? list : []).filter(u => typeof u === 'string' && u);
+  if (!arr.length) return arr;
+  const WORD = /[^a-z0-9\xC0-\u024F\u0400-\u04FF\u0600-\u06FF\u0900-\u097F]+/;
+  const tokens = String(query || '').toLowerCase().split(WORD).filter(t => t.length >= 3 && !/^\d+$/.test(t));
+  if (!tokens.length) return ownDomainFirst(arr, chain);
+  const mine = new Set((chain || []).map(u => ownerOf(u)).filter(Boolean));
+  function score(u){
+    let words;
+    try { words = decodeURIComponent(new URL(u).pathname).toLowerCase().split(WORD).filter(Boolean); }
+    catch (e) { return 0; }
+    let hits = 0;
+    for (const t of tokens) if (words.includes(t)) hits++;
+    if (hits < tokens.length) return hits * 100 + (mine.has(ownerOf(u)) ? 1 : 0);
+    /* all query words present — exact in-order phrase beats shuffled words */
+    const phrase = words.join(' ').includes(tokens.join(' ')) ? 2 : 1;
+    return hits * 100 + phrase * 10 + (mine.has(ownerOf(u)) ? 1 : 0);
+  }
+  return arr.map((u, i) => ({ u, s: score(u), i }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .map(x => x.u);
+}
 async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
   /* v73: site 'auto' — the scraper is MYLINKS-ONLY (zero built-in
    * sites), so results come exclusively from the configured slots. */
@@ -2739,7 +2872,9 @@ async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
     const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('images', !!nsfw, null, boostCat)))];
     if (myLinks.length) body.myLinks = myLinks;
     const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 45000 });
-    return { ok:true, images: ownDomainFirst(cleanResults(r.data?.images), myLinks), site, myLinks: r.data?.myLinks || 0 };
+    /* v91: MOST-RELEVANT first — word-hit ranking over the URL slugs,
+     * own-chain domains as tiebreak (v90.3 authenticity kept) */
+    return { ok:true, images: rankRelevant(cleanResults(r.data?.images), query, myLinks), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`${nsfw?'NSFW':'SFW'} "${query}": ${e.message}`);
     return { ok:false, error:e.message, images:[], site };
@@ -2759,7 +2894,8 @@ async function scraperGif(query, nsfw=false, prefer=null, boostCat=null){
     const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('gifs', !!nsfw, null, boostCat)))];
     if (gifLinks.length) params.myLinks = gifLinks.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
-    return { ok:true, gifs: ownDomainFirst(cleanResults(r.data?.gifs), gifLinks.split(',')), site, myLinks: r.data?.myLinks || 0 };
+    /* v91: most-relevant gifs first, same ranking as image search */
+    return { ok:true, gifs: rankRelevant(cleanResults(r.data?.gifs), query, gifLinks.split(',')), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`GIF "${query}": ${e.message}`);
     return { ok:false, error:e.message, gifs:[], site };
@@ -4089,6 +4225,15 @@ async function processDM(item){
   const aiText = await textToEnglish(chatJid, chatLang, text);
   if (containsForbidden(text) || containsForbidden(aiText)) return;
 
+  /* ═══ v91: "next / more" continues this chat's last search ═══
+   * Caught BEFORE the AI brain so a bare "next" can never become a
+   * chat reply or an ignored message. */
+  if (isNextRequest(text)){
+    const handled = await handleNextMedia(chatJid,
+      (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply');
+    if (handled) return;
+  }
+
   /* ═══ v71.5 AI BRAIN — one call decides what this DM means ═══
    * The brain understands English/Shona/slang INTENT, so "ndipe
    * mafile ekute" no longer needs a regex. It also says IGNORE on
@@ -4179,22 +4324,27 @@ async function processDM(item){
           return;
         }
       } else if (intent.type === 'gif'){
-        const qrg = await mediaQueue.run(chatJid, 'gif', intent.query, async () =>
-          scraperGif(intent.query, false, null, localCat(senderJid, chatJid)));
+        const cnt = extractCountFromQuery(intent.query);
+        const qrg = await mediaQueue.run(chatJid, 'gif', cnt.query || intent.query, async () =>
+          scraperGif(cnt.query || intent.query, false, null, localCat(senderJid, chatJid)));
         const r = qrg.result;
         if (r.ok && r.gifs.length){
-          await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
-          resetDailyStats(); dailyStats.picsSent++;
-          return;
+          /* v91: the MOST RELEVANT batch (up to 5), not one random gif —
+           * remembered so "next" serves the following batch */
+          rememberSearch(chatJid, 'gif', r.gifs, cnt.query || intent.query);
+          const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '' });
+          if (sent){ resetDailyStats(); dailyStats.picsSent += sent; return; }
         }
       } else {
-        const qri = await mediaQueue.run(chatJid, 'image', intent.query, async () =>
-          scraperSearch(intent.query, false, null, localCat(senderJid, chatJid)));
+        const cnt = extractCountFromQuery(intent.query);
+        const qri = await mediaQueue.run(chatJid, 'image', cnt.query || intent.query, async () =>
+          scraperSearch(cnt.query || intent.query, false, null, localCat(senderJid, chatJid)));
         const r = qri.result;
         if (r.ok && r.images.length){
-          await sendImageSafe(chatJid, pickFresh(r.images, chatJid), '', 2, 'slow', 'dmreply', true);
-          resetDailyStats(); dailyStats.picsSent++;
-          return;
+          /* v91: relevant batch (up to 5) + "next" pagination */
+          rememberSearch(chatJid, 'image', r.images, cnt.query || intent.query);
+          const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '' });
+          if (sent){ resetDailyStats(); dailyStats.picsSent += sent; return; }
         }
       }
     }
@@ -4732,9 +4882,10 @@ GROUP MANAGEMENT (main group only)
 !tagall / !mute / !unmute / !lock / !unlock
 
 MEDIA (via intelligent scrapper)
-!pic <q> / !nextpic / !bcastpic <cap>
-!gif <q> / !nextgif / !bcastgif <cap>
-!allimg <url> | <cap>
+!pic [n] <q> — top 5 MOST RELEVANT pics (n = 2-5) · !next / !nextpic walks the rest
+!gif [n] <q> — top 5 most relevant gifs · !next / !nextgif walks the rest
+!bcastpic <cap> / !bcastgif <cap> / !allimg <url> | <cap>
+(v91: users can also just say "5 pics of <q>" then "next" for more)
 
 DOWNLOADS (via intelligent scrapper — ONLY your configured slots, no built-in sites)
 !dl <q> / !download <url> / !music <q>
@@ -5396,22 +5547,33 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'pic': case 'search': {
-      const q = args.slice(1).join(' ');
-      if (!q){ await reply('Usage: !pic <query>'); return; }
+      const cnt = extractCountFromQuery(args.slice(1).join(' '));
+      const q = cnt.query || args.slice(1).join(' ');
+      if (!q){ await reply('Usage: !pic [5] <query>'); return; }
       /* v72.3: NSFW-aware — explicit pic requests use the NSFW index */
       const r = await scraperSearch(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
       if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
-      /* v71.1: top 3 most relevant, not just one */
-      const top3 = r.images.slice(0, 3);
-      await sendImageSafe(chatJid, top3[0], 'Result 1/' + top3.length + ' — “' + q + '”', 0, 'fast', 'admin', false);
-      for (let i = 1; i < top3.length; i++){
-        setTimeout(function(j, n){ sendImageSafe(chatJid, top3[j], 'Result ' + (n) + '/' + top3.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
+      /* v91: the boss's number — top 5 MOST RELEVANT (was top 3), and
+       * "nextpic" walks the rest. "!pic 5 mbira" sets the batch size. */
+      const topN = r.images.slice(0, cnt.count === 1 ? 5 : cnt.count);
+      await sendImageSafe(chatJid, topN[0], 'Result 1/' + topN.length + ' — “' + q + '”', 0, 'fast', 'admin', false);
+      for (let i = 1; i < topN.length; i++){
+        setTimeout(function(j, n){ sendImageSafe(chatJid, topN[j], 'Result ' + (n) + '/' + topN.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
       }
       break;
     }
-    case 'nextpic': {
+    case 'next': case 'more': case 'nextpic': {
+      /* v91: one "next" for everything the admin is browsing — dispatches
+       * on the current preview type ('nextgif' below stays an explicit alias) */
+      const wantGif = cmd !== 'nextpic' && previewCache.currentType === 'gif' && previewCache.gifUrls.length;
+      if (wantGif){
+        previewCache.gifIndex = (previewCache.gifIndex+1) % previewCache.gifUrls.length;
+        previewCache.currentUrl = previewCache.gifUrls[previewCache.gifIndex];
+        await sendGifSafe(chatJid, previewCache.currentUrl, 'GIF '+(previewCache.gifIndex+1)+'/'+previewCache.gifUrls.length, 0, 'fast', 'admin', false);
+        break;
+      }
       if (!previewCache.imageUrls.length){ await reply('No preview.'); return; }
       previewCache.imageIndex = (previewCache.imageIndex+1) % previewCache.imageUrls.length;
       previewCache.currentUrl = previewCache.imageUrls[previewCache.imageIndex];
@@ -5427,11 +5589,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
-      /* v71.1: top 3 most relevant gifs */
-      const gtop3 = r.gifs.slice(0, 3);
-      await sendGifSafe(chatJid, gtop3[0], 'GIF 1/' + gtop3.length, 0, 'fast', 'admin', false);
-      for (let i = 1; i < gtop3.length; i++){
-        setTimeout(function(j, n){ sendGifSafe(chatJid, gtop3[j], 'GIF ' + (n) + '/' + gtop3.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
+      /* v91: top 5 MOST RELEVANT gifs (was top 3) — "next"/"nextgif" walks the rest */
+      const gtopN = r.gifs.slice(0, 5);
+      await sendGifSafe(chatJid, gtopN[0], 'GIF 1/' + gtopN.length, 0, 'fast', 'admin', false);
+      for (let i = 1; i < gtopN.length; i++){
+        setTimeout(function(j, n){ sendGifSafe(chatJid, gtopN[j], 'GIF ' + (n) + '/' + gtopN.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
       }
       break;
     }
@@ -6716,6 +6878,14 @@ async function handleMessage(msg){
       /* v87: NSFW window — normal hours everywhere, ALWAYS OPEN in the
        * designated group once the admin activated it */
       const nsfwOpen = isNsfwWindow() || (accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated());
+      /* ═══ v91: "next / more" continues this group's last search ═══
+       * Before the brain: a bare "next" is a media follow-up, never
+       * chatter. Everyone in a served group can use it. */
+      if (isNextRequest(text)){
+        const handled = await handleNextMedia(chatJid,
+          (t) => sendBuffer(chatJid, { text: t }, 3, 'slow', 'group', true), 'group');
+        if (handled) return;
+      }
       /* ═══ v71.5 AI BRAIN decides FIRST — regex chain stays as the
        * fallback for when the AI pool is down. The brain sees the
        * last 6 group messages, so "that" and follow-ups make sense,
@@ -6762,15 +6932,20 @@ async function handleMessage(msg){
           } catch(e){ pushLog('error','music',e.message); }
         }
         if (gIntent.type === 'gif'){
-          const qr = await mediaQueue.run(chatJid, 'gif', gIntent.query, async () =>
-            scraperGif(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
+          const cnt = extractCountFromQuery(gIntent.query);
+          const qr = await mediaQueue.run(chatJid, 'gif', cnt.query || gIntent.query, async () =>
+            scraperGif(cnt.query || gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
           const r = qr.result;
           if (r.ok && r.gifs.length){
-            await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
-            resetDailyStats();
-            dailyStats.picsSent++;
-            if (isNsfw) dailyStats.nsfwSent++;
-            return;
+            /* v91: MOST RELEVANT batch (up to 5) + "next" pagination */
+            rememberSearch(chatJid, 'gif', r.gifs, cnt.query || gIntent.query);
+            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '' });
+            if (sent){
+              resetDailyStats();
+              dailyStats.picsSent += sent;
+              if (isNsfw) dailyStats.nsfwSent += sent;
+              return;
+            }
           }
         }
         if (gIntent.type === 'video'){
@@ -6802,14 +6977,19 @@ async function handleMessage(msg){
             return;
           }
         } else if (gIntent.type === 'image') {
-          const qr = await mediaQueue.run(chatJid, 'image', gIntent.query, async () =>
-            scraperSearch(gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
+          const cnt = extractCountFromQuery(gIntent.query);
+          const qr = await mediaQueue.run(chatJid, 'image', cnt.query || gIntent.query, async () =>
+            scraperSearch(cnt.query || gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
           const r = qr.result;
           if (r.ok && r.images.length){
-            await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
-            resetDailyStats(); dailyStats.picsSent++;
-            if (isNsfw) dailyStats.nsfwSent++;
-            return;
+            /* v91: MOST RELEVANT batch (up to 5) + "next" pagination */
+            rememberSearch(chatJid, 'image', r.images, cnt.query || gIntent.query);
+            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '' });
+            if (sent){
+              resetDailyStats(); dailyStats.picsSent += sent;
+              if (isNsfw) dailyStats.nsfwSent += sent;
+              return;
+            }
           }
         }
       }
@@ -6923,6 +7103,9 @@ async function connectBot(){
         try { await sock.updateLastSeenPrivacy('none'); } catch(e){}
         pushLog('info','privacy','hidden');
         try { await sock.sendPresenceUpdate('available'); } catch(e){}
+        /* v91: keep the bot showing ONLINE — re-assert presence every 4 min */
+        armPresenceKeepalive('main', () => sock);
+        pushLog('info','presence','Online keepalive armed (4 min)');
 
         autoSetMainGroup()
           .then(() => {
@@ -7588,6 +7771,8 @@ async function connectSchoolBot(){
 
         try { await schoolSock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
         try { await schoolSock.sendPresenceUpdate('available'); } catch(e){}
+        /* v91: school account shows ONLINE too */
+        armPresenceKeepalive('school', () => schoolSock);
 
         setTimeout(function(){ refreshSchoolRegistry(); }, 4000);
         armSchoolRegistryTimer();   /* v74: school-registry stays fresh forever (15 min) */
@@ -8128,6 +8313,13 @@ async function resolveGroupLang(chatJid, text){
  * ══════════════════════════════════════════════════════════════ */
 async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
   if (await serveUniversalCommand(chatJid, senderJid, text, false, 'dm')) return;
+  /* v91: "next / more" continues this chat's last search (before intent
+   * detection — "next" alone is not a media intent) */
+  if (isNextRequest(text)){
+    const handled = await handleNextMedia(chatJid,
+      (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply');
+    if (handled) return;
+  }
   const intent = detectMediaIntent(text);
   if (!intent || isVague(intent.query)){       /* not a command → silence */
     pushLog('info','access','whitelisted DM, non-command — silent: ' + pushName);
@@ -8166,27 +8358,31 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
     return;
   }
   if (intent.type === 'gif'){
-    const qr = await mediaQueue.run(chatJid, 'gif', intent.query, async () =>
-      scraperGif(intent.query, false, prefer, localCat(senderJid, chatJid)));
+    const cnt = extractCountFromQuery(intent.query);
+    const qr = await mediaQueue.run(chatJid, 'gif', cnt.query || intent.query, async () =>
+      scraperGif(cnt.query || intent.query, false, prefer, localCat(senderJid, chatJid)));
     const r = qr.result;
     if (r.ok && r.gifs.length){
-      /* v88: damaged-result defense — try up to 3 gifs before giving up */
-      const res = await sendFirstWorking(chatJid, [pickFresh(r.gifs, chatJid)].concat(r.gifs.slice(0, 3)), 'gif', '', { taskType: 'dmreply' });
-      if (res.ok){ resetDailyStats(); dailyStats.picsSent++; }
+      /* v91: MOST RELEVANT batch (up to 5) + "next" pagination — each
+       * candidate still rides the damaged-result defense */
+      rememberSearch(chatJid, 'gif', r.gifs, cnt.query || intent.query);
+      const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '' });
+      if (sent){ resetDailyStats(); dailyStats.picsSent += sent; }
       else await sendBuffer(chatJid, { text: await t2(chatJid, 'No working gif found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
     } else {
       await sendBuffer(chatJid, { text: await t2(chatJid, 'No gif found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
     }
     return;
   }
-  /* default: images — v88: candidates until one actually sends */
-  const qr = await mediaQueue.run(chatJid, 'image', intent.query, async () =>
-    scraperSearch(intent.query, false, prefer, localCat(senderJid, chatJid)));
+  /* default: images — v91: MOST RELEVANT batch (up to 5) + "next" pagination */
+  const cnt = extractCountFromQuery(intent.query);
+  const qr = await mediaQueue.run(chatJid, 'image', cnt.query || intent.query, async () =>
+    scraperSearch(cnt.query || intent.query, false, prefer, localCat(senderJid, chatJid)));
   const r = qr.result;
   if (r.ok && r.images.length){
-    const first = pickFresh(r.images, chatJid);
-    const res = await sendFirstWorking(chatJid, [first].concat(r.images.filter(u => u !== first).slice(0, 2)), 'image', '', { taskType: 'dmreply' });
-    if (res.ok){ resetDailyStats(); dailyStats.picsSent++; }
+    rememberSearch(chatJid, 'image', r.images, cnt.query || intent.query);
+    const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '' });
+    if (sent){ resetDailyStats(); dailyStats.picsSent += sent; }
     else await sendBuffer(chatJid, { text: await t2(chatJid, 'No working picture found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
   } else {
     await sendBuffer(chatJid, { text: await t2(chatJid, 'No picture found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);

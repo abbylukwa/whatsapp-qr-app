@@ -1730,7 +1730,7 @@ function mediaSniff(buf){
   if (buf[0] === 0x1A && buf[1] === 0x45) return { kind: 'webm' };
   return { kind: null };
 }
-const MEDIA_MIN_DIM = parseInt(process.env.MEDIA_MIN_DIM || '300', 10);
+const MEDIA_MIN_DIM = parseInt(process.env.MEDIA_MIN_DIM || '200', 10);
 function imageTooSmall(buf){
   const s = mediaSniff(buf);
   if (!s.kind) return 'not-an-image (magic bytes)';
@@ -2777,6 +2777,13 @@ function ownDomainFirst(list, chain){
  *         + 1 × comes from OUR chain's domain (tiebreak, not override)
  * A zero-hit result keeps its incoming scraper order (stable sort), and
  * own-chain domains still win ties — v90.3's authenticity rule survives. */
+/* v92.7 FULL-RES CDN BONUS — known image CDNs serve the real file
+ * (pornpics galleries: 640px+), while blog uploads (darknaija wp-content)
+ * are 200px thumbnails the 300px quality floor rejects. A CDN URL with
+ * zero word hits still beats a word-matching thumbnail slug — hits win
+ * searches, but the walker burns its budget on sub-floor thumbs first
+ * and never reaches the full-res tail. Bonus keeps full-res in front. */
+const FULLRES_CDN_RE = /(^|\.)(athumbs|cdn[i]?|www)\.pornpics\.com\/|phncdn\.com\/|xvideos-cdn\.com\/|xhcdn\.com\//i;
 function rankRelevant(list, query, chain){
   const arr = (Array.isArray(list) ? list : []).filter(u => typeof u === 'string' && u);
   if (!arr.length) return arr;
@@ -2790,10 +2797,11 @@ function rankRelevant(list, query, chain){
     catch (e) { return 0; }
     let hits = 0;
     for (const t of tokens) if (words.includes(t)) hits++;
-    if (hits < tokens.length) return hits * 100 + (mine.has(ownerOf(u)) ? 1 : 0);
+    const cdn = FULLRES_CDN_RE.test(u) ? 35 : 0;
+    if (hits < tokens.length) return hits * 100 + cdn + (mine.has(ownerOf(u)) ? 1 : 0);
     /* all query words present — exact in-order phrase beats shuffled words */
     const phrase = words.join(' ').includes(tokens.join(' ')) ? 2 : 1;
-    return hits * 100 + phrase * 10 + (mine.has(ownerOf(u)) ? 1 : 0);
+    return hits * 100 + cdn + phrase * 10 + (mine.has(ownerOf(u)) ? 1 : 0);
   }
   return arr.map((u, i) => ({ u, s: score(u), i }))
     .sort((a, b) => b.s - a.s || a.i - b.i)
@@ -6744,7 +6752,15 @@ async function handleMessage(msg){
    * Now: silence. Commands always work; STUDY_BUDDY=true restores the
    * old always-on admin chat if ever wanted. */
   if (!isGroup && isAdmin && text && mediaType === 'text' && !text.startsWith('!')
-      && !botPaused && Date.now() >= botOfflineUntil){
+      && !botPaused && Date.now() >= botOfflineUntil
+      /* v92.7 MEDIA PASSES: the boss's own media requests were dying HERE
+       * — "nsfw.see teen", ".play nle mp3", "give me a … video" and the
+       * bare "next" all classify as plain text (no ! prefix), so the
+       * AI-silence branch returned before the intent detector ever ran.
+       * The boss wanted the AI CHAT silenced, not his downloads killed. */
+      && !parseShortMediaCommand(text)
+      && !detectMediaIntent(text)
+      && !isNextRequest(text)){
     pushLog('info','admin','Admin plain DM — AI stays silent (commands only).');
     return;
   }
@@ -6758,6 +6774,17 @@ async function handleMessage(msg){
    *    unread at the top of handleMessage. */
   if (!isGroup && !isAdmin && text){
     await serveDmCommand(chatJid, senderJid, msg, text, pushName, phone);
+    return;
+  }
+  /* v92.7 ADMIN DM MEDIA SERVICE — admin plain-text DMs that passed the
+   * AI-silence gate (media intents, short commands, "next") fell into a
+   * bare `return` after the group block: NOTHING handled them. The boss
+   * DMs "give me a … video" / "nsfw.see teen" / "next" → dead silence.
+   * serveDmCommand already serves every one of those (universal
+   * commands, next, short commands, media pipeline) — admins route
+   * through it with isAdmin=true so their NSFW requests are allowed. */
+  if (!isGroup && isAdmin && text){
+    await serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, true);
     return;
   }
 
@@ -7717,7 +7744,7 @@ async function resolveGroupLang(chatJid, text){
  *  No persona chat, no greetings — anything that is not a command
  *  gets silence, exactly as the boss asked.
  * ══════════════════════════════════════════════════════════════ */
-async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
+async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, isAdmin = false){
   if (await serveUniversalCommand(chatJid, senderJid, text, false, 'dm')) return;
   /* v91: "next / more" continues this chat's last search (before intent
    * detection — "next" alone is not a media intent) */
@@ -7732,7 +7759,7 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
    * whitelisted DM gets pointed at .play instead. */
   const dmShort = parseShortMediaCommand(text);
   if (dmShort){
-    if (dmShort.kind !== 'play'){
+    if (dmShort.kind !== 'play' && !isAdmin){   /* v92.7: the ADMIN's own nsfw.see/nsfw.gif/nsfw.play DMs were rejected here — NSFW in DMs is admin-only, and this IS the admin */
       pushLog('info','access','nsfw short command in DM — admin/activated group only: ' + pushName);
       await sendBuffer(chatJid, { text: 'NSFW commands work for the admin and in the activated group — use .play <song> [mp3|mp4] here.' }, 2, 'slow', 'dmreply', true);
       return;

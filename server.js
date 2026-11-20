@@ -662,7 +662,6 @@ function backoffMs(attempts){
   return Math.round(Math.min(raw, RC.MAX_MS));
 }
 let botQrCount = 0, botCloseTimes = [];
-let schoolQrCount = 0, schoolCloseTimes = [];
 function noteClose(times){
   const now = Date.now();
   times.push(now);
@@ -673,21 +672,6 @@ function noteClose(times){
 let mainGroupJid = null;
 
 const botSentIds = new Set();
-/* v68.4: school-side one-claim memory — WhatsApp sometimes re-delivers
- * the same message id on the same connection. Commands, button taps and
- * documents must execute EXACTLY ONCE even then. Cross-account conflicts
- * are prevented by deterministic ownership rules, not by this set. */
-const schoolClaimed = new Set();
-function claimSchool(id){
-  if (!id) return true;
-  if (schoolClaimed.has(id)) return false;
-  schoolClaimed.add(id);
-  if (schoolClaimed.size > 5000){
-    const a = [...schoolClaimed]; schoolClaimed.clear();
-    for (const i of a.slice(-2500)) schoolClaimed.add(i);
-  }
-  return true;
-}
 const processedMessages = new Set();
 const activeChats = new Set();
 const activeDMs = new Set();
@@ -707,10 +691,7 @@ const recentGroupPhones = new Map();
 /* ─── DM pool for batch AI replies ─────────────────────────── */
 const dmPool = new Map();
 
-/* ─── v67: dual-account + dedup + engagement + log-digest state ── */
-let schoolSock = null, schoolQrDataUri = null, schoolStatus = 'disconnected';
-let schoolNumber = null, schoolLid = null, schoolIsConnecting = false, schoolManualDisconnect = false;
-let schoolReconnectAttempts = 0;
+/* ─── v67 dedup + engagement + log-digest state ── */
 const recentOutTexts = new Map();   // jid -> [{h, ts}] sent-text hashes (dedup)
 const engagedGroups  = new Map();   // jid -> ts of last bot conversational send
 let confusionAlertedAt = 0;         // last admin alert about group confusion
@@ -2072,7 +2053,7 @@ function selfLidRemap(jid, account){
   try{
     if (typeof jid !== 'string' || !jid.includes('@')) return jid;
     if (jid.endsWith('@g.us') || jid.endsWith('@lid.whatsapp.net') || jid.endsWith('@broadcast')) return jid;
-    const S = account === 'school' ? schoolSock : sock;
+    const S = sock;
     if (!S) return jid;
     const pnBase = String(jid).split('@')[0].split(':')[0];
     const selfPn = String((S.user && S.user.id) || '').split('@')[0].split(':')[0];
@@ -2132,7 +2113,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
     const job = {
       name:`send:${jid}`, priority, taskType,
       fn: async ()=>{
-        const S = useSchool ? schoolSock : sock;
+        const S = sock;
         if (!S){ if (LOADTEST) lt.sendsFailed++; reject(new Error(useSchool ? 'School account disconnected' : 'Bot disconnected')); return; }
         /* v68.7: NEVER fire into a half-open socket. Sends made while an
          * account is connecting/reconnecting reach WhatsApp with missing
@@ -2140,7 +2121,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
          * "Waiting for this message. This may take a while." Gate every
          * send on FULL connected status instead. */
         if (!LOADTEST){
-          const SReady = useSchool ? (schoolStatus === 'connected') : (connectionStatus === 'connected');
+          const SReady = connectionStatus === 'connected';
           if (!SReady){ if (LOADTEST) lt.sendsFailed++; reject(new Error(useSchool ? 'School account not ready (connecting)' : 'Bot account not ready (connecting)')); return; }
         }
         if (botPaused && priority > 0){ if (LOADTEST) lt.sendsFailed++; reject(new Error('Bot paused')); return; }
@@ -2184,10 +2165,10 @@ function adminReply(jid, text){
   return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
     .catch(e => pushLog('warn','adminreply',e.message));
 }
-/* v67: replies that must go out through the SCHOOL account */
+/* v92: single account — schoolReply is now a plain admin reply */
 function schoolReply(jid, text){
-  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false, { account:'school' })
-    .catch(e => pushLog('warn','schoolreply',e.message));
+  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
+    .catch(e => pushLog('warn','adminreply',e.message));
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2317,7 +2298,7 @@ const SCHOOL_OBSERVE_SYS = 'You triage WhatsApp group messages for a busy studen
   'From the batch below, list ONLY items that need the student to ACT: deadlines, tests/exams, cancelled or moved lectures, venue changes, assignments, direct questions addressed to them, requests from lecturers/admins. ' +
   'Drop greetings, memes, chatter and replies to other people. If NOTHING needs action reply exactly: NONE. ' +
   'Max 6 bullets, one line each, keep the original wording and details. NEVER invent, complete or assume facts — if a message is unclear, quote it as unclear. No commentary.';
-function schoolObservePush(groupName, text){
+function schoolObservePushUNUSED(groupName, text){
   schoolObserveBuffer.push({ ts: Date.now(), group: String(groupName || '?'), text: String(text || '').replace(/\s+/g, ' ').slice(0, 300) });
   if (schoolObserveBuffer.length > 80) schoolObserveBuffer.shift();
   if (!schoolObserveTimer){
@@ -2328,7 +2309,7 @@ async function flushSchoolObserve(){
   schoolObserveTimer = null;
   if (!schoolObserveBuffer.length) return;
   if (LOADTEST) { schoolObserveBuffer.length = 0; return; }
-  if (!schoolSock || schoolStatus !== 'connected'){ schoolObserveBuffer.length = 0; return; }
+  return;   /* v92: school observe digest removed */
   const batch = schoolObserveBuffer.splice(0, 30);
   const lines = batch.map(b => '[' + b.group + '] ' + b.text);
   const r = await askAI('Group messages (oldest first):\n' + lines.join('\n'), SCHOOL_OBSERVE_SYS);
@@ -2637,7 +2618,7 @@ async function sendButtons(jid, menuKeyOrText, opts = {}){
   const menu = MENUS[menuKeyOrText];
   const title = menu ? menu.title : String(menuKeyOrText);
   const btns  = (menu ? menu.buttons : (opts.buttons || [])).slice(0, 5);
-  const S = opts.account === 'school' ? (schoolSock || sock) : (sock || schoolSock);
+  const S = sock;
   if (!S || !btns.length){ return sendBuffer(jid, { text: title }, 0, 'fast', 'admin', false, { account: opts.account }); }
   resetDailyStats(); dailyStats.buttonsSent++;
   pushLog('info','buttons','Menu "' + (menu ? menuKeyOrText : 'custom') + '" → ' + jid + ' [' + (opts.account||'groups') + ']');
@@ -3760,7 +3741,7 @@ function resolveTaskTarget(spec, fromJid){
         if (n && (n.includes(want) || want.includes(n))){ jid = g; account = 'groups'; label = info.name; break; }
       }
       if (!jid){
-        for (const [g, name] of schoolRegistry){
+        for (const [g, name] of []){   /* v92: school registry gone */
           const n = norm(name);
           if (n && (n.includes(want) || want.includes(n))){
             jid = g; label = name;
@@ -5116,12 +5097,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
 
   /* v66: school instance = read-only monitor. Mass-messaging, joining,
    * downloads and NSFW are disabled there; reports work everywhere. */
-  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick','allow','deny','allowgroup','nsfwgroup','reloadaccess','sitehealth','engage','silence','listen','listener'];
-  const schoolBlockedNow = SCHOOL_MODE || (opts && opts.account === 'school');
-  if (schoolBlockedNow && SCHOOL_BLOCKED.includes(cmd)){
-    await reply('🏫 School mode — this instance only READS groups and sends reports.\nUse: !today · !week · !timetable · !weather');
-    return;
-  }
+  /* v92: the school-mode command blocklist is gone with the account */
 
   /* v72.3: NO SILENT FAILURES — any unexpected throw in a command case
    * (e.g. a broadcast target rejecting under the cold-outreach policy)
@@ -5364,12 +5340,8 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       L.push('');
       L.push('— ACCOUNTS —');
       L.push('Groups : ' + connectionStatus + (botNumber && botNumber !== 'unknown' ? ' (' + botNumber + ')' : '') + (botLid ? ' · LID ' + botLid : ' · LID unknown'));
-      L.push('School : ' + schoolStatus + (schoolNumber ? ' (' + schoolNumber + ')' : ' (not scanned)'));
       L.push('Main   : ' + (mainGroupJid ? 'SET ✓' : 'NOT SET ✗ — auto-retrying from ADMIN_GROUP_LINK every 3 min'));
-      { let n = 0; const seen = new Set([...schoolRegistry.keys(), ...(joinedGroups ? [...joinedGroups.keys()] : [])]);
-        for (const j of seen){ if (isSchoolGroup(j)) n++; }
-        L.push('Groups seen: ' + joinedGroups.size + ' · school registry: ' + schoolRegistry.size + ' · school groups active: ' + n + (schoolGroupCfg.auto ? ' (auto-detect on)' : ' (pinned only)'));
-      }
+      L.push('Groups seen: ' + joinedGroups.size);
       L.push('');
       L.push('— SCRAPER —');
       try {
@@ -6227,14 +6199,14 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (sub === 'add' || sub === 'del' || sub === 'remove'){
         const jid = resolveSchoolGroupTarget(args.slice(2).join(' '));
         if (!jid){ await reply('Which group? Give a name piece (!schoolgroup add botany) or the raw jid.'); break; }
-        markSchoolGroup(jid, sub === 'add');
+
         await reply((sub === 'add' ? '✅ Pinned as SCHOOL group: ' : '🔇 Muted — no longer school: ')
           + (schoolRegistry.get(jid) || (typeof getGroupName === 'function' ? (getGroupName(jid) || '') : '') || jid));
         break;
       }
       if (sub === 'auto'){
         schoolGroupCfg.auto = !['off','false','0'].includes((args[2] || '').toLowerCase());
-        saveSchoolGroups();
+
         await reply('Name auto-detect is now ' + (schoolGroupCfg.auto
           ? 'ON — school-looking group names are triaged automatically'
           : 'OFF — only pinned groups (!schoolgroup add) are triaged'));
@@ -6835,7 +6807,7 @@ async function handleMessage(msg){
    * queued for the admin. Main group included; noise stays noise. ═══ */
   /* v74.1: main group + real SCHOOL groups only — a "results are out"
    * joke in a meme group is not an update you need. */
-  if (isGroup && text && isNeededUpdate(text) && (chatJid === mainGroupJid || isSchoolGroup(chatJid))){
+  if (isGroup && text && isNeededUpdate(text) && chatJid === mainGroupJid){
     queueNeededUpdate(getGroupName(chatJid) || chatJid, text);
     pushLog('info','updates','Queued needed update from ' + (getGroupName(chatJid) || chatJid));
   }
@@ -6931,8 +6903,6 @@ async function handleMessage(msg){
      * bot reads docs (main group → digest, others → silent cache). */
     /* v74.1: only a real SCHOOL group is school-owned — same classifier
      * as the school side, so both accounts always agree on the owner. */
-    const schoolOwnedDoc = isGroup && chatJid !== mainGroupJid && isSchoolGroup(chatJid);
-    if (schoolOwnedDoc) return;      // school handles this one — no double digest
     const doc = await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'groups');
     if (doc) return;                 // docs are not chat text — stop here
   }
@@ -7515,594 +7485,8 @@ function refreshQR(){
   setTimeout(function(){ manualDisconnect = false; connectBot(); }, 1000);
 }
 
-/* ══════════════════════════════════════════════════════════════
- *  SCHOOL ACCOUNT (v67) — SECOND QR, SAME BOT, ONE PANEL
- *  Account 1 ("groups", auth_info)  = group manager (all existing logic)
- *  Account 2 ("school", auth_info_school) = read-only school monitor:
- *    · NEVER posts in school groups, NEVER replies to members
- *    · talks ONLY to the admin (reports + school commands)
- *    · shares the SAME AI chain, the SAME log buffer and live panel
- *  Logs of both accounts flow into the same panel + admin digest.
- * ══════════════════════════════════════════════════════════════ */
-const schoolRegistry = new Map();   // jid -> subject (names known by the school account)
-async function refreshSchoolRegistry(){
-  if (!schoolSock) return;
-  try {
-    const groups = await schoolSock.groupFetchAllParticipating();
-    const map = groups && groups[Object.keys(groups)[0]] !== undefined ? groups : (groups || {});
-    let n = 0;
-    for (const [jid, meta] of Object.entries(map)){
-      schoolRegistry.set(jid, meta.subject || 'unknown'); n++;
-    }
-    pushLog('success','school','School account sees ' + n + ' groups (names cached)');
-  } catch(e){ pushLog('warn','school','registry: ' + e.message); }
-}
-function getSchoolGroupName(jid){ return schoolRegistry.get(jid) || null; }
-
-/* ═══ v74 REGISTRY SELF-HEAL — "the bot gets confused which ones are
- * school groups" ═══
- * refreshSchoolRegistry() used to run ONCE, 4 s after the school
- * account connected. Any group joined AFTER that boot moment (a new
- * class group, an added study group, a renamed group…) never landed
- * in schoolRegistry — so its documents were mis-routed to the GROUPS
- * account (double digests / wrong owner) and observe lines showed raw
- * JIDs instead of names. Fix: (a) when the school account sees a group
- * jid it does not know, schedule a debounced refresh (max once per
- * minute); (b) a periodic refresh every 15 min keeps names fresh. */
-let schoolRegistryRefreshAt = 0;
-function scheduleSchoolRegistryRefresh(){
-  const now = Date.now();
-  if (now - schoolRegistryRefreshAt < 60000) return;   /* max 1/min */
-  schoolRegistryRefreshAt = now;
-  setTimeout(function(){ refreshSchoolRegistry().catch(function(){}); }, 1500);
-}
-let schoolRegistryTimer = null;
-function armSchoolRegistryTimer(){
-  if (schoolRegistryTimer) return;                     /* no stacking on reconnects */
-  schoolRegistryTimer = setInterval(function(){ refreshSchoolRegistry().catch(function(){}); }, 15 * 60 * 1000);
-  if (schoolRegistryTimer && typeof schoolRegistryTimer.unref === 'function') schoolRegistryTimer.unref();
-}
-
-/* ═══ v74.1 SCHOOL-GROUP CLASSIFIER — "which ones are school groups,
- * which conversations are school related" ═══
- * schoolRegistry lists EVERY group the admin's own phone is in —
- * family, memes, work — so observe mode triaged ALL of them and the
- * needed-updates filter fired on any group where someone said
- * "results are out". Fix: a real classifier with THREE layers,
- * persisted to school_groups.json:
- *   1. MANUAL  — !schoolgroup add pins a group (always wins)
- *   2. REMOVED — !schoolgroup del mutes even a school-looking name
- *   3. AUTO    — the group NAME looks like a class/module group
- * Observe triage, school-side doc ownership, groups-side doc skip and
- * needed-updates all run through isSchoolGroup() now. The MAIN group
- * stays groups-bot territory in every rule. */
-const SCHOOL_GROUPS_FILE = path.join(__dirname, 'school_groups.json');
-const schoolGroupCfg = { auto: true, manual: [], removed: [] };
-function loadSchoolGroups(){
-  try {
-    if (fs.existsSync(SCHOOL_GROUPS_FILE)){
-      const d = JSON.parse(fs.readFileSync(SCHOOL_GROUPS_FILE, 'utf8'));
-      if (d && typeof d === 'object'){
-        schoolGroupCfg.auto    = d.auto !== false;
-        schoolGroupCfg.manual  = Array.isArray(d.manual)  ? d.manual.filter(function(x){ return typeof x === 'string'; })  : [];
-        schoolGroupCfg.removed = Array.isArray(d.removed) ? d.removed.filter(function(x){ return typeof x === 'string'; }) : [];
-      }
-    }
-  } catch(e){ pushLog('warn','schoolgroups','load: ' + e.message); }
-}
-function saveSchoolGroups(){
-  try { fs.writeFileSync(SCHOOL_GROUPS_FILE, JSON.stringify(schoolGroupCfg, null, 2)); }
-  catch(e){ pushLog('warn','schoolgroups','save: ' + e.message); }
-}
-loadSchoolGroups();
-/* A group NAME that looks like an actual class/module group */
-const SCHOOL_NAME_RE = /\b(bsc|bss|hnd|msc|part\s*[1-4]|level\s*[1-4]|[1-4]\.[12]|semester|lecture|lecturer|tutorial|practical|timetable|assignment|modul|faculty|department|staff)\b/i;
-function schoolGroupNameAny(chatJid){
-  const name = schoolRegistry.get(chatJid);
-  if (name) return name;
-  try { if (typeof getGroupName === 'function'){ const g = getGroupName(chatJid); if (g) return g; } } catch(e){}
-  return null;
-}
-function isSchoolGroup(chatJid){
-  const jid = String(chatJid || '');
-  if (!jid) return false;
-  if (schoolGroupCfg.manual.indexOf(jid) >= 0) return true;     /* explicit pin wins */
-  if (schoolGroupCfg.removed.indexOf(jid) >= 0) return false;   /* explicit mute wins */
-  if (!schoolGroupCfg.auto) return false;
-  const name = schoolGroupNameAny(jid);
-  return !!(name && SCHOOL_NAME_RE.test(name));
-}
-function markSchoolGroup(jid, on){
-  jid = String(jid || '');
-  if (!jid) return false;
-  if (on){
-    schoolGroupCfg.removed = schoolGroupCfg.removed.filter(function(x){ return x !== jid; });
-    if (schoolGroupCfg.manual.indexOf(jid) < 0) schoolGroupCfg.manual.push(jid);
-  } else {
-    schoolGroupCfg.manual = schoolGroupCfg.manual.filter(function(x){ return x !== jid; });
-    if (schoolGroupCfg.removed.indexOf(jid) < 0) schoolGroupCfg.removed.push(jid);
-  }
-  saveSchoolGroups();
-  return true;
-}
-/* one quiet log line per non-school group — tells you HOW to fix a miss */
-const schoolSkipLogged = new Set();
-function schoolSkipLogOnce(jid, name){
-  if (schoolSkipLogged.has(jid)) return;
-  schoolSkipLogged.add(jid);
-  if (schoolSkipLogged.size > 300) schoolSkipLogged.clear();
-  pushLog('info','schoolgroups','Non-school group "' + (name || jid) + '" not triaged — mark it with !schoolgroup add if it IS a class group');
-}
-/* "!schoolgroup add botany" → the jid; searches BOTH registries */
-function resolveSchoolGroupTarget(word){
-  const w = String(word || '').trim();
-  if (!w) return null;
-  if (w.indexOf('@g.us') > 0) return w;                          /* raw jid */
-  const low = w.toLowerCase();
-  for (const [jid, name] of schoolRegistry){
-    if ((name || '').toLowerCase().indexOf(low) >= 0) return jid;
-  }
-  try {
-    if (typeof joinedGroups === 'object' && joinedGroups && typeof joinedGroups.forEach === 'function'){
-      let hit = null;
-      joinedGroups.forEach(function(v, jid){
-        if (!hit && v && v.name && v.name.toLowerCase().indexOf(low) >= 0) hit = jid;
-      });
-      if (hit) return hit;
-    }
-  } catch(e){}
-  return null;
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  v68 SCHOOL ACCOUNT — LOCKED TO THE ADMIN'S DM
- *  · Replies ONLY to the admin's DM (commands, buttons, study chat).
- *  · EVERY other message — every group, every other DM — is silently
- *    ignored (counted + live-panel only, never answered).
- *  · School groups: read-only monitor. The ONLY traffic that leaves
- *    them is (a) "needed" updates and (b) assignments extracted from
- *    documents — both go to the ADMIN, never back to a group.
- * ══════════════════════════════════════════════════════════════ */
-const SCHOOL_COMMANDS = ['help','commands','menu','ping','test','status','stats','today','week',
-  'timetable','weather','addlecture','dellecture','addassignment','delassignment',
-  'study','deadlines','pdf','docs','forgetdocs','updates','tasks','canceltask',
-  'whoami','summary','jobs','flow','registry','logs','errors','st','scrapertest',
-  'schoolgroup','schoolgroups'];
-
-let schoolAiHintSent = false;   /* v70: one-time AI-off hint */
-async function handleSchoolAdminCommand(text, chatJid, msg){
-  const mapped = parseCasualAdmin(text);
-  if (mapped){
-    const cmd = mapped.slice(1).split(/\s+/)[0].toLowerCase();
-    if (SCHOOL_COMMANDS.includes(cmd)){
-      await handleAdminCommand(mapped, chatJid, msg, { account:'school', replyFn:(t)=>schoolReply(chatJid, t) });
-      return;
-    }
-    await schoolReply(chatJid, '🏫 School account — reports, docs and studying only.\nGroup management lives on the groups account.');
-    await sendButtons(chatJid, 'school', { account:'school' });
-    return;
-  }
-  /* v68.2: admin task orders from the school line too — group names
-   * resolve across BOTH registries, sends go out on the right account. */
-  const taskSpec = parseTaskRequest(text);
-  if (taskSpec){
-    if (taskSpec.badTime){
-      await schoolReply(chatJid, 'I did not understand the time "' + taskSpec.badTime + '".\nTry: by 5pm · by 17:30 · in 2 hours · tonight · tomorrow');
-      return;
-    }
-    const r = scheduleAdminTask(taskSpec, chatJid);
-    await schoolReply(chatJid, r.plan || ('Err: ' + r.error));
-    return;
-  }
-  /* v70: the AI no longer answers the admin automatically — free-form
-   * replies kept interfering with commands. AI now needs an explicit
-   * "ask <question>" prefix (and STUDY_BUDDY=true restores always-on
-   * chat). Anything else: silence — commands only. */
-  const askMatch = /^ask\s+(.+)/is.exec(text || '');
-  if (askMatch && STUDY_BUDDY_ENABLED){
-    return studyBuddyChat(chatJid, askMatch[1]);
-  }
-  if (askMatch && !STUDY_BUDDY_ENABLED){
-    return schoolReply(chatJid, 'AI chat is disabled — set STUDY_BUDDY=true in env to enable it.');
-  }
-  if (!schoolAiHintSent){
-    schoolAiHintSent = true;
-    await schoolReply(chatJid, '🤖 AI auto-chat is OFF (it was interfering with your commands).\nCommands work as normal — for an AI answer use: ask <question>');
-  }
-}
-
-/* ═══ v68.7: WHICH NUMBER IS THE GROUPS BOT? — defined right after
- * handleSchoolMessage (see below) so it travels with the handler.
- * ═══ */
-
-async function handleSchoolMessage(msg){
-  if (!schoolSock) return;
-  try {
-    const chatJid = msg.key?.remoteJid;
-    if (!chatJid) return;
-    /* v68.3: never re-process messages the school bot itself sent */
-    if (msg.key?.id && botSentIds.has(msg.key.id)) return;
-    const raw = msg.message;
-    if (!raw || raw.protocolMessage || raw.reactionMessage || raw.pollUpdateMessage || msg.messageStubType) return;
-    const m = raw.ephemeralMessage?.message || raw.viewOnceMessage?.message
-           || raw.viewOnceMessageV2?.message || raw.deviceSentMessage?.message || raw;
-    accountStats.school.in++;          /* v68: per-account counter */
-    const isGroup = chatJid.endsWith('@g.us');
-    /* ═══ v68.3 CRITICAL FIX — "does not recognise admin" ═══
-     * The school login IS the admin's own number (ADMIN_PHONE), so every
-     * message the admin types on their phone/WhatsApp Web arrives with
-     * fromMe=true. The old blanket `if (fromMe) return;` threw the
-     * admin's messages away BEFORE any admin check could run — the bot
-     * looked deaf. fromMe traffic is now PROCESSED; the bot's own sends
-     * are filtered by botSentIds above, and self-echoes by the guarded
-     * self-detection below. The admin's command channel is the
-     * self-chat (Message Yourself): remoteJid === ADMIN_JID, which
-     * isAdminSender already matches. DMs the admin sends to OTHER
-     * people stay non-admin (remoteJid = the other person). */
-    const fromMe = !!msg.key?.fromMe;
-    const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
-    noteInbound(chatJid);   /* v72.2: school-side chats are warm too */
-    /* ═══ v69 CRITICAL FIX — admin recognition on the SCHOOL account ═══
-     * The school login IS the admin's own number (263777627210). Group
-     * messages the admin sends from their own phone arrive here with
-     * participant = the school account's OWN LID — which was never in
-     * adminLids (that only held the groups-side LID 115110005706891),
-     * so every admin group message showed up WITHOUT the admin tag and
-     * the read-only monitor ignored its own boss. fromMe ⇒ admin, and
-     * the school's own LID is learned + persisted at connect. */
-    const isAdmin = fromMe || isAdminSender(msg, senderJid);
-
-    /* self-detection on the school account — INBOUND only. The admin's
-     * own fromMe traffic IS the admin, never an echo. */
-    const cand = extractAllPhoneCandidates(msg, senderJid);
-    const selfBase = (schoolNumber || '').split('@')[0];
-    if (!fromMe && selfBase && cand.includes(selfBase)) return;
-    /* v68.4 CONFLICT FIX — ONE ADMIN, TWO BOTS: identify the two special
-     * chats up front. isSelfChat = the admin's "Message Yourself" chat
-     * (the school account's command channel). chatBase is also used by
-     * the bot-chat guard below. */
-    const chatBase = String(chatJid).split('@')[0].split(':')[0];
-    const isSelfChat = !isGroup && !!selfBase && chatBase === selfBase;
-
-    if (LOADTEST) lt.handled++;
-    if (isAdmin && !isGroup) touchAdminActive();
-
-    /* read-only live panel — same stream, tagged account:school */
-    pushLiveMessage({
-      id: msg.key.id, ts: new Date().toISOString(), chatJid,
-      chatType: isGroup ? 'group' : 'dm', senderJid,
-      senderName: msg.pushName || 'Unknown', phone: cand[0] || '-',
-      lid: extractLidFromMsg(msg, senderJid) || '-',
-      text: (m?.conversation || m?.extendedTextMessage?.text || m?.imageMessage?.caption
-          || m?.videoMessage?.caption || m?.documentMessage?.fileName || '[media]').slice(0,200),
-      mediaType: m?.documentMessage ? 'document' : 'text', isAdmin,
-      account: 'school',
-      groupName: isGroup ? (getSchoolGroupName(chatJid) || '-') : undefined
-    });
-    if (!fromMe){ resetDailyStats(); dailyStats.readsSent++; }   /* v68.3: the admin's own texts are not "reads" */
-
-    /* ═══ v68.4 CONFLICT FIX — THE BOT'S CHAT IS BOT TERRITORY ═══
-     * The admin ↔ groups-account chat is served by the BOT. The school
-     * account must NEVER act there (no commands, no taps, no docs, no
-     * replies) — otherwise both bots would answer the same message.
-     * School remains a silent witness: the panel push above already
-     * happened, so you still SEE the chat in the monitor. */
-    const groupsBase = groupsNumberBase();
-    /* v69 FIX: WhatsApp increasingly hands out @lid JIDs for DM chats —
-     * the admin→bot chat can be "<botLid>@lid" instead of the bot's
-     * phone JID. The old guard only compared the phone base, so those
-     * chats slipped past bot territory and their sender displayed as
-     * the bot's LID with no admin tag (exactly what the logs showed).
-     * Now the guard matches the bot's phone OR the bot's LID. */
-    const groupsLidBase = (typeof botLid !== 'undefined' && botLid) ? String(botLid).split('@')[0].split(':')[0] : '';
-    if (!isGroup && groupsBase && (chatBase === groupsBase || (groupsLidBase && chatBase === groupsLidBase))){
-      /* v68.7: the bot's chat is bot territory — but if the groups
-       * account is DOWN, the admin's texts vanish into a dead socket
-       * and the panel shows nothing. Warn in the self-chat (once per
-       * 5 min) so silence never looks like deafness again.
-       * typeof-guards: exotic sandboxes without these globals must
-       * never kill the whole handler. */
-      const tHere = m?.conversation || m?.extendedTextMessage?.text
-                 || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
-      if (typeof connectionStatus !== 'undefined' && connectionStatus !== 'connected'
-          && tHere && isAdmin && typeof botOfflineWarnAllowed === 'function' && botOfflineWarnAllowed()){
-        try {
-          botOfflineWarnAt = Date.now();
-          schoolReply(ADMIN_JID, '⚠️ GROUPS BOT IS OFFLINE — QR 1 not scanned.\n' +
-            'Your message to it was NOT received:\n“' + String(tHere).slice(0, 80) + '”\n' +
-            'Open the panel → scan QR 1 with the BOT\'s phone (your phone is school / QR 2 ✓).');
-        } catch(e){}
-      }
-      return;
-    }
-
-    /* v68: BUTTON TAPS from the admin DM — handled before any text gate */
-    const btnTap = extractButtonCommand(m);
-    if (btnTap){
-      /* v68.4: taps are ACTIONS — admin DM only, and when fromMe only in
-       * the self-chat (never the bot's chat, never other people's chats),
-       * claimed once so a WhatsApp re-delivery cannot double-fire. */
-      const tapAllowed = !isGroup && isAdmin && (!fromMe || isSelfChat);
-      if (SCHOOL_STRICT_ADMIN && !tapAllowed) return;
-      if (!claimSchool(msg.key?.id)) return;
-      markRead(msg).catch(()=>{});
-      await routeButton(chatJid, btnTap.id, 'school', msg);
-      return;
-    }
-
-    /* v68: DOCUMENTS — v68.4 DOC OWNERSHIP: exactly ONE account reads
-     * any document, so you never get the same assignment digest twice:
-     *   · school-registry group (not main) → SCHOOL digests it to you
-     *   · main group / every other group   → the groups account handles
-     *   · your DMs: only the self-chat (or an incoming admin DM) — a
-     *     PDF you send to the BOT is the bot's; school ignores it. */
-    if (m?.documentMessage || m?.documentWithCaptionMessage){
-      /* v74.1: ownership now needs a real SCHOOL group — not just "the
-       * school account can see it" (that was every group on the phone). */
-      const schoolGroupOwned = isGroup && chatJid !== mainGroupJid && isSchoolGroup(chatJid);
-      const dmAllowed = !isGroup && isAdmin && (!fromMe || isSelfChat);
-      if ((schoolGroupOwned || dmAllowed) && claimSchool(msg.key?.id)){
-        await handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, 'school');
-      }
-      return;                            // docs never fall through to chat
-    }
-
-    const text = m?.conversation || m?.extendedTextMessage?.text
-              || m?.imageMessage?.caption || m?.videoMessage?.caption || '';
-
-    /* school group message: monitor ONLY. v69 OBSERVE MODE — no instant
-     * keyword forwarding. Every group text is buffered for a 2-minute
-     * window; ONE AI triage pass then tells the admin only what actually
-     * needs action (deadlines, cancelled lectures, direct questions…).
-     * No noise, no 147-item floods, no hallucinated deadlines. NEVER
-     * reply into the group. */
-    if (isGroup){
-      if (!schoolRegistry.has(chatJid)) scheduleSchoolRegistryRefresh();   /* v74: unknown group → self-heal the registry */
-      /* v74.1 CLASSIFIER: only SCHOOL groups get AI-triaged. The school
-       * account is the admin's own phone — it also sees family/meme/work
-       * groups, and triaging those was exactly the "bot confuses school
-       * chats" bug. Non-school groups stay panel-only (never triaged). */
-      if (text && !fromMe){
-        if (isSchoolGroup(chatJid) && chatJid !== mainGroupJid){
-          schoolObservePush(getSchoolGroupName(chatJid) || chatJid, text);
-        } else {
-          schoolSkipLogOnce(chatJid, getSchoolGroupName(chatJid));
-        }
-      }
-      return;                            // strictly read-only in groups
-    }
-
-    /* ── DM path ── */
-    if (isAdmin){
-      /* ═══ v68.4 CONFLICT FIX — YOUR COMMAND CHANNELS ═══
-       * · "Message Yourself" (self-chat)  → SCHOOL answers here.
-       * · DM to the BOT's number          → BOT answers (guard above;
-       *   this branch can no longer reach it anyway).
-       * · DMs you send to other people    → nobody's business.
-       * Incoming admin DMs (a different ADMIN_PHONE) still work. */
-      if (!fromMe || isSelfChat){
-        if (claimSchool(msg.key?.id)) await handleSchoolAdminCommand(text, chatJid, msg);
-      }
-      return;
-    }
-    /* v68 STRICT GATE: not the admin's DM → ignore completely.
-     * No reply, no AI, nothing — just a quiet note in the logs.
-     * v68.3: fromMe = the admin's own outgoing chats with other people
-     * — silently skipped, no log spam about the admin themself. */
-    if (!fromMe) pushLog('info','school','Non-admin DM ignored (school answers admin only): ' + (msg.pushName || cand[0] || senderJid));
-  } catch(e){ pushLog('error','school', e.message); }
-}
-
-/* ═══ v68.7: WHICH NUMBER IS THE GROUPS BOT? ═══
- * Works even while the bot socket is down: falls back to the last
- * known bot number, so the school account can detect "the admin is
- * texting the BOT's dead chat" and warn instead of swallowing.
- * Deliberately placed BETWEEN handleSchoolMessage and
- * connectSchoolBot: the v68.4 test sandbox grabs exactly that span,
- * so the helper travels with the handler and every reference in it
- * stays defined. typeof-guards keep other exotic scopes alive too. */
-function groupsNumberBase(){
-  try {
-    if (typeof sock !== 'undefined' && sock && sock.user && sock.user.id)
-      return String(sock.user.id).split('@')[0].split(':')[0];
-  } catch(e){}
-  try {
-    if (typeof botNumber !== 'undefined' && botNumber && botNumber !== 'unknown')
-      return String(botNumber).split('@')[0].split(':')[0];
-  } catch(e){}
-  return '';
-}
-/* v68.7: rate-limited "bot offline" warning — once per 5 minutes */
-let botOfflineWarnAt = 0;
-const BOT_OFFLINE_WARN_MS = 5 * 60 * 1000;
-function botOfflineWarnAllowed(){ return Date.now() - botOfflineWarnAt > BOT_OFFLINE_WARN_MS; }
-
-async function connectSchoolBot(){
-  if (schoolIsConnecting) return;
-  if (LOADTEST) return;               // loadtest: manager stub only
-  schoolIsConnecting = true; schoolManualDisconnect = false;
-  try {
-    pushLog('info','school','Initializing school account...');
-    const { state, saveCreds } = await useMultiFileAuthState(SCHOOL_AUTH_FOLDER);
-    const version = await getVersion();
-
-    const baseSocket = makeWASocket({
-      version, auth: state, printQRInTerminal: false,
-      browser: Browsers.macOS('Desktop'),
-      logger: pino({ level:'silent' }),
-      markOnlineOnConnect: false,
-      syncFullHistory: false,
-      generateHighQualityLinkPreview: false,
-      getMessage: async ()=>undefined,
-      qrTimeout: 90000,
-      connectTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000,
-      defaultQueryTimeoutMs: 30000
-    });
-
-    schoolSock = baseSocket;
-
-    /* v70: boot watchdog — same "stuck at Initializing" fix as the
-     * groups account: no open/QR/close in 90s → clean restart. */
-    const schoolBootWatchdog = setTimeout(function(){
-      if (schoolSock === baseSocket && schoolStatus !== 'connected' && schoolStatus !== 'qr'){
-        pushLog('warn','school','Boot watchdog: no open/QR/close in 90s — restarting school connection');
-        try { baseSocket.end(undefined); } catch(e){}
-      }
-    }, 90000);
-
-    schoolSock.ev.on('connection.update', async (update)=>{
-      const { connection, lastDisconnect, qr } = update;
-      if (qr){
-        /* v68.3: same QR cap as the groups account */
-        schoolQrCount++;
-        if (schoolQrCount > RC.QR_MAX){
-          schoolStatus = 'reconnecting';
-          schoolManualDisconnect = true;    /* close handler must not double-fire */
-          pushLog('warn','school','School QR renewed ' + RC.QR_MAX + 'x with no scan — cooling down ' + (RC.QR_COOLDOWN_MS/60000) + ' min, then a fresh QR.');
-          try { schoolSock.end(undefined); } catch(e){}
-          setTimeout(function(){ schoolQrCount = 0; schoolManualDisconnect = false; connectSchoolBot(); }, RC.QR_COOLDOWN_MS);
-          return;
-        }
-        schoolQrDataUri = await QRCode.toDataURL(qr);
-        schoolStatus = 'qr';
-        clearTimeout(schoolBootWatchdog);   /* v70: alive — QR is showing */
-        pushLog('info','school','School QR generated (' + schoolQrCount + '/' + RC.QR_MAX + ' renewals) — scan the SCHOOL card on the panel');
-      }
-      if (connection === 'open'){
-        clearTimeout(schoolBootWatchdog);   /* v70: alive — fully open */
-        schoolIsConnecting = false; schoolStatus = 'connected';
-        schoolQrDataUri = null;   /* v71.2: drop the QR once paired */
-        schoolReconnectAttempts = 0;
-        schoolQrCount = 0; schoolCloseTimes = [];   /* v68.3: fresh cycle */
-        const jid = schoolSock.user?.id || null;
-        schoolNumber = jid?.split(':')[0]?.split('@')[0] || 'unknown';
-        /* v69: learn the school account's own LID immediately and file it
-         * as an admin LID — group messages from the admin's phone carry
-         * this LID as participant, and adminLids is what isAdminSender
-         * checks. Also logged so "which LID is mine" is answerable. */
-        const sLid = getSelfLid(schoolSock);
-        if (sLid){
-          schoolLid = sLid;
-          if (!adminLids.has(sLid)){
-            adminLids.add(sLid);
-            saveAdminLids();
-            pushLog('success','school','School LID learned + saved as admin LID: ' + sLid);
-          }
-        }
-        pushLog('success','school','School account connected as ' + schoolNumber + (schoolLid ? ' · LID ' + schoolLid : ''));
-
-        try { await schoolSock.updateOnlinePrivacy('match_last_seen'); } catch(e){}
-        try { await schoolSock.sendPresenceUpdate('available'); } catch(e){}
-        /* v91: school account shows ONLINE too */
-        armPresenceKeepalive('school', () => schoolSock);
-
-        setTimeout(function(){ refreshSchoolRegistry(); }, 4000);
-        armSchoolRegistryTimer();   /* v74: school-registry stays fresh forever (15 min) */
-
-        pushLiveMessage({
-          id: 'school-boot-' + Date.now(), ts: new Date().toISOString(),
-          chatJid: ADMIN_JID, chatType: 'system', senderJid: jid,
-          senderName: 'SCHOOL ACCOUNT ONLINE', phone: schoolNumber,
-          text: 'School account ONLINE as ' + schoolNumber + '\nRead-only monitor — replies to admin only.',
-          mediaType: 'system', isAdmin: true, account: 'school'
-        });
-        try {
-          await schoolSock.sendMessage(ADMIN_JID, { text:
-            '🏫 BreadBot v82.0.0 SCHOOL account online\n' +
-            'Bot: ' + schoolNumber + '\n' +
-            'Role: admin monitor — commands + reports only (AI auto-chat OFF)\n' +
-            'Send "menu" for buttons · "today" · "weather" · "ask <question>" = AI · send me PDFs/DOCX to read',
-          });
-        } catch(e){ pushLog('warn','school','hello: ' + e.message); }
-      }
-      if (connection === 'close'){
-        clearTimeout(schoolBootWatchdog);   /* v70: not stuck — closed */
-        schoolIsConnecting = false;
-        const { code, msg } = describeDisconnect(lastDisconnect);
-        pushLog('warn','school',`Disconnected (${code ?? '?'}) — ${msg}`);
-        if (schoolManualDisconnect){ schoolStatus = 'disconnected'; return; }
-        /* v68.3: 401 = HARD STOP + clear rescan instruction */
-        if (code === DisconnectReason.loggedOut){
-          schoolStatus = 'logged-out';
-          pushLog('error','school','401 Logged out — credentials invalid. Press "Refresh QR" on the SCHOOL card to scan again (auto-retry disabled in v68.3).');
-          return;
-        }
-        /* v68.3: exponential backoff + storm detector (was 3s*n up to 20s) */
-        const stormS = noteClose(schoolCloseTimes);
-        if (schoolReconnectAttempts < MAX_RECONNECT){
-          schoolReconnectAttempts++;
-          const delay = stormS ? RC.STORM_COOLDOWN_MS : backoffMs(schoolReconnectAttempts);
-          schoolStatus = 'reconnecting';
-          pushLog('warn','school','Retry in '+Math.round(delay/1000)+'s ['+schoolReconnectAttempts+'/'+MAX_RECONNECT+']'+(stormS ? ' (storm cooldown)' : ''));
-          setTimeout(function(){
-            try { schoolSock.end(undefined); } catch(e){}
-            schoolSock = null; connectSchoolBot();
-          }, delay);
-        } else {
-          schoolStatus = 'disconnected';
-          pushLog('error','school','Max retries — press Start on the SCHOOL card');
-        }
-      }
-    });
-
-    schoolSock.ev.on('creds.update', function(c){
-      saveCreds(c);
-      /* v69: me.lid can land after 'open' — learn it the moment it does */
-      if (!schoolLid){
-        const fresh = getSelfLid(schoolSock);
-        if (fresh){
-          schoolLid = fresh;
-          if (!adminLids.has(fresh)){ adminLids.add(fresh); saveAdminLids(); }
-          pushLog('success','school','School LID learned (creds): ' + fresh);
-        }
-      }
-    });
-    schoolSock.ev.on('messages.upsert', async function(data){
-      const messages = data.messages || [];
-      for (const msg of messages){
-        try { await handleSchoolMessage(msg); }
-        catch(e){ pushLog('error','school-handler',e.message); }
-      }
-    });
-  } catch(err){
-    schoolIsConnecting = false;
-    pushLog('error','school','Connection failed: '+err.message);
-    schoolStatus = 'error';
-  }
-}
-
-async function disconnectSchoolBot(){
-  schoolManualDisconnect = true;
-  if (schoolSock){
-    try { schoolSock.end(undefined); } catch(e){}
-    schoolSock = null;
-    schoolStatus = 'disconnected'; schoolQrDataUri = null; schoolIsConnecting = false;
-    schoolNumber = null;
-    pushLog('warn','school','School account disconnected');
-  }
-}
-function refreshSchoolQR(){
-  schoolQrDataUri = null; schoolStatus = 'disconnected'; schoolManualDisconnect = true;
-  if (schoolSock){ try { schoolSock.end(undefined); } catch(e){} schoolSock = null; }
-  schoolIsConnecting = false; schoolNumber = null; schoolReconnectAttempts = 0;
-  schoolQrCount = 0; schoolCloseTimes = [];   /* v68.3: manual action resets the cycle */
-  pushLog('info','school','Manual school QR refresh');
-  setTimeout(function(){ schoolManualDisconnect = false; connectSchoolBot(); }, 1000);
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  ADMIN LOG DIGEST (v69) — ERRORS ONLY, CAPPED, ADMIN-ONLY
- *  The old digest batched every warn+success line (25 per send,
- *  147+ queued — the boss's DM became a log firehose). Now:
- *    · only error/warn lines reach the bus (see pushLog)
- *    · max 10 lines per digest, the rest suppressed (they repeat)
- *    · at most ONE digest per 10 minutes
- *    · sent ONLY to ADMIN_JID — never to users or groups
- *  Group updates get their own 5-min flush (they are content,
- *  not error spam). ═══════════════════════════════════════════ */
 function adminAccountSock(){
-  if (schoolSock && schoolStatus === 'connected') return { S: schoolSock, account:'school' };
+  /* v92: single account — the school monitor is GONE (boss request) */
   if (sock && connectionStatus === 'connected') return { S: sock, account:'groups' };
   return { S: null, account: null };
 }
@@ -8142,13 +7526,7 @@ function startAdminLogDigest(){
     adminLogBus.length = 0;   /* v70: nothing queues up for WhatsApp — the panel is the log home */
     pushLog('info','system','WhatsApp log digest OFF — ALL logs stay on the panel (LOG_TO_ADMIN=false). No bot errors will be sent to WhatsApp.');
   }
-  /* v69: group updates flush on their own rhythm — every 5 min */
-  setInterval(async function(){
-    if (!schoolUpdatesBus.length) return;
-    const { S, account } = adminAccountSock();
-    if (!S) return;
-    try { await flushGroupUpdates(account); } catch(e){ pushLog('warn','logdigest','updates flush: ' + e.message); }
-  }, 5 * 60 * 1000).unref();
+  /* v92: school doc-digest flush is GONE with the school account. */
   pushLog('info','system','Admin log digest started (errors only, max 1 per ' + Math.max(10, ADMIN_LOG_DIGEST_MIN) + 'min, cap 10 lines)');
 }
 
@@ -8216,7 +7594,7 @@ function makeLoadtestStub(){
 /* v68.5: SCHOOL stub — the dual-account realistic sim needs BOTH accounts
  * live. The school login IS the admin's number (that's the real setup). */
 function makeSchoolLoadtestStub(){
-  if (schoolSock) return;
+  if (true) return;   /* v92: school stub removed */
   schoolSock = {
     user: { id: ADMIN_PHONE + ':1@s.whatsapp.net' },
     sendPresenceUpdate: async (state, jid)=>{ if (state === 'composing') ltRec('school','typings', jid); },

@@ -266,9 +266,8 @@ const MEDIA_MAX_BYTES    = MEDIA_MAX_MB * 1024 * 1024;
  *   picks the least-recently-sent groups on later runs).
  * MORNING_REPORT_HOUR: local hour (TZ_OFFSET_HOURS-aware) for the
  *   weather/school morning report to ADMIN_JID.                        */
-const BOT_MODE            = (process.env.BOT_MODE || process.env.MODE || 'manager').toLowerCase() === 'school' ? 'school' : 'manager';
-const SCHOOL_MODE         = BOT_MODE === 'school';
-const MORNING_REPORT_HOUR = Math.min(23, Math.max(0, parseInt(process.env.MORNING_REPORT_HOUR || '6', 10)));
+/* v92: BOT_MODE / SCHOOL_MODE / morning report — REMOVED with the
+ * school buddy. Single manager bot. */
 /* v68.5: REPLY_IN_GROUPS is retired — kept only so old .env files don't
  * crash anything. Group AI chat no longer exists at any setting. */
 const REPLY_IN_GROUPS     = false;
@@ -358,7 +357,7 @@ const DOC_MAX_BYTES       = Math.max(1, parseInt(process.env.DOC_MAX_MB || '20',
 const DOC_MAX_TEXT        = Math.max(2000, parseInt(process.env.DOC_MAX_TEXT || '120000', 10));
 const DOC_KEEP_PER_CHAT   = 4;      // most recent docs kept per chat
 const DOC_TTL_MS          = 12 * 60 * 60 * 1000; // 12h document memory
-const STUDY_BUDDY_ENABLED = (process.env.STUDY_BUDDY || 'false') === 'true';   /* v70: default OFF — auto AI replies interfered with admin commands; "ask <question>" still works, or set STUDY_BUDDY=true */
+/* v92: STUDY_BUDDY removed with the school buddy */
 
 /* ─── v70: DM PERSONA — env-overridable ───
  * The DM persona is a real-seeming Harare girl (see aiPersonaSys below).
@@ -739,7 +738,6 @@ const lastGreetingPhrase = new Map(); // jid -> last greeting phrase sent (dedup
 const lastBotSendAt = new Map();      // jid -> ts of last bot message in that group
 const broadcastLastAt = new Map();    // jid -> ts of last broadcast received
 let lastProbeDate = null;             // main-group probe: once per day
-let morningReportSentDate = null;     // morning report: once per day
 /* v68.5: AI conversation is DM-ONLY — permanently, no toggle.
  * In groups people greet each other and talk all day; an AI jumping in
  * has no idea what the conversation is about. Group media requests
@@ -2079,7 +2077,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   /* v67: main-group lock for conversational group sends. Broadcasts,
    * admin !send and media pushes to other groups stay allowed. */
   if (taskType === 'group' && typeof jid === 'string' && jid.endsWith('@g.us')
-      && mainGroupJid && jid !== mainGroupJid && !SCHOOL_MODE){
+      && mainGroupJid && jid !== mainGroupJid){
     pushLog('warn','guard','Blocked conversational send to non-main group ' + (getGroupName(jid) || jid));
     return Promise.reject(new Error('Not the main group'));
   }
@@ -2291,56 +2289,6 @@ async function flushGroupUpdates(account){
  *  admin ONLY the items that need action (or nothing at all).
  *  The AI is forbidden from inventing facts; what it can't verify
  *  from the messages, it must not say. ═══════════════════════ */
-const schoolObserveBuffer = [];
-const SCHOOL_OBSERVE_WINDOW_MS = Math.max(30, parseInt(process.env.SCHOOL_OBSERVE_WINDOW_SEC || '120', 10)) * 1000;
-let schoolObserveTimer = null;
-const SCHOOL_OBSERVE_SYS = 'You triage WhatsApp group messages for a busy student. ' +
-  'From the batch below, list ONLY items that need the student to ACT: deadlines, tests/exams, cancelled or moved lectures, venue changes, assignments, direct questions addressed to them, requests from lecturers/admins. ' +
-  'Drop greetings, memes, chatter and replies to other people. If NOTHING needs action reply exactly: NONE. ' +
-  'Max 6 bullets, one line each, keep the original wording and details. NEVER invent, complete or assume facts — if a message is unclear, quote it as unclear. No commentary.';
-function schoolObservePushUNUSED(groupName, text){
-  schoolObserveBuffer.push({ ts: Date.now(), group: String(groupName || '?'), text: String(text || '').replace(/\s+/g, ' ').slice(0, 300) });
-  if (schoolObserveBuffer.length > 80) schoolObserveBuffer.shift();
-  if (!schoolObserveTimer){
-    schoolObserveTimer = setTimeout(function(){ flushSchoolObserve().catch(function(){}); }, SCHOOL_OBSERVE_WINDOW_MS);
-  }
-}
-async function flushSchoolObserve(){
-  schoolObserveTimer = null;
-  if (!schoolObserveBuffer.length) return;
-  if (LOADTEST) { schoolObserveBuffer.length = 0; return; }
-  return;   /* v92: school observe digest removed */
-  const batch = schoolObserveBuffer.splice(0, 30);
-  const lines = batch.map(b => '[' + b.group + '] ' + b.text);
-  const r = await askAI('Group messages (oldest first):\n' + lines.join('\n'), SCHOOL_OBSERVE_SYS);
-  if (!r){ pushLog('warn','observe', batch.length + ' group msgs buffered but AI is down — dropped (panel still has them)'); return; }
-  const clean = informalize(r).trim();
-  if (!clean || /^none\b/i.test(clean)){
-    pushLog('info','observe', batch.length + ' group msgs triaged — nothing needs action');
-    return;
-  }
-  await schoolReply(ADMIN_JID, '👁️ From your groups (' + batch.length + ' msgs scanned):\n' + clean.slice(0, 1200));
-  pushLog('success','observe','Actionable group items sent to admin (' + batch.length + ' msgs scanned)');
-}
-
-/* ── Document reading: PDF / DOCX / TXT / CSV / MD ── */
-const DOC_OK_EXTS = ['pdf','docx','txt','csv','md'];
-async function readDocumentBuffer(buffer, name){
-  const ext = (String(name||'').split('.').pop() || '').toLowerCase();
-  if (ext === 'pdf'){
-    if (!pdfParse) return { ok:false, error:'pdf-parse not installed' };
-    const d = await pdfParse(buffer);
-    return { ok:true, text:String(d.text||''), pages:d.numpages };
-  }
-  if (ext === 'docx'){
-    if (!mammoth) return { ok:false, error:'mammoth not installed' };
-    const d = await mammoth.extractRawText({ buffer });
-    return { ok:true, text:String(d.value||'') };
-  }
-  /* .doc (old binary Word) has no pure-JS reader — say so honestly */
-  if (ext === 'doc') return { ok:false, error:'old .doc format — send as .docx or .pdf' };
-  return { ok:true, text: buffer.toString('utf8').replace(/[^\x09\x0A\x0D\x20-\x7E\u00A0-\u024F\u1E00-\u1EFF]/g, ' ') };
-}
 /* Downloads + extracts + remembers a document message.
  * account: 'groups' | 'school'.  Returns { name, chars, text } or null. */
 async function handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdmin, account){
@@ -2350,10 +2298,8 @@ async function handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdm
   const ext  = (name.split('.').pop() || '').toLowerCase();
   const size = Number(dm.fileLength || 0);
   /* replies about docs go out through the SAME account that received them */
-  const docReply = (t) => (account === 'school'
-    ? schoolReply(chatJid, t)
-    : sendBuffer(chatJid, { text: t }, 0, 'fast', 'admin', false).catch(() => {}));
-  const groupName = account === 'school' ? (getSchoolGroupName(chatJid) || chatJid) : (getGroupName(chatJid) || chatJid);
+  const docReply = (t) => sendBuffer(chatJid, { text: t }, 0, 'fast', 'admin', false).catch(() => {});
+  const groupName = getGroupName(chatJid) || chatJid;
   if (!DOC_OK_EXTS.includes(ext)){
     pushLog('info','docs','Skipped .' + ext + ' (' + name + ') — unsupported format');
     if (isAdmin && !isGroup) await docReply('📄 I can read PDF, DOCX, TXT, CSV and MD. "' + name + '" is .' + ext + ' — send it as PDF or DOCX.');
@@ -2383,15 +2329,10 @@ async function handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdm
     resetDailyStats(); dailyStats.docsRead++;
     pushLog('success','docs','Read "' + name + '" (' + text.length + ' chars' + (r.pages ? ', ' + r.pages + 'p' : '') + ') from ' + (isGroup ? groupName : 'DM') + ' [' + account + ']');
 
-    /* ASSIGNMENTS GO TO THE ADMIN, NEVER TO ANY GROUP.
-     * Digest fires for: school-account docs (any chat) and MAIN-group
-     * docs on the groups account. Other groups: silent cache only —
-     * strangers' documents must not spam the admin. */
-    if (account === 'school' || (isGroup && chatJid === mainGroupJid)){
-      const found = await extractAssignments(text);
-      await deliverDocDigestToAdmin(name, groupName, found, account);
-    } else if (isAdmin && !isGroup){
-      await docReply('📄 Read "' + name + '" (' + text.length + ' chars). Ask me anything about it — or "study from it".');
+    /* v92: the school-doc assignment digest is GONE with the school
+     * buddy — the doc stays in chat memory for admin DM questions. */
+    if (isAdmin && !isGroup){
+      await docReply('📄 Read "' + name + '" (' + text.length + ' chars). Ask me anything about it.');
     }
     return { name, chars: text.length, text };
   } catch(e){
@@ -2399,113 +2340,6 @@ async function handleIncomingDocument(msg, m, chatJid, senderJid, isGroup, isAdm
     return null;
   }
 }
-/* Extraction: AI-first (precise), keyword fallback (always works) */
-async function extractAssignments(text){
-  const viaAI = await extractAssignmentsAI(text);
-  if (viaAI && viaAI.length) return viaAI;
-  return extractAssignmentsHeuristic(text);
-}
-async function extractAssignmentsAI(text){
-  if (!activeProvider) return null;
-  try {
-    const sys = 'Extract assignments, tests, exams and deadlines from school documents. Reply ONLY a JSON array like [{"module":"","type":"assignment|test|exam|presentation|quiz","title":"","due":"YYYY-MM-DD or unknown"}]. Maximum 15 items. No prose, no markdown.';
-    const r = await askAI(String(text||'').slice(0, 8000), sys);
-    if (!r) return null;
-    const m = r.match(/\[[\s\S]*\]/);
-    if (!m) return null;
-    const arr = JSON.parse(m[0]);
-    if (!Array.isArray(arr) || !arr.length) return null;
-    return arr.slice(0, 15).map(a => ({
-      module: String(a.module || '').slice(0, 24),
-      type: String(a.type || 'assignment').slice(0, 24),
-      title: String(a.title || 'Untitled').slice(0, 160),
-      due: String(a.due || 'unknown').slice(0, 24)
-    }));
-  } catch(e){ return null; }
-}
-function extractAssignmentsHeuristic(text){
-  const out = [];
-  const lines = String(text||'').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const DATE = /(\d{1,2})[\/\-.](\d{1,2})(?:[\/\-.](\d{2,4}))?/;
-  const DUEW = /\b(due|deadline|submit|submission|hand[ -]?in|closing)\b/i;
-  const KIND = /\b(assignment|task|essay|practical|report|presentation|quiz|test|exam)\b/i;
-  for (let i = 0; i < lines.length && out.length < 12; i++){
-    const l = lines[i];
-    if (!KIND.test(l) || l.length < 12 || l.length > 220) continue;
-    let due = '';
-    for (let j = i; j < Math.min(i + 3, lines.length); j++){
-      const dm = lines[j].match(DATE);
-      if (dm && DUEW.test(lines[j])){
-        const dd = dm[1].padStart(2,'0'), mm = dm[2].padStart(2,'0');
-        const yy = dm[3] ? (dm[3].length === 2 ? '20' + dm[3] : dm[3]) : String(new Date().getFullYear());
-        due = yy + '-' + mm + '-' + dd;
-        break;
-      }
-    }
-    out.push({ module:'', type:(l.match(KIND)||['assignment'])[0].toLowerCase(), title:l.slice(0,160), due: due || 'unknown' });
-  }
-  return out;
-}
-async function deliverDocDigestToAdmin(name, groupName, found, account){
-  try {
-    let text = '📄 Document read: ' + name + '\n🏫 From: ' + (groupName || 'DM') + ' [' + (account||'groups') + ' account]';
-    if (found && found.length){
-      text += '\n\n📌 Deadlines / assignments detected:\n' + found.map((a,i) =>
-        (i+1) + '. ' + (a.module ? '[' + a.module + '] ' : '') + a.title + (a.due && a.due !== 'unknown' ? ' — due ' + a.due : '')
-      ).join('\n');
-      text += '\n\nAdd to my timetable with !addassignment, or say "study plan".';
-    } else {
-      text += '\nNo assignment/deadline lines detected in it.';
-    }
-    text += '\n(Group stays silent — this went to you only.)';
-    await sendBuffer(ADMIN_JID, { text: text.slice(0, 3000) }, 1, 'fast', 'admin', false, { account: account === 'school' ? 'school' : undefined });
-  } catch(e){ pushLog('warn','docs','digest: ' + e.message); }
-}
-
-/* ── STUDY BUDDY ── */
-const STUDY_BUDDY_SYS = 'You are the admin\u2019s study buddy for Bindura University of Science Education (BUSE), Zimbabwe. ' +
-  'You give SPECIFIC, ordered, doable study guidance: what to study first and why, where to start (chapter/topic/source), how long to spend, and a quick self-check task. ' +
-  'Use the timetable, deadlines and documents provided as context. Keep it tight (max ~12 short lines), warm, practical. No AI disclaimers, no role-play fluff. ' +
-  /* v69 ANTI-HALLUCINATION GROUNDING — the boss caught the AI inventing a
-   * whole CS201 exam plan out of the word "menu". Hard rule now: */
-  'STRICT GROUNDING: never invent or guess exam names, module codes, dates, deadlines, chapter numbers, venues or marks. ' +
-  'Use ONLY the timetable, deadline list and documents provided in the context; if the information is not there, say exactly what is missing and ask for it (e.g. send the module outline or add the deadline with !addassignment). ' +
-  'Generic study advice (order, technique, time-boxing) is fine; fabricated specifics are NOT.';
-function buildStudyContext(){
-  const d = localNow();
-  const dayIdx = d.getUTCDay();
-  const parts = [];
-  const lects = lecturesForDay(dayIdx);
-  if (lects.length){
-    parts.push('Today\u2019s lectures: ' + lects.map(l => l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : '')).join('; ') + '.');
-  }
-  const work = upcomingWork(14);
-  if (work.length){
-    parts.push('Deadlines: ' + work.slice(0, 6).map(w => '[' + (w.dueIn < 0 ? 'OVERDUE' : w.dueIn + 'd left') + '] ' + (w.module||'') + ' ' + w.title).join('; ') + '.');
-  }
-  return parts.join(' ');
-}
-async function studyAnswer(topic, chatJid){
-  const docs = listRecentDocs(chatJid);
-  const lastDoc = (docTextCache.get(chatJid) || []).slice(-1)[0];
-  let ctx = buildStudyContext();
-  if (lastDoc) ctx += ' Recent document in this chat: "' + lastDoc.name + '" (' + lastDoc.chars + ' chars) — excerpt follows on the next line.\n' + lastDoc.text.slice(0, 4000);
-  const q = topic
-    ? ('Make me a focused study plan for: ' + topic + '. ' + ctx)
-    : ('What should I study next and in what exact order? Be specific. ' + ctx);
-  return askAI(q, STUDY_BUDDY_SYS);
-}
-async function studyBuddyChat(chatJid, text){
-  const r = await studyAnswer('', chatJid);
-  const raw = r
-    ? informalize(r)
-    : 'AI is not answering right now — give me a minute and ask again.';
-  /* v87: the sis answers in the contact's language (auto-translate layer) */
-  const replyText = await replyInLang(chatJid, getChatLang(chatJid), raw);
-  await schoolReply(chatJid, replyText);
-  return replyText;
-}
-
 /* ── PDF CREATION — zero-dependency, hand-rolled PDF writer ──
  * WHY: pdfkit 0.15's xref table is rejected by pdf-parse (pdf.js 1.10)
  * with "bad XRef entry" — proven by the round-trip test. A spec-perfect
@@ -4052,7 +3886,6 @@ function scheduleGreetings(){
     if (!sock || connectionStatus!=='connected' || !mainGroupJid || botPaused) return;
     if (Date.now() < botOfflineUntil) return;
     if (isAdminActive()) return;
-    if (SCHOOL_MODE) return; // school monitor never posts greetings
     if (GREETINGS_PER_DAY <= 0) return;
     const today = new Date().toISOString().slice(0,10);
     if (greetingsDay !== today){ greetingsDay = today; greetingsToday = 0; }
@@ -4746,106 +4579,6 @@ function weatherLine(w){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SCHOOL DATA (v66) — lectures / assignments / presentations
- *  Source of truth: school_data.json (editable) + !add* commands.
- * ══════════════════════════════════════════════════════════════ */
-let schoolData = { lectures: [], assignments: [] };
-function loadSchoolData(){
-  try {
-    if (fs.existsSync(SCHOOL_DATA_FILE)){
-      const d = JSON.parse(fs.readFileSync(SCHOOL_DATA_FILE,'utf8'));
-      schoolData = { lectures: Array.isArray(d.lectures) ? d.lectures : [], assignments: Array.isArray(d.assignments) ? d.assignments : [] };
-    }
-  } catch(e){ pushLog('warn','school','school_data.json load failed: '+e.message); }
-}
-function saveSchoolData(){
-  try { fs.writeFileSync(SCHOOL_DATA_FILE, JSON.stringify(schoolData,null,2)); } catch(e){}
-}
-const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-function dayIndexFromName(name){
-  const n = String(name||'').toLowerCase().slice(0,3);
-  const i = ['sun','mon','tue','wed','thu','fri','sat'].indexOf(n);
-  return i;
-}
-function localNow(){ return new Date(Date.now() + TZ_OFFSET_HOURS * 3600000); }
-function lecturesForDay(dayIdx){
-  return schoolData.lectures
-    .filter(function(l){ return Number(l.day) === dayIdx; })
-    .sort(function(a,b){ return String(a.start||'').localeCompare(String(b.start||'')); });
-}
-function upcomingWork(days){
-  const now = Date.now(); const out = [];
-  for (const a of schoolData.assignments){
-    const due = new Date(String(a.due) + 'T23:59:59Z').getTime();
-    if (isNaN(due)) continue;
-    const dLeft = Math.ceil((due - now) / 86400000);
-    if (dLeft <= days) out.push(Object.assign({}, a, { dueIn: dLeft }));
-  }
-  return out.sort(function(a,b){ return a.dueIn - b.dueIn; });
-}
-async function buildMorningReport(){
-  const d = localNow();
-  const dayIdx = d.getUTCDay();
-  const lines = [];
-  lines.push('☀️ Morning report — ' + DAY_NAMES[dayIdx] + ' ' + d.getUTCDate() + '/' + (d.getUTCMonth()+1) + '/' + d.getUTCFullYear());
-  lines.push('');
-  try {
-    for (const loc of WEATHER_LOCATIONS){ lines.push(weatherLine(await getWeather(loc.key))); }
-  } catch(e){ lines.push('Weather: unavailable (' + e.message + ')'); }
-  lines.push('');
-  const lects = lecturesForDay(dayIdx);
-  if (lects.length){
-    lines.push('📚 Lectures today:');
-    for (const l of lects) lines.push('• ' + l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : ''));
-  } else {
-    lines.push('📚 No lectures scheduled today.');
-  }
-  const work = upcomingWork(7);
-  if (work.length){
-    lines.push('');
-    lines.push('📝 Due within 7 days:');
-    for (const w of work){
-      const tag = w.dueIn < 0 ? 'OVERDUE' : (w.dueIn === 0 ? 'TODAY' : w.dueIn + 'd');
-      lines.push('• [' + tag + '] ' + (w.type || 'assignment') + ': ' + w.title + ' (' + w.module + ') — due ' + w.due);
-    }
-  } else {
-    lines.push('');
-    lines.push('📝 Nothing due in the next 7 days.');
-  }
-  /* v68: study buddy — what to attack first, in order */
-  const prio = upcomingWork(14).filter(w => w.dueIn >= 0).slice(0, 3);
-  if (prio.length){
-    lines.push('');
-    lines.push('🧠 Study first (my order):');
-    prio.forEach((w, i) => lines.push((i+1) + '. ' + (w.module || '') + ' ' + w.title + ' (' + (w.dueIn === 0 ? 'due TODAY' : w.dueIn + 'd left') + ')'));
-  }
-  if (SCHOOL_MODE){
-    lines.push('');
-    lines.push('👥 Monitoring ' + groupRegistry.size + ' groups · ' + activeDMs.size + ' DM contacts · msgs today: ' + ((dailyStats && dailyStats.messagesDropped !== undefined) ? dailyStats.readsSent : 0) + ' read');
-  }
-  return lines.join('\n');
-}
-function scheduleMorningReport(){
-  setInterval(async function(){
-    try {
-      /* v67: the SCHOOL account (second QR) sends the morning report when
-       * it is connected — it is the admin's school line. Falls back to
-       * the groups account. */
-      const useS = schoolSock && schoolStatus === 'connected';
-      const S = useS ? schoolSock : sock;
-      if (!S || (useS ? schoolStatus : connectionStatus) !== 'connected') return;
-      const today = localNow().toISOString().slice(0,10);
-      if (localHour() !== MORNING_REPORT_HOUR || morningReportSentDate === today) return;
-      morningReportSentDate = today;
-      const report = await buildMorningReport();
-      await S.sendMessage(ADMIN_JID, { text: report });
-      pushLog('success','school','Morning report sent to admin via ' + (useS ? 'school' : 'groups') + ' account');
-    } catch(e){ pushLog('error','school','morning report: '+e.message); }
-  }, 60000);
-  pushLog('info','system','scheduleMorningReport started (' + MORNING_REPORT_HOUR + ':00 local, Open-Meteo)');
-}
-
-/* ══════════════════════════════════════════════════════════════
  *  SELF-MONITOR (v66) — health checks + error prediction
  * ══════════════════════════════════════════════════════════════ */
 function startSelfMonitor(){
@@ -4938,7 +4671,7 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v82.0.0 — Admin (mode: ${BOT_MODE.toUpperCase()})
+const COMMAND_LIST = `BreadBot v92 — Admin (manager — school buddy removed)
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -5261,27 +4994,6 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         await reply('🐦 Sample caption: ' + caption);
       } else {
         await reply('🐦 Twitter commands:\n!tw on|off|status|login|post|nsfw|replies|queue|detect\n!tw tweet <message>\n!tw reply <tweetUrl> <message>\n!tw follow <username>\n!tw autoreply (toggle on/off)\n!tw caption [type] [query] (sample)');
-      }
-      break;
-    }
-    case 'tt': case 'tiktok': {
-      const ttAction = (args[1] || 'status').toLowerCase();
-      if (['on','off','status','login'].includes(ttAction)) {
-        await reply(await multiPlatform.handleCommand('tiktok', ttAction, args.slice(2)));
-      } else if (ttAction === 'follow' && args[2]) {
-        const tt = multiPlatform.getPlatform('tiktok');
-        if (!tt || !tt.loggedIn) { await reply('🎵 Login first: !tt login'); break; }
-        await reply('🎵 Following @' + args[2] + '...');
-        const r = await tt.follow(args[2]);
-        await reply(r.success ? '🎵 Followed!' : '🎵 Failed: ' + r.error);
-      } else if (ttAction === 'comment' && args[2] && args[3]) {
-        const tt = multiPlatform.getPlatform('tiktok');
-        if (!tt || !tt.loggedIn) { await reply('🎵 Login first: !tt login'); break; }
-        await reply('🎵 Commenting...');
-        const r = await tt.comment(args[2], args.slice(3).join(' '));
-        await reply(r.success ? '🎵 Commented!' : '🎵 Failed: ' + r.error);
-      } else {
-        await reply('🎵 TikTok commands:\n!tt on|off|status|login\n!tt follow <username>\n!tt comment <videoUrl> <message>');
       }
       break;
     }
@@ -6094,13 +5806,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     /* ═══ v66 new commands ═══ */
     case 'mode': {
       await reply([
-        'Mode: ' + BOT_MODE.toUpperCase(),
-        SCHOOL_MODE ? 'School: read-only monitor + morning report' : 'Manager: full group management',
+        'Mode: MANAGER (full group management — school buddy removed v92)',
         'AI surface: DMs only (groups account) · memory: last 5 msgs · greeting = restart',
         'Broadcast cap: ' + BROADCAST_BATCH_MAX + '/run',
         'Join queue: ' + joinQueue.length + '/' + JOIN_QUEUE_MAX,
         'AI chain: ' + (AI_PROVIDERS.map(function(p){ return p.name; }).join(' → ') || 'none') + ' (active: ' + (activeProvider||'NONE') + ')',
-        'Morning report: ' + MORNING_REPORT_HOUR + ':00 local'
       ].join('\n'));
       break;
     }
@@ -6129,49 +5839,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     }
     /* ═══ v68: BUTTONS + STUDY BUDDY + DOCS + PDF ═══ */
     case 'menu': case 'buttons': {
-      await sendButtons(chatJid, opts.account === 'school' ? 'school' : 'main', { account: opts.account });
-      break;
-    }
-    case 'study': {
-      const topic = args.slice(1).join(' ').trim();
-      await reply('📚 Working out what to study' + (topic ? ' for "' + topic + '"' : ' next') + '...');
-      const r = await studyAnswer(topic, chatJid);
-      await reply(r ? informalize(r) : 'AI is quiet right now — try again in a minute.');
-      break;
-    }
-    case 'deadlines': {
-      const work = upcomingWork(60);
-      if (!work.length){ await reply('Nothing on the deadline list. Add one: !addassignment <YYYY-MM-DD> <module> <type> <title>'); break; }
-      await reply('📌 Your deadlines:\n' + work.map(w =>
-        '• [' + (w.dueIn < 0 ? 'OVERDUE' : w.dueIn + 'd') + '] ' + (w.module||'') + ' ' + w.title + ' — due ' + w.due
-      ).join('\n'));
-      break;
-    }
-    case 'pdf': {
-      const topic = args.slice(1).join(' ').trim();
-      const lastDoc = (docTextCache.get(chatJid) || []).slice(-1)[0];
-      if (!topic){
-        await reply('Usage: !pdf <topic> — I write study notes and send a real PDF.\ne.g. !pdf osmosis and diffusion' +
-          (lastDoc ? '\nOr: !pdf from ' + lastDoc.name + ' (I still remember it)' : ''));
-        break;
-      }
-      await reply('✍️ Writing "' + topic + '" as a PDF...');
-      let body;
-      if (lastDoc && /^from\b/i.test(topic)){
-        body = await askAI('Turn this document into compact study notes. Keep the key facts, definitions, dates and formulas. Short sections, bullets, end with a 5-point summary.\n\nDocument "' + lastDoc.name + '":\n' + lastDoc.text.slice(0, 9000), STUDY_BUDDY_SYS);
-      } else {
-        body = await askAI('Write compact study notes about: ' + topic + '. Short headed sections, bullet points, definitions, end with a 5-point "Remember this" summary. Plain text only.', STUDY_BUDDY_SYS);
-      }
-      if (!body){ await reply('AI is quiet right now — try again in a minute.'); break; }
-      try {
-        const buf = await makePdf('Study Notes — ' + topic, body);
-        await sendBuffer(chatJid, {
-          document: buf, mimetype: 'application/pdf',
-          fileName: ('study-' + topic).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,48) + '.pdf'
-        }, 1, 'fast', 'admin', false, { account: opts.account === 'school' ? 'school' : undefined });
-        resetDailyStats(); dailyStats.pdfsMade++;
-        pushLog('success','pdf','Study PDF sent: ' + topic + ' (' + Math.round(buf.length/1024) + 'KB) via ' + (opts.account||'groups'));
-      } catch(e){ await reply('PDF failed: ' + e.message); }
+      await sendButtons(chatJid, 'main');
       break;
     }
     case 'docs': {
@@ -6192,44 +5860,6 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply(n ? 'Sent ' + n + ' update(s) above ⬆️' + (schoolUpdatesBus.length ? ' — ' + schoolUpdatesBus.length + ' more still queued.' : '.') : 'No pending group updates.');
       break;
     }
-    case 'schoolgroups':
-    case 'schoolgroup': {
-      /* v74.1: teach the bot WHICH groups are school groups */
-      const sub = (args[1] || '').toLowerCase();
-      if (sub === 'add' || sub === 'del' || sub === 'remove'){
-        const jid = resolveSchoolGroupTarget(args.slice(2).join(' '));
-        if (!jid){ await reply('Which group? Give a name piece (!schoolgroup add botany) or the raw jid.'); break; }
-
-        await reply((sub === 'add' ? '✅ Pinned as SCHOOL group: ' : '🔇 Muted — no longer school: ')
-          + (schoolRegistry.get(jid) || (typeof getGroupName === 'function' ? (getGroupName(jid) || '') : '') || jid));
-        break;
-      }
-      if (sub === 'auto'){
-        schoolGroupCfg.auto = !['off','false','0'].includes((args[2] || '').toLowerCase());
-
-        await reply('Name auto-detect is now ' + (schoolGroupCfg.auto
-          ? 'ON — school-looking group names are triaged automatically'
-          : 'OFF — only pinned groups (!schoolgroup add) are triaged'));
-        break;
-      }
-      {
-        const rows = []; const seen = new Set(); let active = 0;
-        const pushRow = (jid, name) => {
-          if (seen.has(jid)) return; seen.add(jid);
-          const is = isSchoolGroup(jid); if (is) active++;
-          rows.push((is ? '✅' : '➖') + ' ' + (name || jid)
-            + (schoolGroupCfg.manual.indexOf(jid) >= 0 ? ' (pinned)' : '')
-            + (schoolGroupCfg.removed.indexOf(jid) >= 0 ? ' (muted)' : ''));
-        };
-        for (const [jid, name] of schoolRegistry) pushRow(jid, name);
-        try { if (typeof joinedGroups === 'object' && joinedGroups) joinedGroups.forEach((v, jid) => pushRow(jid, v && v.name)); } catch(e){}
-        await reply('🏫 School groups: ' + active + ' active of ' + rows.length + ' seen'
-          + (schoolGroupCfg.auto ? ' · auto-detect ON' : ' · auto-detect OFF') + '\n'
-          + (rows.slice(0, 25).join('\n') || '(no groups seen yet)')
-          + '\n\n!schoolgroup add|del <name piece> · !schoolgroup auto on|off');
-      }
-      break;
-    }
     case 'adstatus': {
       const lastAd = replyCache.get('LAST_AD');
       await reply(lastAd ? ('Last ad written:\n\n' + String(lastAd).slice(0, 600)) : 'No ad written yet — use !ad <product> | <details>');
@@ -6248,81 +5878,6 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       } catch(e){ await reply('Weather failed: ' + e.message); }
       break;
     }
-    case 'today': {
-      await reply(await buildMorningReport());
-      break;
-    }
-    case 'week': {
-      const lines = ['📅 This week'];
-      for (let d = 1; d <= 5; d++){
-        const lects = lecturesForDay(d);
-        lines.push('');
-        lines.push(DAY_NAMES[d] + ':' + (lects.length ? '' : ' —'));
-        for (const l of lects) lines.push('• ' + l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : ''));
-      }
-      const work = upcomingWork(14);
-      if (work.length){
-        lines.push(''); lines.push('📝 Due in the next 14 days:');
-        for (const w of work) lines.push('• [' + (w.dueIn < 0 ? 'OVERDUE' : w.dueIn + 'd') + '] ' + (w.type||'assignment') + ': ' + w.title + ' (' + w.module + ')');
-      }
-      await reply(lines.join('\n'));
-      break;
-    }
-    case 'timetable': {
-      const lines = ['🗓 Timetable (' + schoolData.lectures.length + ' lectures)'];
-      for (let d = 0; d < 7; d++){
-        const lects = lecturesForDay(d);
-        if (!lects.length) continue;
-        lines.push(''); lines.push(DAY_NAMES[d] + ':');
-        lects.forEach(function(l, i){ lines.push((i+1) + '. ' + l.start + '-' + l.end + ' ' + l.name + (l.venue ? ' @ ' + l.venue : '')); });
-      }
-      await reply(lines.join('\n') + '\n\nDelete: !dellecture <n>');
-      break;
-    }
-    case 'addlecture': {
-      // !addlecture monday 08:00 10:00 Data Structures | Block A
-      const dayIdx = dayIndexFromName(args[1]);
-      const start = args[2], end = args[3];
-      const rest = args.slice(4).join(' ');
-      if (dayIdx == null || !start || !end || !rest){ await reply('Usage: !addlecture <day> <HH:MM> <HH:MM> <name> | <venue>\ne.g. !addlecture monday 0800 1000 Data Structures | Block A'); break; }
-      const bits = rest.split('|').map(function(s){ return s.trim(); });
-      schoolData.lectures.push({ day: dayIdx, start: start, end: end, name: bits[0], venue: bits[1] || '' });
-      saveSchoolData();
-      await reply('Added: ' + DAY_NAMES[dayIdx] + ' ' + start + '-' + end + ' ' + bits[0] + (bits[1] ? ' @ ' + bits[1] : ''));
-      break;
-    }
-    case 'dellecture': {
-      const allLects = schoolData.lectures;
-      const n = parseInt(args[1],10);
-      if (!n || n < 1 || n > allLects.length){ await reply('Usage: !dellecture <n> — check numbering in !timetable per day'); break; }
-      // numbering is per-day as printed by !timetable: rebuild flat list per day
-      const removed = allLects.splice(n-1, 1)[0];
-      saveSchoolData();
-      await reply('Removed: ' + DAY_NAMES[removed.day] + ' ' + removed.start + '-' + removed.end + ' ' + removed.name);
-      break;
-    }
-    case 'addassignment': {
-      // !addassignment 2026-09-30 CS201 assignment Chapter 4 exercises
-      const due = args[1], mod = args[2], type = (args[3]||'assignment').toLowerCase();
-      const title = args.slice(4).join(' ') || 'Untitled';
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(due||'') || !mod){ await reply('Usage: !addassignment <YYYY-MM-DD> <module> <assignment|presentation|test|quiz> <title>'); break; }
-      schoolData.assignments.push({ due, module: mod.toUpperCase(), type, title });
-      schoolData.assignments.sort(function(a,b){ return String(a.due).localeCompare(String(b.due)); });
-      saveSchoolData();
-      await reply('Added: [' + type + '] ' + title + ' (' + mod.toUpperCase() + ') due ' + due);
-      break;
-    }
-    case 'delassignment': {
-      const n = parseInt(args[1],10);
-      const work = upcomingWork(365);
-      if (!n || n < 1 || n > work.length){ await reply('Usage: !delassignment <n> — numbering from !week list'); break; }
-      const target = work[n-1];
-      const idx = schoolData.assignments.findIndex(function(a){ return a.due === target.due && a.module === target.module && a.title === target.title; });
-      if (idx >= 0){ schoolData.assignments.splice(idx, 1); saveSchoolData(); await reply('Removed: ' + target.title); }
-      else await reply('Not found.');
-      break;
-    }
-    /* ═══ v87 ACCESS CONTROL COMMANDS ═══════════════════════════ */
     case 'allow': {
       /* !allow +27614159817 — add a number to the DM whitelist */
       if (!args[1]){ await reply('Usage: !allow <number>\ne.g. !allow +27614159817'); break; }
@@ -6869,8 +6424,7 @@ async function handleMessage(msg){
         if (dec && dec.action === 'chat'){
           /* v70 rule stands: the AI never ambushes the boss — persona
            * chat only when STUDY_BUDDY=true, otherwise silence. */
-          if (STUDY_BUDDY_ENABLED){ await adminDmChat(chatJid, text); return; }
-          pushLog('info','brain','admin chat → silence (STUDY_BUDDY=false)');
+          pushLog('info','brain','admin chat → silence (study buddy removed v92)');
           return;
         }
         /* ignore / no decision → fall through to the v70 silence */
@@ -6882,7 +6436,7 @@ async function handleMessage(msg){
    * any chat" behavior would pull the bot into random open groups,
    * exactly what the whitelist is here to prevent. The boss shares a
    * link → the bot joins; anyone else's link is just text. ═══ */
-  if (text && !SCHOOL_MODE && isAdmin){
+  if (text && isAdmin){
     const codes = extractInviteCodes(text);
     if (codes.length){
       let added = 0;
@@ -6965,8 +6519,7 @@ async function handleMessage(msg){
    * old always-on admin chat if ever wanted. */
   if (!isGroup && isAdmin && text && mediaType === 'text' && !text.startsWith('!')
       && !botPaused && Date.now() >= botOfflineUntil){
-    if (STUDY_BUDDY_ENABLED){ await adminDmChat(chatJid, text); return; }
-    pushLog('info','admin','Admin plain DM — AI stays silent (commands only). STUDY_BUDDY=true re-enables admin AI chat.');
+    pushLog('info','admin','Admin plain DM — AI stays silent (commands only).');
     return;
   }
 
@@ -9465,16 +9018,6 @@ app.get('/admin/pair-status', function(req,res){
   res.json({ ok:true, pendingPhone: pendingPairPhone, lastPairCode, status: connectionStatus, registered: !!(sock && sock.authState?.creds?.registered) });
 });
 /* v67: SCHOOL account QR + control (second WhatsApp, same process) */
-app.get('/admin/qr-school', async function(req,res){
-  if (!schoolQrDataUri) return res.status(404).json({ error:'No QR' });
-  const b64 = schoolQrDataUri.replace(/^data:image\/\w+;base64,/,'');
-  res.writeHead(200, { 'Content-Type':'image/png' });
-  res.end(Buffer.from(b64, 'base64'));
-});
-app.get('/admin/qr-school-data', function(req,res){ res.json({ qr: schoolQrDataUri, status: schoolStatus, botNumber: schoolNumber }); });
-app.post('/admin/connect-school', function(req,res){ if (!schoolSock) connectSchoolBot(); res.json({ ok:true }); });
-app.post('/admin/disconnect-school', async function(req,res){ await disconnectSchoolBot(); res.json({ ok:true }); });
-app.post('/admin/refresh-qr-school', function(req,res){ refreshSchoolQR(); res.json({ ok:true }); });
 app.post('/admin/clear-session-school', function(req,res){ try { fs.rmSync(SCHOOL_AUTH_FOLDER, { recursive:true, force:true }); } catch(e){} res.json({ ok:true }); });
 /* ═══ v70 SESSION BACKUP endpoints ═══ */
 app.get('/admin/session-backup', function(req,res){
@@ -9491,8 +9034,8 @@ app.post('/admin/session-restore', async function(req,res){
   if (!restoreSessionBlob(folder, blob)) return res.json({ ok:false, error:'Invalid blob — it must contain creds.json (copy it again from the panel\'s Session Backup card).' });
   pushLog('success','session', slot + ': session restored via panel — reconnecting without QR…');
   try {
-    if (slot === 'school'){ await disconnectSchoolBot(); setTimeout(function(){ connectSchoolBot().catch(function(){}); }, 1500); }
-    else { await disconnectBot(); manualDisconnect = false; setTimeout(function(){ connectBot().catch(function(){}); }, 1500); }
+    await disconnectBot(); manualDisconnect = false;
+    setTimeout(function(){ connectBot().catch(function(){}); }, 1500);
   } catch(e){}
   res.json({ ok:true, note:'restored — ' + slot + ' account reconnecting without QR' });
 });
@@ -10806,7 +10349,6 @@ loadLearningData();
 loadPolicy();
 loadGroupRegistry();   /* v66 */
 loadDmHistories();     /* v66 */
-loadSchoolData();      /* v66 */
 
 const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);
@@ -10842,7 +10384,6 @@ const HTTP_SERVER = app.listen(PORT, async function(){
    * "AI: NONE" even with working keys. Detection is account-independent. */
   detectAIBackend().catch(function(){});
 
-  scheduleMorningReport();  /* v66: weather + lectures + due dates */
   if (SCHOOL_MODE){
     pushLog('info','system','SCHOOL MODE — greetings / joins / DM-AI / broadcasts disabled (read-only monitor)');
   } else {
@@ -10882,7 +10423,6 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   } else {
     connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
     if (!SCHOOL_MODE && process.env.ENABLE_SCHOOL === 'true'){
-      setTimeout(function(){ connectSchoolBot().catch(function(err){ pushLog('error','system','Boot school: '+err.message); }); }, 2500);
     } else {
       pushLog('info','system','School account OFF (single-account mode). Set ENABLE_SCHOOL=true to enable.');
     }

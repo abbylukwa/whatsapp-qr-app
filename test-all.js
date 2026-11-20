@@ -210,7 +210,7 @@ async function main() {
     const reg = JSON.parse(fs.readFileSync(SH.REGISTRY_FILE, 'utf8'));
     /* v90.1: 14 zero-real-content sites pruned after the content crash
      * test (sites whose downloads were logos/thumbs/CDN-blocked) */
-    assert(reg.sites.length >= 185, 'registry shrank: ' + reg.sites.length);
+    assert(reg.sites.length >= 178, 'registry shrank: ' + reg.sites.length);
     const cats = new Set(reg.sites.map(s => s.category));
     for (const m of ['zimbabwe', 'southafrica', 'arab', 'persian', 'indian', 'africa', 'euro'])
       assert(cats.has(m), 'missing major category: ' + m);
@@ -220,7 +220,14 @@ async function main() {
       'zimbabwe must share southafrica sites');
     const zimg = reg.sites.filter(s => s.category === 'zimbabwe' && s.kind === 'images').length;
     const zgif = reg.sites.filter(s => s.category === 'zimbabwe' && s.kind === 'gifs').length;
-    assert(zimg >= 2 && zgif >= 2, 'zimbabwe image/gif coverage thin: ' + zimg + '/' + zgif);
+    /* v90.1: zimbabwe's own image entries delivered only logos/thumbs and
+     * were content-test-pruned — its image searches ride the SHARE map
+     * (southafrica's content-tested entries), which is the whole point of
+     * "we kinda share the sites with mzansi". So: own gifs ≥ 2, and the
+     * shared neighbour must carry content-tested images. */
+    assert(zgif >= 2, 'zimbabwe gif coverage thin: ' + zgif);
+    const saImg = reg.sites.filter(s => s.category === 'southafrica' && s.kind === 'images').length;
+    assert(zimg > 0 || saImg >= 2, 'zimbabwe has neither own images nor shared ones');
   });
   await test('site-health: localization — phone + language → category', () => {
     const SH = require('./site-health');

@@ -1361,30 +1361,6 @@
    "lang": "en-ZW"
   },
   {
-   "name": "zw-img-imagefap",
-   "url": "https://www.imagefap.com/?s=zimbabwe {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-img-sexcom",
-   "url": "https://www.sex.com/?s=harare {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
-   "name": "zw-img-xhamster-photos",
-   "url": "https://xhamster.com/photos/search/zimbabwe {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "zimbabwe",
-   "lang": "en-ZW"
-  },
-  {
    "name": "zw-gif-xnxx-gifs",
    "url": "https://www.xnxx.com/search/zimbabwe {query} gif",
    "kind": "gifs",
@@ -1401,28 +1377,12 @@
    "lang": "en-ZW"
   },
   {
-   "name": "southafrica-img2-sexcom",
-   "url": "https://www.sex.com/?s=mzansi {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "southafrica",
-   "lang": "en-ZA"
-  },
-  {
    "name": "southafrica-gif2-xnxx-gifs",
    "url": "https://www.xnxx.com/search/south african {query} gif",
    "kind": "gifs",
    "nsfw": true,
    "category": "southafrica",
    "lang": "en-ZA"
-  },
-  {
-   "name": "arab-img2-sexcom",
-   "url": "https://www.sex.com/?s=hijab {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
   },
   {
    "name": "persian-img2-imagefap",
@@ -1479,14 +1439,6 @@
    "nsfw": true,
    "category": "africa",
    "lang": "en"
-  },
-  {
-   "name": "euro-img2-imagefap",
-   "url": "https://www.imagefap.com/?s=european {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "eu"
   },
   {
    "name": "euro-gif2-xnxx-gifs",

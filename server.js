@@ -2704,6 +2704,25 @@ function cleanResults(list){
   return (Array.isArray(list) ? list : []).filter(u =>
     typeof u === 'string' && u.startsWith('http') && !JUNK_URL_RE.test(u));
 }
+/* v90.3 AUTHENTICITY — the LIVE AUDIT proved the scraper MERGES our
+ * sites with its own fallback pool (a single myLink returned 18 own +
+ * 103 fallback results). Reorder so results that genuinely come from
+ * OUR chain's domains (and their known CDNs) ride FIRST — the member
+ * gets their country's actual site, not the fallback pool. */
+const CDN_OWNER = { 'phncdn.com': 'pornhub.com', 'xvideos-cdn.com': 'xvideos.com', 'xhcdn.com': 'xhamster.com', 'pornpics.com': 'pornpics.com' };
+function hostOf(u){ try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } }
+function ownerOf(u){
+  const h = hostOf(u);
+  if (!h) return '';
+  const reg = h.split('.').slice(-2).join('.');
+  return CDN_OWNER[reg] || reg;
+}
+function ownDomainFirst(list, chain){
+  if (!Array.isArray(list) || !list.length) return list;
+  const mine = new Set((chain || []).map(u => ownerOf(u)).filter(Boolean));
+  if (!mine.size) return list;
+  return list.slice().sort((a, b) => (mine.has(ownerOf(b)) ? 1 : 0) - (mine.has(ownerOf(a)) ? 1 : 0));
+}
 async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
   /* v73: site 'auto' — the scraper is MYLINKS-ONLY (zero built-in
    * sites), so results come exclusively from the configured slots. */
@@ -2720,7 +2739,7 @@ async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
     const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('images', !!nsfw, null, boostCat)))];
     if (myLinks.length) body.myLinks = myLinks;
     const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 45000 });
-    return { ok:true, images: cleanResults(r.data?.images), site, myLinks: r.data?.myLinks || 0 };
+    return { ok:true, images: ownDomainFirst(cleanResults(r.data?.images), myLinks), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`${nsfw?'NSFW':'SFW'} "${query}": ${e.message}`);
     return { ok:false, error:e.message, images:[], site };
@@ -2740,7 +2759,7 @@ async function scraperGif(query, nsfw=false, prefer=null, boostCat=null){
     const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('gifs', !!nsfw, null, boostCat)))];
     if (gifLinks.length) params.myLinks = gifLinks.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
-    return { ok:true, gifs: cleanResults(r.data?.gifs), site, myLinks: r.data?.myLinks || 0 };
+    return { ok:true, gifs: ownDomainFirst(cleanResults(r.data?.gifs), gifLinks.split(',')), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`GIF "${query}": ${e.message}`);
     return { ok:false, error:e.message, gifs:[], site };

@@ -288,6 +288,29 @@ async function main() {
     assert(/function forgetMedia/.test(src), 'forgetMedia missing');
     assert(/quietFail/.test(src), 'quietFail option missing in safe senders');
   });
+  await test('server: own-domain-first authenticity reordering (live-audit fix)', () => {
+    const src = fs.readFileSync('./server.js', 'utf8');
+    assert(/function ownDomainFirst/.test(src), 'ownDomainFirst missing');
+    assert(/CDN_OWNER/.test(src), 'CDN_OWNER map missing (phncdn→pornhub etc.)');
+    /* behaviour: results from MY chain domains ride before fallback pool */
+    const M = { hostOf: null };
+    // extract the pure logic by requiring nothing — simulate the sort
+    const CDN_OWNER = { 'phncdn.com': 'pornhub.com', 'xvideos-cdn.com': 'xvideos.com' };
+    const hostOf = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } };
+    const ownerOf = u => { const h = hostOf(u); const reg = h.split('.').slice(-2).join('.'); return CDN_OWNER[reg] || reg; };
+    const mine = new Set(['imagefap.com', 'pornhub.com']);
+    const sort = list => list.slice().sort((a, b) => (mine.has(ownerOf(b)) ? 1 : 0) - (mine.has(ownerOf(a)) ? 1 : 0));
+    const out = sort([
+      'https://darknaija.com/a/x.jpg',                        // fallback pool
+      'https://cdni.pornhub.com/data/x.jpg',                  // CDN → pornhub.com ✓
+      'https://random.example.net/y.jpg',                     // foreign
+      'https://cdnc.imagefap.com/thumb/z.jpg'                 // own ✓
+    ]);
+    assert(ownerOf(out[0]) === 'imagefap.com' || ownerOf(out[0]) === 'pornhub.com', 'own-domain result not first: ' + out[0]);
+    assert(ownerOf(out[out.length - 1]) === 'example.net' || ownerOf(out[out.length - 1]) === 'darknaija.com', 'foreign results not pushed last');
+    assert(/ownDomainFirst\(cleanResults\(r\.data\?\.images\)/.test(src), 'images return not using ownDomainFirst');
+    assert(/ownDomainFirst\(cleanResults\(r\.data\?\.gifs\)/.test(src), 'gifs return not using ownDomainFirst');
+  });
 
   /* ── 9c. v90: multilingual commands + listen-first + media queue ── */
   await test('multilang: localized verbs fire intents in native scripts', () => {

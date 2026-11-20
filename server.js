@@ -5959,6 +5959,46 @@ async function handleMessage(msg){
   }
   pushLiveMessage(liveEntry);
 
+  /* ═══ v85 FREE TRANSLATOR — "!translate" command, EVERYONE (admin or not,
+   * DM or group). No signup: Lingva → MyMemory → Google chain runs with
+   * zero keys; DEEPL_API_KEY / LIBRETRANSLATE_URL are used FIRST when set
+   * in env (see translator.js). Handled before every other chain so the
+   * AI brain / DM pool / admin dispatcher never swallow it. ═══ */
+  if (text && /^!translate(\s|$)/i.test(text.trim())){
+    const body = text.trim().slice(10).trim();
+    if (!body || /^(help|usage)$/i.test(body)){
+      await sendBuffer(chatJid, { text: translator.usageText() }, 3, 'slow', chatType, true);
+      return;
+    }
+    if (/^(langs|languages|codes)$/i.test(body)){
+      await sendBuffer(chatJid, { text: translator.langsText() }, 3, 'slow', chatType, true);
+      return;
+    }
+    let src = 'auto', tgt = null, payload = body;
+    const pipe  = /^([a-z]{2,3}(?:-[A-Za-z]{2,4})?)\s*\|\s*([a-z]{2,3}(?:-[A-Za-z]{2,4})?)\s+([\s\S]+)$/.exec(body);
+    const twoC  = /^([a-z]{2,3})\s+([a-z]{2,3})\s+([\s\S]+)$/.exec(body);
+    const oneC  = /^([a-z]{2,3}(?:-[A-Za-z]{2,4})?)\s+([\s\S]+)$/.exec(body);
+    const known = (c) => !!translator.normalizeLang(c) && Object.keys(translator.LANGUAGES).includes(translator.normalizeLang(c));
+    if (pipe){ src = pipe[1]; tgt = pipe[2]; payload = pipe[3]; }
+    else if (twoC && known(twoC[1]) && known(twoC[2])){ src = twoC[1]; tgt = twoC[2]; payload = twoC[3]; }
+    else if (oneC && known(oneC[1])){ tgt = oneC[1]; payload = oneC[2]; }
+    if (!tgt){
+      await sendBuffer(chatJid, { text: '🌍 Give a target language, e.g.\n!translate fr ' + body.slice(0, 60) }, 3, 'slow', chatType, true);
+      return;
+    }
+    try {
+      const r = await translator.translate(payload, { source: src, target: tgt });
+      const out = '🌍 ' + (translator.langName(r.source) || r.source).toUpperCase()
+                + ' → ' + (translator.langName(r.target) || r.target).toUpperCase()
+                + '  (' + r.provider + (r.cached ? ', cached' : '') + ')\n\n' + r.translated;
+      await sendBuffer(chatJid, { text: out }, 3, 'slow', chatType, true);
+    } catch(e){
+      pushLog('warn','translate','failed: ' + e.message);
+      await sendBuffer(chatJid, { text: '🌍 Translation failed — every provider errored. Try again in a minute.' }, 3, 'slow', chatType, true);
+    }
+    return;
+  }
+
   /* ═══ v68: NEEDED-UPDATES FILTER — from ANY group on the groups
    * account, only messages that look like real deadlines/changes are
    * queued for the admin. Main group included; noise stays noise. ═══ */
@@ -7239,6 +7279,7 @@ function makeSchoolLoadtestStub(){
 const app = express();
 app.set('trust proxy', true);   /* v84.2: req.protocol=https behind Render's proxy — self-hosted media URLs come out right */
 app.use(express.json());
+const translator = require('./translator');   /* v85: free no-signup translation (see translator.js) */
 
 /* ═══ v84.5: ADMIN SIGN-IN REMOVED (owner's call) ═══
  * The v84.3 token gate (ADMIN_TOKEN / bb_auth cookie / /admin/login)
@@ -8618,6 +8659,24 @@ app.get('/api/status', function(req,res){ res.json({
   queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
   adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
 }); });
+
+/* ═══ v85 FREE TRANSLATOR — HTTP API (no signup; optional env keys used first)
+ * POST /api/translate   { "text": "hello", "target": "fr", "source": "auto" }
+ * GET  /api/translate?text=hello&target=fr[&source=en]
+ * GET  /api/translate/languages
+ * ═══ */
+async function apiTranslateHandler(req, res){
+  const p = (req.method === 'POST') ? (req.body || {}) : (req.query || {});
+  try {
+    const r = await translator.translate(p.text, { source: p.source, target: p.target });
+    res.json(r);
+  } catch(e){
+    res.status(502).json({ ok: false, error: e.message, attempts: e.attempts || undefined });
+  }
+}
+app.get('/api/translate', apiTranslateHandler);
+app.post('/api/translate', apiTranslateHandler);
+app.get('/api/translate/languages', function(req, res){ res.json({ languages: translator.LANGUAGES }); });
 
 app.get('/admin/qr', async function(req,res){
   if (!qrDataUri) return res.status(404).json({ error:'No QR' });

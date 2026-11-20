@@ -7438,8 +7438,9 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
   if (intent.type === 'music'){
     try {
       /* v88: online downloader chain (y2mate style) first — MP3
-       * v90: through the queue (DMs share the same concurrency cap) */
-      const qr = await mediaQueue.run(chatJid, 'music', intent.query, async () => musicDownload(intent.query, 'audio'));
+       * v90: through the queue (DMs share the same concurrency cap)
+       * v92.1: the search uses the ENGLISH query (multilingual DMs) */
+      const qr = await mediaQueue.run(chatJid, 'music', searchQ, async () => musicDownload(searchQ, 'audio'));
       const r = qr.result;
       if (!r.ok){ await sendBuffer(chatJid, { text: await t2(chatJid, 'Could not find "' + intent.query + '"') }, 2, 'slow', 'dmreply', true); return; }
       await sendBuffer(chatJid, { text: await t2(chatJid, 'Found ' + r.title + '. Sending...') }, 2, 'slow', 'dmreply', true);
@@ -7452,13 +7453,33 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
       await sendBuffer(chatJid, { text: await t2(chatJid, '⏳ You have used your 3 video requests for this hour — try again later.') }, 2, 'slow', 'dmreply', true);
       return;
     }
-    const qr = await mediaQueue.run(chatJid, 'video', intent.query, async () =>
-      scraperVideo(intent.query, null, prefer, localCat(senderJid, chatJid)));
-    const rv = qr.result;
-    if (rv.ok){
+    /* v92.1: the ranked flow — most relevant first, "next" walks the list */
+    const qr = await mediaQueue.run(chatJid, 'video', searchQ, async () => {
+      const ranked = await scraperVideoRanked(searchQ, { site: prefer || null, boostCat: localCat(senderJid, chatJid) });
+      return { ok: ranked.length > 0, ranked };
+    });
+    const rs = qr.result;
+    if (rs.ok){
       videoScheduler.recordRequest(senderJid);
-      await sendMediaUrl(chatJid, rv.mediaUrl, { kind: 'video', mimetype: rv.mimetype || 'video/mp4',
-        caption: '🎬 ' + (rv.title || intent.query).slice(0, 90), priority: 2, lane: 'slow', taskType: 'dmreply', typing: false });
+      rememberVideoSearch(chatJid, rs.ranked, searchQ);
+      const cnt = extractCountFromQuery(searchQ);
+      const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply' });
+      if (sent){
+        resetDailyStats(); dailyStats.videosSent += sent;
+        const st = lastSearchByChat.get(chatJid);
+        if (st && st.idx < st.results.length){
+          await sendBuffer(chatJid, { text: await t2(chatJid, '✅ ' + sent + ' of ' + st.results.length + ' matches sent — say "next" for more.') }, 2, 'slow', 'dmreply', true);
+        }
+        return;
+      }
+      /* every ranked candidate failed → old single-shot chain */
+    }
+    const rv = await mediaQueue.run(chatJid, 'video', searchQ, async () =>
+      scraperVideo(searchQ, null, prefer, localCat(senderJid, chatJid)));
+    const rvq = rv.result;
+    if (rvq.ok){
+      await sendMediaUrl(chatJid, rvq.mediaUrl, { kind: 'video', mimetype: rvq.mimetype || 'video/mp4',
+        caption: '🎬 ' + (rvq.title || intent.query).slice(0, 90), priority: 2, lane: 'slow', taskType: 'dmreply', typing: false });
       resetDailyStats(); dailyStats.videosSent++;
     } else {
       await sendBuffer(chatJid, { text: await t2(chatJid, 'No video found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
@@ -7466,9 +7487,9 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
     return;
   }
   if (intent.type === 'gif'){
-    const cnt = extractCountFromQuery(intent.query);
-    const qr = await mediaQueue.run(chatJid, 'gif', cnt.query || intent.query, async () =>
-      scraperGif(cnt.query || intent.query, false, prefer, localCat(senderJid, chatJid)));
+    const cnt = extractCountFromQuery(searchQ);
+    const qr = await mediaQueue.run(chatJid, 'gif', cnt.query || searchQ, async () =>
+      scraperGif(cnt.query || searchQ, false, prefer, localCat(senderJid, chatJid)));
     const r = qr.result;
     if (r.ok && r.gifs.length){
       /* v91: MOST RELEVANT batch (up to 5) + "next" pagination — each
@@ -7485,7 +7506,7 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
   /* default: images — v91: MOST RELEVANT batch (up to 5) + "next" pagination */
   const cnt = extractCountFromQuery(intent.query);
   const qr = await mediaQueue.run(chatJid, 'image', cnt.query || intent.query, async () =>
-    scraperSearch(cnt.query || intent.query, false, prefer, localCat(senderJid, chatJid)));
+    scraperSearch(cnt.query || searchQ, false, prefer, localCat(senderJid, chatJid)));
   const r = qr.result;
   if (r.ok && r.images.length){
     rememberSearch(chatJid, 'image', r.images, cnt.query || intent.query);

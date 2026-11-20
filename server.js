@@ -621,6 +621,10 @@ function pushLiveMessage(entry){
  *  STATE
  * ══════════════════════════════════════════════════════════════ */
 let sock=null, qrDataUri=null;
+/* v90.2 PHONE-PAIRING — QR alternative: enter the bot's phone number in
+ * the panel, WhatsApp gives an 8-char code to type on the phone */
+let pendingPairPhone = null;
+let lastPairCode = null;
 let connectionStatus='disconnected', botStartTime=Date.now(), botNumber=null, botJid=null;
 let botLid=null;
 let isConnecting=false, manualDisconnect=false;
@@ -2692,8 +2696,10 @@ async function scrapperFetch(pathname, body, timeoutMs = 30000){
 
 /* v89 DUMMY-RESULT FILTER — the boss found junk in results: 1px
  * placeholders (static.pornpics.com/style/img/1px.png), logos, sprites,
- * loading images. Filtered BEFORE anything is picked or sent. */
-const JUNK_URL_RE = /1px\.png|\/style\/img\/|sprite|logo|blank|placeholder|spacer|loading\.|default\.(png|jpe?g)|pixel\.|\.svg($|\?)|transparent/i;
+ * loading images. v90.1: + Wikipedia/Wikimedia (the boss asked "why is
+ * there Wikipedia" — the scraper's fallback sources inject encyclopedia
+ * images when the sites produce nothing; members never see them now). */
+const JUNK_URL_RE = /1px\.png|\/style\/img\/|sprite|logo|blank|placeholder|spacer|loading\.|default\.(png|jpe?g)|pixel\.|\.svg($|\?)|transparent|wikipedia|wikimedia|wikimedia commons|giphy\.com\/(brand|static)/i;
 function cleanResults(list){
   return (Array.isArray(list) ? list : []).filter(u =>
     typeof u === 'string' && u.startsWith('http') && !JUNK_URL_RE.test(u));
@@ -6671,7 +6677,10 @@ async function handleMessage(msg){
      * actually asking the bot for something, full service switches on. */
     groupListener.observe(chatJid, { senderJid, text, lang: gLang });
     const explicitRequest = text.startsWith('!') || !!multilang.localIntent(text);
-    if (!isAdmin && !explicitRequest && !groupListener.canAutoEngage(chatJid)){
+    /* the designated NSFW group the admin ACTIVATED keeps full service —
+     * listen-first only decides NEW/unknown groups */
+    const designated = accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated();
+    if (!isAdmin && !explicitRequest && !designated && !groupListener.canAutoEngage(chatJid)){
       const p = groupListener.profileSummary(chatJid);
       if (groupListener.isObserving(chatJid)){
         pushLog('info', 'listener', `observing ${getGroupName(chatJid) || chatJid} — ${p.msgs} msg(s), ${p.intents} bot-directed so far`);
@@ -6861,6 +6870,19 @@ async function connectBot(){
         }
         qrDataUri = await QRCode.toDataURL(qr);
         connectionStatus = 'qr';
+        /* v90.2 PHONE-PAIRING: a pending phone-pair request fires the
+         * pairing code the moment the socket is ready — the QR stays on
+         * the panel as a fallback either way */
+        if (pendingPairPhone && sock.authState?.creds && !sock.authState.creds.registered){
+          try {
+            const code = await sock.requestPairingCode(pendingPairPhone);
+            lastPairCode = { code, phone: pendingPairPhone, at: Date.now() };
+            pendingPairPhone = null;
+            pushLog('success', 'bot', 'PAIRING CODE ' + code + ' — on the BOT phone: WhatsApp → Linked devices → Link a device → "Link with phone number instead"');
+          } catch (e) {
+            pushLog('warn', 'bot', 'pairing-code request failed: ' + e.message + ' — the QR remains available');
+          }
+        }
         pushLog('info','bot','QR generated (' + botQrCount + '/' + RC.QR_MAX + ' renewals) — scan the QR card');
       }
       if (connection === 'open'){
@@ -8212,6 +8234,12 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <img id="qrImg" src="" style="display:none">
 <div id="qrPhone" style="margin-top:8px;text-align:center;font-size:13px;font-weight:600;color:#3fb950"></div>
 <div style="font-size:10px;color:#d29922;margin-top:4px">Scan QR with the BOT phone → WhatsApp → Linked devices. The bot's phone number shows below the QR while connecting and after pairing.</div>
+<div style="margin-top:10px;font-size:11px;color:#8b949e">── or log in with the PHONE NUMBER (no QR) ──</div>
+<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+<input id="pairPhone" placeholder="263771234567" style="flex:1;min-width:180px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:6px 8px;font-size:12px">
+<button class="primary" onclick="pairPhone()">🔑 Get pairing code</button>
+</div>
+<div id="pairOut" style="margin-top:6px;font-size:12px;line-height:1.5;color:#d29922"></div>
 <div style="margin-top:10px">
 <button class="primary" onclick="a('connect')">Start</button>
 <button onclick="a('refresh-qr')">Refresh QR</button>
@@ -8731,10 +8759,27 @@ try{var bd=await fetch('/admin/bot-detect');var bdD=await bd.json();setBdMeter('
 function setBdMeter(id,v){var el=$(id);if(!el)return;el.textContent=v;el.style.color=v<=30?'#3fb950':v<=60?'#d29922':'#f85149';}
 /* ═══ v86 MY SITES panel card — load/save config/sites.json over HTTP ═══ */
 async function loadMySites(){var el=$('sitesBlob');var out=$('sitesOut');if(!el)return;out.textContent='loading…';try{var r=await fetch('/api/sites');var d=await r.json();el.value=JSON.stringify({sites:d.sites||[]},null,2);out.textContent=(d.count||0)+' sites loaded';}catch(e){out.textContent='load failed: '+esc(e.message);}}
-async function loadSiteHealth(){var el=$('siteHealth');var sum=$('shSummary');if(!el)return;try{var r=await fetch('/api/site-health');var d=await r.json();var reg=d.registry||{};sum.textContent='('+reg.alive+'/'+reg.total+' alive)';var lines=[];var cats=d.byCategory||{};Object.keys(cats).forEach(function(c){var v=cats[c];lines.push(c+': '+v.alive+'/'+v.total+' alive'+(v.down?(' — '+v.down+' DOWN'):''));});var provs=d.musicProviders||{};Object.keys(provs).forEach(function(p){var v=provs[p];lines.push('♪ '+(v.fails?('FAILING '+p+' ('+v.lastError+')'):'ok '+p));});el.innerHTML=lines.map(function(l){return esc(l);}).join('<br>')||'no data yet';}catch(e){el.textContent='load failed: '+e.message;}}
+async function loadSiteHealth(){var el=$('siteHealth');var sum=$('shSummary');if(!el)return;try{var r=await fetch('/api/site-health');var d=await r.json();var reg=d.registry||{};sum.textContent='('+reg.alive+'/'+reg.total+' alive)';var lines=[];var cats=d.byCategory||{};Object.keys(cats).forEach(function(c){var v=cats[c];lines.push(c+': '+v.alive+'/'+v.total+' alive'+(v.down?(' — '+v.down+' DOWN'):''));});var provs=d.musicProviders||{};Object.keys(provs).forEach(function(p){var v=provs[p];lines.push('♪ '+(v.fails?('FAILING '+p+' ('+v.lastError+')'):'ok '+p));});var li=d.listener||{};var q=d.queue||{};lines.push('👂 listen-first: '+(li.byMode?li.byMode.observe+' observing · '+li.byMode.engage+' engaged · '+li.byMode.silent+' silent':'no groups yet')+' · queue: '+(q.pending||0)+' pending / cap '+(q.maxActive||2));el.innerHTML=lines.map(function(l){return esc(l);}).join('<br>')||'no data yet';}catch(e){el.textContent='load failed: '+e.message;}}
 loadSiteHealth();
 async function saveMySites(){var el=$('sitesBlob');var out=$('sitesOut');if(!el)return;out.textContent='saving…';try{var parsed=JSON.parse(el.value);var res=await fetch('/api/sites?replace=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});var d=await res.json();out.textContent=d.ok?((d.count||0)+' sites saved ✓ — live immediately'):'error: '+esc(d.error||'failed');}catch(e){out.textContent='invalid JSON: '+esc(e.message);}}
 async function a(x){await api(x,'POST');setTimeout(refresh,1000);}
+async function pairPhone(){
+  var inp=document.getElementById('pairPhone'),out=document.getElementById('pairOut');if(!inp||!out)return;
+  var p=inp.value.replace(/\D/g,'');
+  if(!p){out.innerHTML='<span style="color:#f85149">Type the bot phone in digits first (e.g. 263771234567)</span>';return;}
+  out.innerHTML='<span style="color:#d29922">Requesting code from WhatsApp…</span>';
+  try{
+    var r=await fetch('/admin/pair-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:p})});
+    var d=await r.json();
+    if(d.ok&&d.code){
+      out.innerHTML='<span style="color:#3fb950">✅ Code: <b style="font-size:18px;letter-spacing:3px">'+esc(d.code)+'</b></span><br><span style="color:#8b949e">On the BOT phone: WhatsApp → Settings → Linked devices → Link a device → <b>Link with phone number instead</b> → type this code. Valid ~2 minutes.</span>';
+    }else if(d.ok&&d.pending){
+      out.innerHTML='<span style="color:#d29922">⏳ Queued for +'+esc(d.phone)+' — press <b>Start</b> above; the code appears here the moment the socket comes up.</span>';
+    }else{
+      out.innerHTML='<span style="color:#f85149">❌ '+esc(d.error||'failed')+'</span>';
+    }
+  }catch(e){out.innerHTML='<span style="color:#f85149">'+esc(e.message)+'</span>';}
+}
 /* ═══ v70 SESSION BACKUP — copy blobs into env, restore without QR ═══ */
 var sbCache=null;
 async function loadSessionBackup(){var b=$('sbStatus');b.innerHTML='checking…';try{var r=await api('session-backup');sbCache=r;
@@ -9575,6 +9620,34 @@ app.get('/admin/qr', async function(req,res){
   res.end(Buffer.from(b64, 'base64'));
 });
 app.get('/admin/qr-data', function(req,res){ res.json({ qr: qrDataUri, status: connectionStatus, botNumber }); });
+/* v90.2 PHONE-PAIRING — QR alternative login
+ * POST /admin/pair-code {phone:'2637…'} → request an 8-char code from
+ * WhatsApp for that number; type it on the phone under
+ * Linked devices → Link a device → "Link with phone number instead".
+ * Works while NOT logged in; the code fires as soon as the socket is up
+ * (if it isn't up yet, the request is queued for the next QR cycle). */
+app.post('/admin/pair-code', async function(req,res){
+  const digits = String((req.body && req.body.phone) || '').replace(/\D/g, '');
+  if (!/^\d{8,15}$/.test(digits)) return res.json({ ok:false, error:'enter the bot phone as digits only — country code + number (e.g. 263771234567), no + or spaces' });
+  if (sock && sock.authState?.creds?.registered) return res.json({ ok:false, error:'already logged in as ' + (botNumber || 'a number') + ' — Clear Session first if you want to re-pair' });
+  pendingPairPhone = digits;
+  if (sock && connectionStatus === 'qr'){
+    try {
+      const code = await sock.requestPairingCode(digits);
+      lastPairCode = { code, phone: digits, at: Date.now() };
+      pendingPairPhone = null;
+      pushLog('success', 'bot', 'PAIRING CODE ' + code + ' (phone +' + digits + ')');
+      return res.json({ ok:true, code, phone: digits });
+    } catch (e) {
+      return res.json({ ok:false, error:'pairing request failed: ' + e.message + ' — the QR is still on the panel' });
+    }
+  }
+  pushLog('info', 'bot', 'pairing queued for +' + digits + ' — the code appears as soon as the WhatsApp socket shows its QR/connect cycle');
+  return res.json({ ok:true, pending:true, phone: digits });
+});
+app.get('/admin/pair-status', function(req,res){
+  res.json({ ok:true, pendingPhone: pendingPairPhone, lastPairCode, status: connectionStatus, registered: !!(sock && sock.authState?.creds?.registered) });
+});
 /* v67: SCHOOL account QR + control (second WhatsApp, same process) */
 app.get('/admin/qr-school', async function(req,res){
   if (!schoolQrDataUri) return res.status(404).json({ error:'No QR' });

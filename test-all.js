@@ -208,7 +208,9 @@ async function main() {
   await test('site-health: registry integrity — 7 majors, all nsfw, share map', () => {
     const SH = require('./site-health');
     const reg = JSON.parse(fs.readFileSync(SH.REGISTRY_FILE, 'utf8'));
-    assert(reg.sites.length >= 190, 'registry shrank: ' + reg.sites.length);
+    /* v90.1: 14 zero-real-content sites pruned after the content crash
+     * test (sites whose downloads were logos/thumbs/CDN-blocked) */
+    assert(reg.sites.length >= 185, 'registry shrank: ' + reg.sites.length);
     const cats = new Set(reg.sites.map(s => s.category));
     for (const m of ['zimbabwe', 'southafrica', 'arab', 'persian', 'indian', 'africa', 'euro'])
       assert(cats.has(m), 'missing major category: ' + m);

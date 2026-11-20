@@ -1,46 +1,6 @@
 {
  "sites": [
   {
-   "name": "global-imagefap",
-   "url": "https://www.imagefap.com/?s={query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-sexcom",
-   "url": "https://www.sex.com/?s={query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-xhamster-photos",
-   "url": "https://xhamster.com/photos/search/{query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-eporner-photos",
-   "url": "https://www.eporner.com/search/{query}/",
-   "kind": "images",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
-   "name": "global-pornhub-albums",
-   "url": "https://www.pornhub.com/albums/female-straight?search={query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "global",
-   "lang": "en"
-  },
-  {
    "name": "global-xvideos-gifs",
    "url": "https://www.xvideos.com/?k={query} gif",
    "kind": "gifs",
@@ -161,14 +121,6 @@
    "lang": "fa"
   },
   {
-   "name": "persian-img-sexcom",
-   "url": "https://www.sex.com/?s=persian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "persian",
-   "lang": "fa"
-  },
-  {
    "name": "persian-gif-xnxx-gifs",
    "url": "https://www.xnxx.com/search/persian {query} gif",
    "kind": "gifs",
@@ -260,22 +212,6 @@
    "name": "arab-img-imagefap",
    "url": "https://www.imagefap.com/?s=arab {query}",
    "kind": "images",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-img-sexcom",
-   "url": "https://www.sex.com/?s=arab {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "arab",
-   "lang": "ar"
-  },
-  {
-   "name": "arab-gif-xnxx-gifs",
-   "url": "https://www.xnxx.com/search/arab {query} gif",
-   "kind": "gifs",
    "nsfw": true,
    "category": "arab",
    "lang": "ar"
@@ -673,22 +609,6 @@
    "lang": "fr"
   },
   {
-   "name": "french-img-imagefap",
-   "url": "https://www.imagefap.com/?s=french {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
-   "name": "french-img-sexcom",
-   "url": "https://www.sex.com/?s=french {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "fr"
-  },
-  {
    "name": "french-gif-xvideos-gifs",
    "url": "https://www.xvideos.com/?k=french {query} gif",
    "kind": "gifs",
@@ -993,14 +913,6 @@
    "lang": "ru"
   },
   {
-   "name": "russian-img-sexcom",
-   "url": "https://www.sex.com/?s=russian {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "euro",
-   "lang": "ru"
-  },
-  {
    "name": "russian-gif-xvideos-gifs",
    "url": "https://www.xvideos.com/?k=russian {query} gif",
    "kind": "gifs",
@@ -1180,30 +1092,6 @@
    "name": "japanese-xvideos-jav",
    "url": "https://www.xvideos.com/?k=jav uncensored {query}",
    "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-xnxx-jav",
-   "url": "https://www.xnxx.com/search/jav uncensored {query}",
-   "kind": "videos",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-img-imagefap",
-   "url": "https://www.imagefap.com/?s=japanese {query}",
-   "kind": "images",
-   "nsfw": true,
-   "category": "more",
-   "lang": "ja"
-  },
-  {
-   "name": "japanese-img-sexcom",
-   "url": "https://www.sex.com/?s=japanese {query}",
-   "kind": "images",
    "nsfw": true,
    "category": "more",
    "lang": "ja"

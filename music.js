@@ -34,7 +34,10 @@ const SEARCH_INSTANCES = {
 const COBALT_INSTANCES = ['https://cobalt-api.kwiatekmiki.com', 'https://api.cobalt.tools'];
 
 let health = {};                                  /* provider -> {fails,lastError,lastCheck} */
+let chainDownUntil = 0;                           /* whole-chain cooldown (v90.1 self-healing) */
 let log = function(){};
+
+const CHAIN_DOWN_MS = 5 * 60 * 1000;              /* all providers failed → skip chain 5min */
 
 function loadHealth(){ try { health = JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8')) || {}; } catch (e) { health = {}; } }
 function saveHealth(){ try { fs.mkdirSync(path.dirname(HEALTH_FILE), { recursive: true }); fs.writeFileSync(HEALTH_FILE, JSON.stringify(health, null, 1)); } catch (e) {} }
@@ -198,7 +201,7 @@ async function convert(videoId, mode, opts = {}){
     if (r) return r;
   }
   for (const base of SEARCH_INSTANCES.invidious){
-    r = await attempt(mode === 'audio' ? 'audio:' : 'video:' + 'invidious:' + new URL(base).host, () => streamsInvidious(base, videoId, mode));
+    r = await attempt((mode === 'audio' ? 'audio' : 'video') + ':invidious:' + new URL(base).host, () => streamsInvidious(base, videoId, mode));
     if (r) return r;
   }
   r = await attempt('y2mate', () => y2mate(videoId, mode, opts.quality));
@@ -213,11 +216,20 @@ async function convert(videoId, mode, opts = {}){
     r = await attempt('y2mate-low', () => y2mate(videoId, 'video', '360'));
     if (r) return r;
   }
+  /* v90.1: the whole chain failed — converters/stream mirrors are often
+   * IP-blocked on datacenter hosts. Skip the chain for 5 min so requests
+   * fall to the scraper slot FAST (no ~90s of dead timeouts per ask); the
+   * chain retries itself after the cooldown (self-healing). */
+  chainDownUntil = Date.now() + CHAIN_DOWN_MS;
   throw new Error('all download providers failed — ' + tries.slice(0, 4).join(' | '));
 }
 
 /* ═══ 5. PUBLIC API — getMusic(query, mode) ═══════════════════════════ */
 async function getMusic(query, mode){
+  /* whole-chain cooldown: fail fast so the caller's fallback takes over */
+  if (Date.now() < chainDownUntil){
+    throw new Error('converter chain cooling down (providers IP-blocked or down) — fallback takes over, retry in ' + Math.ceil((chainDownUntil - Date.now()) / 60000) + 'min');
+  }
   let videoId = null, title = '';
   const urlMatch = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/.exec(query);
   if (urlMatch){ videoId = urlMatch[1]; }

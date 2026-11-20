@@ -6323,7 +6323,24 @@ async function handleMessage(msg){
   if (rawMsg.pollCreationMessageV2) return;
   if (rawMsg.pollCreationMessageV3) return;
   if (rawMsg.stickerMessage) return;
-  if (msg.messageStubType) return;
+  if (msg.messageStubType){
+    /* v92.5 BAD-MAC VISIBILITY: messages that arrive encrypted with keys
+     * this session does not have (almost always: sent while the service
+     * was ASLEEP — Render spun it down and the pre-keys rotated away;
+     * WhatsApp protocol cannot re-deliver them) used to vanish SILENTLY
+     * — the boss just saw "the bot ignores me". Count them and surface
+     * a throttled, human explanation on the panel. */
+    const stubParam = String(msg.messageStubParameter || '');
+    if (/Bad MAC|No session|decrypt/i.test(stubParam)){
+      undecryptableCount++;
+      if (Date.now() > lastUndecryptableLogAt + 5 * 60 * 1000){
+        lastUndecryptableLogAt = Date.now();
+        pushLog('warn','crypto',
+          undecryptableCount + ' message(s) arrived with keys this session does not have (sent while I was offline/asleep — WhatsApp cannot re-deliver them). NEW messages sent while I am awake arrive normally.');
+      }
+    }
+    return;
+  }
 
   let m = rawMsg; let guard=0;
   while (m && guard++<10){
@@ -9088,14 +9105,14 @@ app.post('/loadtest/message', async function(req,res){
   const { account, msg } = req.body || {};
   if (!msg || !msg.key) return res.status(400).json({ error:'msg.key required' });
   try {
+    /* v92.5: the school account is REMOVED — only the main handler exists */
     if (account === 'school'){
-      if (!schoolSock) return res.status(409).json({ error:'school stub not connected' });
-      await handleSchoolMessage(msg);
+      return res.status(410).json({ error:'school account removed in v92 — use account "groups"' });
     } else {
       if (!sock) return res.status(409).json({ error:'bot stub not connected' });
       await handleMessage(msg);
     }
-    res.json({ ok:true, account: account === 'school' ? 'school' : 'groups' });
+    res.json({ ok:true, account: 'groups' });
   } catch(e){ res.json({ ok:false, error: e.message }); }
 });
 
@@ -9120,9 +9137,9 @@ app.get('/loadtest/observe', function(req,res){
     preview: { type: previewCache.currentType, imageIndex: previewCache.imageIndex, gifIndex: previewCache.gifIndex,
       imageUrls: (previewCache.imageUrls||[]).length, gifUrls: (previewCache.gifUrls||[]).length },
     state: { dmPool: dmPool.size, activeDMs: activeDMs.size, joinedGroups: joinedGroups.size,
-      groupRegistry: groupRegistry.size, schoolRegistry: schoolRegistry.size,
+      groupRegistry: groupRegistry.size,   /* v92.5: schoolRegistry/schoolNumber/schoolStatus removed with the school buddy */
       broadcastsTracked: broadcastLastAt.size, mainGroupJid,
-      botNumber, schoolNumber, groupsStatus: connectionStatus, schoolStatus },
+      botNumber, groupsStatus: connectionStatus },
     logs: logBuffer.slice(-140).map(e => ({ ts:e.ts, level:e.level, source:e.source, message:String(e.message).slice(0,200) }))
   });
 });
@@ -10588,6 +10605,51 @@ loadPolicy();
 loadGroupRegistry();   /* v66 */
 loadDmHistories();     /* v66 */
 
+/* ═══ v92.5 SELF-KEEPALIVE — the bot never sleeps, never misses a
+ * message ═══
+ * Render spins a free web service down after 15 minutes with NO inbound
+ * HTTP request. A sleeping bot = dead WhatsApp socket = the boss's
+ * messages vanish ("its not receiving my messages"). The cron-job.org
+ * job was pinging the WRONG url (whatsapp-qr-app.onrender.com — that
+ * subdomain is somebody else's Flask service, it 404s) so the job kept
+ * erroring AND the real bot slept anyway.
+ *
+ * The fix lives HERE so it cannot be misconfigured again: Render
+ * injects RENDER_EXTERNAL_URL into every web service — the real public
+ * URL of THIS deployment. We GET our own /ping through the public
+ * proxy edge every 10 minutes. That request counts as inbound traffic,
+ * so the service never idles out and the socket stays alive 24/7.
+ * No cron dashboard needed; even with cron-job.org dead the bot stays
+ * up. (SELF_URL env can override for non-Render hosting.) ═══ */
+const SELF_KEEPALIVE_URL = (process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL || '').replace(/\/$/, '');
+const SELF_KEEPALIVE_MS  = Math.max(3, parseInt(process.env.SELF_KEEPALIVE_MIN || '10', 10) || 10) * 60 * 1000;
+let undecryptableCount = 0;        /* v92.5: messages dropped with Bad MAC (sent while asleep) */
+let lastUndecryptableLogAt = 0;
+function startSelfKeepAlive(){
+  if (!SELF_KEEPALIVE_URL){
+    pushLog('warn','keepalive','self-keepalive OFF — RENDER_EXTERNAL_URL/SELF_URL missing (local run? cron-job.org must cover the pings)');
+    return;
+  }
+  let fails = 0;
+  setInterval(async function(){
+    try {
+      const r = await fetch(SELF_KEEPALIVE_URL + '/ping', { signal: AbortSignal.timeout(25000) });
+      fails = 0;
+      pushLog('info','keepalive','self-ping ' + SELF_KEEPALIVE_URL + '/ping → ' + r.status + ' (awake, socket alive)');
+    } catch(e){
+      fails++;
+      pushLog('warn','keepalive','self-ping failed (' + fails + '): ' + e.message);
+      if (connectionStatus !== 'connected' && fails >= 2){
+        /* the service just woke from a spin-down and the socket is not
+         * back — force the reconnect path instead of waiting */
+        pushLog('warn','keepalive','awake but socket down — forcing connectBot()');
+        connectBot().catch(function(){});
+      }
+    }
+  }, SELF_KEEPALIVE_MS).unref();
+  pushLog('info','keepalive','self-keepalive ON → GET ' + SELF_KEEPALIVE_URL + '/ping every ' + (SELF_KEEPALIVE_MS/60000) + ' min — service NEVER idles out, cron-job.org no longer required for the bot');
+}
+
 const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);
   console.log('Mode: MANAGER (group management — school buddy removed v92)');
@@ -10628,6 +10690,7 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   scheduleDailyReport();
   scheduleHumanPresence();
   startSelfMonitor();   /* v66: health + error prediction */
+  startSelfKeepAlive(); /* v92.5: self-ping via RENDER_EXTERNAL_URL — never sleeps, never misses a message */
   startAdminLogDigest(); /* v67: logs → admin chat, batched */
   startTaskScheduler();  /* v68.2: admin task orders, human-paced sends */
   startLogJanitor();     /* v70: panel buffers self-clear every 30 min */

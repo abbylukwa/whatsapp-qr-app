@@ -1096,10 +1096,50 @@ videoScheduler.initVideoScheduler({
     try { multiPlatform.onNSFWVideoSent(videoData); } catch (e) {}
   }
 });
-/* v86: YouTube auto-drop is OFF at every boot — videos now flow ONLY
- * when members/DMs request them (scraperVideo). The rate limiter
- * (canRequest/recordRequest) stays active for those downloads. */
-videoScheduler.disable();
+/* v87: NSFW video search pool for the designated group's auto-drop —
+ * generic terms by default, extend via NSFW_QUERIES env (comma-separated). */
+const NSFW_QUERIES = (process.env.NSFW_QUERIES || 'persian,irani,iranian,iran')
+  .split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+
+/* v87: NSFW auto-drop is ACTIVE BY DEFAULT — but only on the designated
+ * NSFW group AND only after the admin activated it (!nsfwgroup on).
+ * The activation flag lives in data/access-state.json, so it survives
+ * reboots. Without activation the scheduler stays off (nothing auto-sends).
+ * The rate limiter (canRequest/recordRequest) always stays active for
+ * member video downloads. */
+function applyNsfwActivation(){
+  if (accessCtl.isNsfwActivated() && accessCtl.getDesignated()){
+    videoScheduler.setQueries(NSFW_QUERIES);
+    videoScheduler.setGroup(accessCtl.getDesignated());
+    videoScheduler.enable();
+    pushLog('info','nsfw','auto-drop ACTIVE — designated group ' + accessCtl.getDesignated() + ', queries: ' + NSFW_QUERIES.join(', '));
+  } else {
+    videoScheduler.disable();
+  }
+}
+/* v87 NOTE: applyNsfwActivation() and ensureAllowedGroupJids() are CALLED
+ * after the access layer loads (they reference accessCtl) — see the
+ * accessCtl.init block further down, and probeMainGroup on connect. */
+
+/* v87: resolve every allowed invite code to its REAL group JID once the
+ * socket is up — the whitelist matches the actual group, never the link
+ * text. Throttled retry: codes that fail now (link expired, offline)
+ * are retried at most every 10 minutes when a group gate misses. */
+let allowedResolveAt = 0;
+async function ensureAllowedGroupJids(force){
+  if (!sock) return;
+  if (!force && Date.now() - allowedResolveAt < 600000) return;
+  allowedResolveAt = Date.now();
+  for (const code of accessCtl.allowedGroupCodes()){
+    try {
+      const info = await sock.groupGetInviteInfo(code);
+      if (info && info.id){
+        accessCtl.registerInviteJid(code, info.id);
+        pushLog('success','access',`group resolved: ${code} → ${info.id} (${info.subject || 'unknown'})`);
+      }
+    } catch(e){ pushLog('warn','access',`invite resolve failed for ${code}: ${e.message}`); }
+  }
+}
 function recentGroupTexts(jid, n){
   const d = learningData.get(jid);
   if (!d || !d.messages || !d.messages.length) return [];
@@ -2225,9 +2265,11 @@ async function studyAnswer(topic, chatJid){
 }
 async function studyBuddyChat(chatJid, text){
   const r = await studyAnswer('', chatJid);
-  const replyText = r
+  const raw = r
     ? informalize(r)
     : 'AI is not answering right now — give me a minute and ask again.';
+  /* v87: the sis answers in the contact's language (auto-translate layer) */
+  const replyText = await replyInLang(chatJid, getChatLang(chatJid), raw);
   await schoolReply(chatJid, replyText);
   return replyText;
 }
@@ -2547,7 +2589,7 @@ async function scrapperFetch(pathname, body, timeoutMs = 30000){
   return r.data;
 }
 
-async function scraperSearch(query, nsfw=false){
+async function scraperSearch(query, nsfw=false, prefer=null){
   /* v73: site 'auto' — the scraper is MYLINKS-ONLY (zero built-in
    * sites), so results come exclusively from the configured slots. */
   const site = nsfw ? (SCRAPER_NSFW_SITE || 'nsfw') : 'auto';
@@ -2555,9 +2597,10 @@ async function scraperSearch(query, nsfw=false){
   try {
     /* v70: pass YOUR sites (MYLINKS env) with every search — the
      * scraper puts their results FIRST in the returned array.
-     * v86: plus the config/sites.json registry, kind-matched. */
+     * v86: plus the config/sites.json registry, kind-matched.
+     * v87: plus the user's !site <name> pick, ahead of everything. */
     const body = { query, site, nsfw: !!nsfw };
-    const myLinks = [...new Set([].concat(MY_LINKS_ENV, siteUrlsFor('images', !!nsfw)))];
+    const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteUrlsFor('images', !!nsfw)))];
     if (myLinks.length) body.myLinks = myLinks;
     const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 45000 });
     return { ok:true, images: r.data?.images || [], site, myLinks: r.data?.myLinks || 0 };
@@ -2566,17 +2609,18 @@ async function scraperSearch(query, nsfw=false){
     return { ok:false, error:e.message, images:[], site };
   }
 }
-async function scraperGif(query, nsfw=false){
+async function scraperGif(query, nsfw=false, prefer=null){
   const site = nsfw ? SCRAPER_NSFW_SITE : SCRAPER_SFW_SITE;
   resetDailyStats(); dailyStats.scraperGifs++;
   try {
     /* v70: MY LINKS rides along on GIF searches too — the scraper tries
      * your GIF sites FIRST, same as image searches.
-     * v86: plus the config/sites.json registry (gifs kind). */
+     * v86: plus the config/sites.json registry (gifs kind).
+     * v87: plus the user's !site <name> pick, ahead of everything. */
     const params = { q: query, site };
     /* v72.3: explicit nsfw flag — kept for scraper compatibility. */
     if (nsfw) params.nsfw = '1';
-    const gifLinks = [...new Set([].concat(MY_LINKS_ENV, siteUrlsFor('gifs', !!nsfw)))];
+    const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteUrlsFor('gifs', !!nsfw)))];
     if (gifLinks.length) params.myLinks = gifLinks.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
     return { ok:true, gifs: r.data?.gifs || [], site, myLinks: r.data?.myLinks || 0 };
@@ -2657,8 +2701,10 @@ async function scraperVideo(query, exclude, site){
     const body = { query };
     /* v71.1: pass already-sent ids/titles so multi-video runs never repeat */
     if (Array.isArray(exclude) && exclude.length) body.exclude = exclude.slice(-10);
-    /* v86: your video sites from config/sites.json ride along too */
-    const vidLinks = [...new Set([].concat(MY_LINKS_ENV, siteUrlsFor('videos', false)))];
+    /* v87: a registry name/URL passed as `site` rides FIRST in myLinks
+     * (the scraper-side slot pick still applies when it knows the name) */
+    const preferUrl = resolvePreferUrl(site);
+    const vidLinks = [...new Set([].concat(preferUrl || [], MY_LINKS_ENV, siteUrlsFor('videos', false)))];
     if (vidLinks.length) body.myLinks = vidLinks;
     /* v73.1: optional site pick — "yona" / "pornpics" / slot number.
      * Absent = the scraper's file order (YonaYethuu first). */
@@ -3427,6 +3473,7 @@ function startTaskScheduler(){
 const SCHEDULES_FILE = 'schedules.json';
 const schedulerCfg  = { window: { enabled:false, start:20, end:24 }, schedules: [] };
 let windowSkipLogAt = 0;
+let gateSkipLogAt   = 0;   /* v87: throttle the "non-whitelisted group ignored" log */
 let schedSaveTimer  = null;
 function loadSchedulerCfg(){
   try{
@@ -4609,7 +4656,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
 
   /* v66: school instance = read-only monitor. Mass-messaging, joining,
    * downloads and NSFW are disabled there; reports work everywhere. */
-  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick'];
+  const SCHOOL_BLOCKED = ['broadcast','bcgroup','bcdm','all','bcastpic','bcastpicdm','bcastpicgroup','bcastgif','allimg','bcad','join','dl','music','download','nsfw','nsfwvideo','setmain','clearmain','tagall','mute','unmute','lock','unlock','promote','demote','kick','allow','deny','allowgroup','nsfwgroup','reloadaccess'];
   const schoolBlockedNow = SCHOOL_MODE || (opts && opts.account === 'school');
   if (schoolBlockedNow && SCHOOL_BLOCKED.includes(cmd)){
     await reply('🏫 School mode — this instance only READS groups and sends reports.\nUse: !today · !week · !timetable · !weather');
@@ -5773,6 +5820,80 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       else await reply('Not found.');
       break;
     }
+    /* ═══ v87 ACCESS CONTROL COMMANDS ═══════════════════════════ */
+    case 'allow': {
+      /* !allow +27614159817 — add a number to the DM whitelist */
+      if (!args[1]){ await reply('Usage: !allow <number>\ne.g. !allow +27614159817'); break; }
+      const r = accessCtl.addNumber(args.slice(1).join(''));
+      await reply(r.ok ? (r.added ? '✅ Allowed +' + r.number + ' — they can now send commands (' + r.count + ' allowed)' : 'ℹ️ +' + r.number + ' was already allowed (' + r.count + ')') : '❌ ' + r.error);
+      break;
+    }
+    case 'deny': {
+      /* !deny <number> — remove from the whitelist (admin itself can never be removed) */
+      if (!args[1]){ await reply('Usage: !deny <number>'); break; }
+      const r = accessCtl.removeNumber(args.slice(1).join(''));
+      await reply(r.ok ? ('✖️ Removed +' + r.removed + ' (' + r.count + ' left)') : '❌ ' + r.error);
+      break;
+    }
+    case 'allowgroup': {
+      /* !allowgroup <invite link or @g.us JID> — whitelist a group and
+       * resolve the code to its REAL JID right away */
+      if (!args[1]){ await reply('Usage: !allowgroup <link-or-jid>\ne.g. !allowgroup https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW'); break; }
+      const arg = args.slice(1).join('').trim();
+      const r = accessCtl.addGroup(arg);
+      if (!r.ok){ await reply('❌ ' + r.error); break; }
+      if (r.added && r.code && sock){
+        try {
+          const info = await sock.groupGetInviteInfo(r.code);
+          if (info && info.id){ accessCtl.registerInviteJid(r.code, info.id); await reply('✅ Group allowed: ' + (info.subject || r.code) + ' → ' + info.id); break; }
+        } catch (e) { await reply('✅ Link saved (' + r.code + ') — JID resolves when the bot next sees the group (' + e.message + ')'); break; }
+      }
+      await reply(r.added ? '✅ Group allowed (' + (r.code || r.jid) + ')' : 'ℹ️ That group was already allowed');
+      break;
+    }
+    case 'nsfwgroup': {
+      /* !nsfwgroup on [link|jid] — designate + activate the ONE NSFW group.
+       * Inside that group just: !nsfwgroup on. Off deactivates. */
+      const what = (args[1] || '').toLowerCase();
+      if (what === 'on'){
+        let target = accessCtl.getDesignated();
+        const arg = args.slice(2).join('').trim();
+        if (arg){
+          const code = accessCtl.parseInviteCode(arg);
+          if (code && sock){
+            try { const info = await sock.groupGetInviteInfo(code); if (info && info.id) target = info.id; } catch (e) { await reply('⚠️ Could not resolve that link (' + e.message + ')'); break; }
+          } else if (accessCtl.isGroupJid(arg)) target = arg;
+        } else if (isGroup){
+          target = chatJid;                       /* ran inside the group itself */
+        }
+        if (!target){ await reply('❌ No group to activate. Run it inside the group, or: !nsfwgroup on <link-or-jid>'); break; }
+        accessCtl.addGroup(target);
+        accessCtl.setDesignated(target);
+        accessCtl.setNsfwActivated(true);
+        videoScheduler.setQueries(NSFW_QUERIES);
+        videoScheduler.setGroup(target);
+        videoScheduler.enable();
+        await reply('🔥 NSFW ACTIVATED for ' + target + '\n· Persian NSFW content ONLY goes to this group\n· auto video drops: ' + NSFW_QUERIES.join(', ') + ' (' + videoScheduler.PER_RUN + '/run)\n· NSFW window: always open here\nTurn off: !nsfwgroup off');
+        pushLog('success','nsfw','designated group ACTIVATED: ' + target);
+        break;
+      }
+      if (what === 'off'){
+        accessCtl.setNsfwActivated(false);
+        videoScheduler.disable();
+        await reply('🛑 NSFW deactivated — the designated group goes silent again (nothing auto-sends).');
+        pushLog('info','nsfw','designated group deactivated');
+        break;
+      }
+      await reply('🔥 NSFW group: ' + (accessCtl.getDesignated() || 'not set') + '\nStatus: ' + (accessCtl.isNsfwActivated() ? 'ACTIVE — Persian NSFW drops running' : 'silent (awaiting !nsfwgroup on)') + '\nQueries: ' + NSFW_QUERIES.join(', ') + '\n\n!nsfwgroup on [link] · !nsfwgroup off');
+      break;
+    }
+    case 'reloadaccess': {
+      accessCtl.loadNumbers(ADMIN_PHONE);
+      accessCtl.loadGroups();
+      ensureAllowedGroupJids(true).catch(function(){});
+      await reply('🔄 Access files reloaded — ' + accessCtl.allowedNumbers().length + ' numbers, ' + (accessCtl.allowedGroupCodes().length + accessCtl.allowedGroupJids().length) + ' groups. NSFW: ' + (accessCtl.isNsfwActivated() ? 'ACTIVE' : 'silent'));
+      break;
+    }
     default: await reply('Unknown: !'+cmd+'\n\nSend !help.');
   }
   } catch(e){
@@ -5849,7 +5970,7 @@ async function brainHandleGroup(chatJid, dec, opts){
     try {
       const r = await scraperMusic(q);
       if (r.ok){
-        await sendBuffer(chatJid, { text:r.title+' - sending...' }, 3, 'slow', 'group', true);
+        await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
         acked = true;
         /* v72.2: once the ack is out, this message is CONSUMED — a failed
          * send must not fall back to the legacy chain (it would re-ack
@@ -6032,6 +6153,18 @@ async function handleMessage(msg){
    * everyone else waits a random 5-90s (or till morning at night) */
   /* v69: fromMe (typed on the bot's own phone) = the boss */
   const isAdmin = fromBotPhone || isAdminSender(msg, senderJid);
+  /* ═══ v87 ACCESS GATE — DM whitelist ═══
+   * Unknown numbers are ignored COMPLETELY: no read receipt (the message
+   * is never even opened), no reply, no pooling. The admin and the
+   * numbers in config/allowed-numbers.txt pass; whitelisted non-admins
+   * get COMMANDS-ONLY service further down. */
+  if (!isGroup && !isAdmin){
+    const realPhone = phone || accessCtl.phoneFromJid(senderJid);
+    if (!accessCtl.isAllowedNumber(realPhone || senderJid, ADMIN_PHONE)){
+      pushLog('info','access','DM from unknown number ignored (not opened): ' + (realPhone ? '+' + accessCtl.normalizePhone(realPhone) : senderJid));
+      return;
+    }
+  }
   scheduleHumanRead(msg, { admin: isAdmin });
   if (!fromBotPhone && isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
@@ -6097,6 +6230,13 @@ async function handleMessage(msg){
     }
     return;
   }
+
+  /* ═══ v87 UNIVERSAL COMMANDS — !sites / !site <name> / !fetch <url> / !dl <url> ═══
+   * Served to the admin, whitelisted DMs and whitelisted groups in ANY
+   * language (they bypass the group language gate on purpose — a command
+   * is a command even if the group is chatting Shona). Unknown senders /
+   * unknown groups never reach this with any effect. */
+  if (await serveUniversalCommand(chatJid, senderJid, text, isAdmin, chatType)) return;
 
   /* ═══ v68: NEEDED-UPDATES FILTER — from ANY group on the groups
    * account, only messages that look like real deadlines/changes are
@@ -6174,9 +6314,11 @@ async function handleMessage(msg){
     }
   }
 
-  /* ═══ AUTO-JOIN — extract invite codes from ANY message ═══
-   * v66: disabled on the school instance (read-only monitor). */
-  if (text && !SCHOOL_MODE){
+  /* ═══ AUTO-JOIN — v87: ADMIN ONLY. The old "join any link posted in
+   * any chat" behavior would pull the bot into random open groups,
+   * exactly what the whitelist is here to prevent. The boss shares a
+   * link → the bot joins; anyone else's link is just text. ═══ */
+  if (text && !SCHOOL_MODE && isAdmin){
     const codes = extractInviteCodes(text);
     if (codes.length){
       let added = 0;
@@ -6203,10 +6345,19 @@ async function handleMessage(msg){
     if (doc) return;                 // docs are not chat text — stop here
   }
 
-  /* ═══ NO MAIN GROUP → IGNORE ALL GROUPS ═══ */
-  if (isGroup && !mainGroupJid) return;
-  /* ═══ NOT MAIN GROUP → IGNORE ═══ */
-  if (isGroup && chatJid !== mainGroupJid) return;
+  /* ═══ v87 GROUP ACCESS GATE — whitelist replaces main-group-only ═══
+   * The bot NEVER reacts in a group that is not in config/allowed-groups.txt
+   * (matched by resolved @g.us JID). It cannot be lured into an unknown
+   * open group — unknown groups are silent forever. Admin traffic bypasses
+   * this gate (admin commands were already handled above). */
+  if (isGroup && !isAdmin && !accessCtl.isAllowedGroup(chatJid)){
+    if (Date.now() - (gateSkipLogAt || 0) > 600000){
+      gateSkipLogAt = Date.now();
+      pushLog('info','access','non-whitelisted group ignored: ' + (getGroupName(chatJid) || chatJid));
+      ensureAllowedGroupJids(false).catch(function(){});   /* retry unresolved invite codes */
+    }
+    return;
+  }
 
   if (botPaused && !isAdmin) return;
   if (Date.now() < botOfflineUntil && !isAdmin) return;
@@ -6257,19 +6408,23 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ DM path — pool for the batch AI cycle (FIX: no history push) ═══
-   * v66: school monitor never auto-replies to DMs. */
+  /* ═══ DM path — v87 WHITELIST POLICY ═══
+   *  · admin → full service (commands + persona chat via STUDY_BUDDY)
+   *  · whitelisted number → COMMANDS ONLY: media downloads, translate,
+   *    sites, fetch/dl. No persona chat, no greetings — anything that is
+   *    not a command is met with silence (the boss's rule).
+   *  · unknown numbers never got here — the access gate returned them
+   *    unread at the top of handleMessage. */
   if (!isGroup && !isAdmin && text){
     if (SCHOOL_MODE){
       pushLog('info','school','DM recorded (school mode — no reply): ' + pushName);
       return;
     }
-    poolDm(senderJid, msg, text, pushName, phone);
-    pushLog('info','dm',`Pooled DM from ${pushName} (pool=${dmPool.size})`);
+    await serveDmCommand(chatJid, senderJid, msg, text, pushName, phone);
     return;
   }
 
-  /* ═══ GROUP MESSAGES — MAIN ONLY ═══ */
+  /* ═══ GROUP MESSAGES — v87 WHITELIST + LANGUAGE GATES ═══ */
   if (isGroup){
     /* v72.2: respect the verdict — if antilink deleted+warned, STOP.
      * Before, the return value was ignored, so a link post could also
@@ -6277,13 +6432,29 @@ async function handleMessage(msg){
      * link right after deleting the same member's link). */
     if (await handleAntiLink(chatJid, msg, text, senderJid, isAdmin)) return;
 
-    /* v68.5: AI NEVER CHATS IN GROUPS — people greet and talk all day in
-     * groups and the AI has no idea what the conversation is about, so
-     * conversational replies are removed entirely (no !groupchat toggle).
-     * Management (antilink above, welcome/goodbye) and EXPLICIT media
-     * requests below still work. */
+    /* ═══ v87 LANGUAGE + ACTIVATION GATE ═══
+     * The group whitelist already passed. Now:
+     *  · the designated NSFW group stays SILENT until the admin runs
+     *    !nsfwgroup on — no message, no media, nothing;
+     *  · Shona / Ndebele / English chatter = silence (the bot only
+     *    speaks up in groups talking OTHER languages — Persian, Arabic…);
+     *  · admin text bypasses all of it. */
+    const gLang = await resolveGroupLang(chatJid, text);
+    const gd = accessCtl.groupDecision(chatJid, gLang, isAdmin);
+    if (!gd.reply){
+      pushLog('info','access','group silent — ' + gd.reason + ' · ' + (getGroupName(chatJid) || chatJid));
+      return;
+    }
+
+    /* v87: the AI brain and the scrapers read the ENGLISH version
+     * (a Persian request becomes English search terms); every reply
+     * goes back out in the group's own language via t2()/replyInLang. */
+    const gText = await textToEnglish(chatJid, gLang, text);
 
     if (text){
+      /* v87: NSFW window — normal hours everywhere, ALWAYS OPEN in the
+       * designated group once the admin activated it */
+      const nsfwOpen = isNsfwWindow() || (accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated());
       /* ═══ v71.5 AI BRAIN decides FIRST — regex chain stays as the
        * fallback for when the AI pool is down. The brain sees the
        * last 6 group messages, so "that" and follow-ups make sense,
@@ -6295,25 +6466,25 @@ async function handleMessage(msg){
          * send). Admin media requests are handled by the deterministic
          * chain below (admins bypass the NSFW window anyway). */
         try {
-          const dec = await brain.aiDecide(text, {
+          const dec = await brain.aiDecide(gText, {
             mode:'group', senderName:pushName, isAdmin,
             groupName: getGroupName(chatJid) || 'main',
             recent: recentGroupTexts(chatJid, 6),
-            nsfwWindow: isNsfwWindow()
+            nsfwWindow: nsfwOpen
           });
-          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: isNsfwWindow(), senderJid })) return;
+          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: nsfwOpen, senderJid })) return;
         } catch(e){ pushLog('warn','brain','group: ' + e.message); }
       }
-      if (detectGroupLinkRequest(text)){ await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true); return; }
-      const isNsfw = detectNsfw(text);
-      if (isNsfw && !isAdmin && !isNsfwWindow()){ await sendBuffer(chatJid, { text:'Not right now, try after 9pm' }, 3, 'slow', 'group', true); return; }
-      const gIntent = detectMediaIntent(text);
+      if (detectGroupLinkRequest(gText)){ await sendBuffer(chatJid, { text: await t2(chatJid,'Join: '+ADMIN_GROUP_LINK) }, 3, 'slow', 'group', true); return; }
+      const isNsfw = detectNsfw(text) || detectNsfw(gText);
+      if (isNsfw && !isAdmin && !nsfwOpen){ await sendBuffer(chatJid, { text: await t2(chatJid,'Not right now, try after 9pm') }, 3, 'slow', 'group', true); return; }
+      const gIntent = detectMediaIntent(gText);
       if (gIntent && !isVague(gIntent.query)){
         if (gIntent.type === 'music'){
           try {
             const r = await scraperMusic(gIntent.query);
             if (r.ok){
-              await sendBuffer(chatJid, { text:r.title+' - sending...' }, 3, 'slow', 'group', true);
+              await sendBuffer(chatJid, { text: await t2(chatJid, r.title+' - sending...') }, 3, 'slow', 'group', true);
               await sendMediaUrl(chatJid, r.mediaUrl, {
                 kind:'audio', mimetype:r.mimetype, caption:r.title,
                 priority:3, lane:'slow', taskType:'group', typing:true
@@ -6472,6 +6643,10 @@ async function connectBot(){
             if (mainGroupJid) setTimeout(() => { probeMainGroup().catch(()=>{}); }, 8000);
           })
           .catch(e => pushLog('error','main','auto-set: '+e.message));
+
+        /* v87: resolve the whitelist's invite codes to their REAL group
+         * JIDs the moment the socket is live */
+        setTimeout(function(){ ensureAllowedGroupJids(true).catch(function(){}); }, 9000);
 
         /* v66: build group registry (names, announce-only flags, members) */
         setTimeout(function(){ refreshGroupRegistry().catch(function(){}); }, 5000);
@@ -7379,6 +7554,16 @@ const app = express();
 app.set('trust proxy', true);   /* v84.2: req.protocol=https behind Render's proxy — self-hosted media URLs come out right */
 app.use(express.json());
 const translator = require('./translator');   /* v85: free no-signup translation (see translator.js) */
+/* v87 ACCESS CONTROL — whitelisted numbers + whitelisted groups + NSFW
+ * designated group (see access.js). Initialized with the admin number,
+ * which is always auto-added to config/allowed-numbers.txt. */
+const accessCtl = require('./access');
+const accessInfo = accessCtl.init(ADMIN_PHONE);
+pushLog('info', 'access', `whitelist loaded — ${accessInfo.numbers} numbers, ${accessInfo.groups} groups` +
+  (accessCtl.getDesignated() ? (`, NSFW group ${accessCtl.isNsfwActivated() ? 'ACTIVE' : 'awaiting activation'}`) : ''));
+/* v87: now that the whitelist is loaded, apply the NSFW auto-drop state
+ * (designated group + activation survive reboots) */
+applyNsfwActivation();
 
 /* ══════════════════════════════════════════════════════════════
  *  v86 AUTO-TRANSLATE — the bot speaks EVERY language
@@ -7438,6 +7623,230 @@ async function replyInLang(chatJid, lang, text){
     if (r && r.ok && r.translated) return r.translated;
   } catch (e) { pushLog('warn','autotranslate','out: ' + e.message); }
   return text;
+}
+/* shorthand — translate a short template string into the chat's language */
+async function t2(chatJid, s){
+  try { return await replyInLang(chatJid, getChatLang(chatJid), s); } catch (e) { return s; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v87 USER SITE CHOOSER — members pick their download source
+ *  !sites            → list the config/sites.json registry
+ *  !site <name>      → remember THIS user's preferred site
+ *  Preference puts that site FIRST in every media search they make.
+ * ══════════════════════════════════════════════════════════════ */
+const USER_SITES_FILE = path.join(__dirname, 'data', 'user-sites.json');
+let userSitePrefs = {};
+try { userSitePrefs = JSON.parse(fs.readFileSync(USER_SITES_FILE, 'utf8')) || {}; } catch (e) {}
+function saveUserSitePrefs(){
+  try { fs.writeFileSync(USER_SITES_FILE, JSON.stringify(userSitePrefs, null, 2)); } catch (e) {}
+}
+function getUserSitePref(jid){ return userSitePrefs[jid] || null; }
+function siteUrlByName(name){
+  const hit = SITE_REGISTRY.find(s => s.name === String(name || '').toLowerCase());
+  return hit || null;
+}
+/* the preferred site rides FIRST in the myLinks payload */
+function preferChain(jid, kind, nsfw){
+  const pref = getUserSitePref(jid);
+  const prefUrl = pref ? (siteUrlByName(pref) || {}).url : null;
+  return [...new Set([].concat(prefUrl || [], MY_LINKS_ENV, siteUrlsFor(kind, !!nsfw)))];
+}
+/* v87: scraper fns accept a site pick — registry name or a raw URL */
+function resolvePreferUrl(prefer){
+  if (!prefer) return null;
+  if (/^https?:\/\//i.test(String(prefer))) return String(prefer);
+  return (siteUrlByName(prefer) || {}).url || null;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v87 UNIVERSAL COMMANDS — !sites / !site / !fetch / !dl
+ *  Served in whitelisted groups + whitelisted DMs + admin, in ANY
+ *  language (bypasses the group language gate on purpose).
+ *  !fetch = the "web scrapper for stuff Persian people can't get":
+ *  the SERVER fetches the page (Iranian filters don't apply to it)
+ *  and sends the readable text back.
+ * ══════════════════════════════════════════════════════════════ */
+const FETCH_LIMIT_PER_HOUR = 5;
+const fetchHourLog = new Map();                          /* jid -> [timestamps] */
+function fetchLimitOk(jid, isAdmin){
+  if (isAdmin) return true;
+  const now = Date.now(), arr = (fetchHourLog.get(jid) || []).filter(ts => now - ts < 3600000);
+  if (arr.length >= FETCH_LIMIT_PER_HOUR){ fetchHourLog.set(jid, arr); return false; }
+  arr.push(now); fetchHourLog.set(jid, arr);
+  return true;
+}
+async function fetchUrlText(url){
+  const r = await axios.get(url, { timeout: 15000, maxContentLength: 2 * 1024 * 1024,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' },
+    validateStatus: s => s >= 200 && s < 300 });
+  const html = String(r.data || '');
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|h[1-6]|li|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!text) throw new Error('page has no readable text');
+  return text.slice(0, 3500);
+}
+async function serveUniversalCommand(chatJid, senderJid, text, isAdmin, mode){
+  if (!text) return false;
+  /* in groups: whitelisted groups + admin only (the whitelist gate runs
+   * later in the group flow — this early check keeps unknown groups silent) */
+  if (mode === 'group' && !isAdmin && !accessCtl.isAllowedGroup(chatJid)) return false;
+
+  const t0 = text.trim();
+
+  /* !sites — list the registry with kinds */
+  if (/^!sites\b/i.test(t0)){
+    const list = SITE_REGISTRY.length
+      ? SITE_REGISTRY.map((s, i) => (i + 1) + '. ' + s.name + ' — ' + s.kind + (s.nsfw ? ' (nsfw)' : '')).join('\n')
+      : '(registry empty — add sites in config/sites.json or the panel)';
+    const pref = getUserSitePref(senderJid);
+    await sendBuffer(chatJid, { text: '🌐 *My Sites* (' + SITE_REGISTRY.length + ')\n' + list +
+      '\n\nChoose with: !site <name>' + (pref ? '\nYour current pick: ' + pref : '') }, 3, 'slow', mode, true);
+    return true;
+  }
+  /* !site <name> — choose your download source */
+  const mSite = /^!site\s+(\S+)/i.exec(t0);
+  if (mSite){
+    const hit = siteUrlByName(mSite[1]);
+    if (!hit){
+      await sendBuffer(chatJid, { text: '❌ No site named "' + mSite[1] + '". See !sites' }, 3, 'slow', mode, true);
+      return true;
+    }
+    userSitePrefs[senderJid] = hit.name; saveUserSitePrefs();
+    await sendBuffer(chatJid, { text: '✅ Your downloads now come from *' + hit.name + '* first (' + hit.kind + ')' }, 3, 'slow', mode, true);
+    return true;
+  }
+  /* !dl <url> — download media from any web page */
+  const mDl = /^!dl\s+(\S+)/i.exec(t0);
+  if (mDl){
+    if (!fetchLimitOk(senderJid, isAdmin)){
+      await sendBuffer(chatJid, { text: '⏳ !dl limit reached (' + FETCH_LIMIT_PER_HOUR + '/hour) — try later' }, 3, 'slow', mode, true);
+      return true;
+    }
+    await sendBuffer(chatJid, { text: '⬇️ Fetching media from the page…' }, 3, 'slow', mode, true);
+    try {
+      const d = await scraperDownloadMedia(mDl[1], 'auto');
+      if (!d.ok) throw new Error(d.error || 'failed');
+      if ((d.kind === 'video') || (d.mimetype || '').startsWith('video')){
+        await sendMediaUrl(chatJid, d.mediaUrl, { kind: 'video', mimetype: d.mimetype || 'video/mp4', caption: d.title || '', priority: 2, lane: 'slow', taskType: mode, typing: false });
+      } else if ((d.kind === 'audio') || (d.mimetype || '').startsWith('audio')){
+        await sendMediaUrl(chatJid, d.mediaUrl, { kind: 'audio', mimetype: d.mimetype || 'audio/mpeg', caption: d.title || '', priority: 2, lane: 'slow', taskType: mode, typing: false });
+      } else if (d.kind === 'gif'){
+        await sendGifSafe(chatJid, d.mediaUrl, d.title || '', 2, 'slow', mode, true);
+      } else {
+        await sendImageSafe(chatJid, d.mediaUrl, d.title || '', 2, 'slow', mode, true);
+      }
+      resetDailyStats(); dailyStats.scraperDownloads++;
+    } catch (e) {
+      pushLog('warn', 'dl', senderJid + ': ' + mDl[1] + ' — ' + e.message);
+      await sendBuffer(chatJid, { text: '❌ Could not download: ' + e.message }, 3, 'slow', mode, true);
+    }
+    return true;
+  }
+  /* !fetch <url> — pull a blocked page's text through the server */
+  const mFetch = /^!fetch\s+(\S+)/i.exec(t0);
+  if (mFetch){
+    if (!fetchLimitOk(senderJid, isAdmin)){
+      await sendBuffer(chatJid, { text: '⏳ !fetch limit reached (' + FETCH_LIMIT_PER_HOUR + '/hour) — try later' }, 3, 'slow', mode, true);
+      return true;
+    }
+    await sendBuffer(chatJid, { text: '🌍 Fetching the page through the server…' }, 3, 'slow', mode, true);
+    try {
+      const out = await fetchUrlText(mFetch[1]);
+      await sendBuffer(chatJid, { text: '📄 ' + mFetch[1] + '\n\n' + out }, 3, 'slow', mode, true);
+    } catch (e) {
+      await sendBuffer(chatJid, { text: '❌ Fetch failed: ' + e.message }, 3, 'slow', mode, true);
+    }
+    return true;
+  }
+  return false;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v87 GROUP LANGUAGE RESOLVER — decides which language a group is
+ *  talking so the gate can stay silent on Shona/English. Order:
+ *  1) script detection (Persian/Arabic/CJK… → instant, offline)
+ *  2) this chat's learned language (cached 24h)
+ *  3) local Shona/Ndebele heuristic
+ *  4) one network confirmation (cached by 2), only when it LOOKS English
+ * ══════════════════════════════════════════════════════════════ */
+async function resolveGroupLang(chatJid, text){
+  if (!text) return 'en';
+  const script = translator.detectScriptLang(text);
+  if (script) return script;
+  const mem = chatLangMem.get(chatJid);
+  if (mem && (Date.now() - mem.ts) < CHAT_LANG_TTL) return mem.lang;
+  const local = detectLanguage(text);
+  if (local !== 'en') return local;
+  const learned = await learnChatLang(chatJid, text);
+  return learned || 'en';
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v87 DM COMMAND SERVER — whitelisted non-admin numbers get
+ *  COMMANDS ONLY (media downloads, translate, sites, fetch/dl).
+ *  No persona chat, no greetings — anything that is not a command
+ *  gets silence, exactly as the boss asked.
+ * ══════════════════════════════════════════════════════════════ */
+async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone){
+  if (await serveUniversalCommand(chatJid, senderJid, text, false, 'dm')) return;
+  const intent = detectMediaIntent(text);
+  if (!intent || isVague(intent.query)){       /* not a command → silence */
+    pushLog('info','access','whitelisted DM, non-command — silent: ' + pushName);
+    return;
+  }
+  const prefer = getUserSitePref(senderJid);
+  pushLog('info','access','whitelisted DM command: ' + intent.type + ' "' + intent.query + '"' + (prefer ? ' [' + prefer + ']' : ''));
+  if (intent.type === 'music'){
+    try {
+      const r = await scraperMusic(intent.query);
+      if (!r.ok){ await sendBuffer(chatJid, { text: 'Could not find "' + intent.query + '"' }, 2, 'slow', 'dmreply', true); return; }
+      await sendBuffer(chatJid, { text: await t2(chatJid, 'Found ' + r.title + '. Sending...') }, 2, 'slow', 'dmreply', true);
+      await sendMediaUrl(chatJid, r.mediaUrl, { kind: 'audio', mimetype: r.mimetype, caption: r.title, priority: 2, lane: 'slow', taskType: 'dmreply', typing: true });
+    } catch (e) { await sendBuffer(chatJid, { text: 'Err: ' + e.message }, 2, 'slow', 'dmreply', true); }
+    return;
+  }
+  if (intent.type === 'video'){
+    if (!videoScheduler.canRequest(senderJid)){
+      await sendBuffer(chatJid, { text: await t2(chatJid, '⏳ You have used your 3 video requests for this hour — try again later.') }, 2, 'slow', 'dmreply', true);
+      return;
+    }
+    const rv = await scraperVideo(intent.query, null, prefer);
+    if (rv.ok){
+      videoScheduler.recordRequest(senderJid);
+      await sendMediaUrl(chatJid, rv.mediaUrl, { kind: 'video', mimetype: rv.mimetype || 'video/mp4',
+        caption: '🎬 ' + (rv.title || intent.query).slice(0, 90), priority: 2, lane: 'slow', taskType: 'dmreply', typing: false });
+      resetDailyStats(); dailyStats.videosSent++;
+    } else {
+      await sendBuffer(chatJid, { text: await t2(chatJid, 'No video found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
+    }
+    return;
+  }
+  if (intent.type === 'gif'){
+    const r = await scraperGif(intent.query, false, prefer);
+    if (r.ok && r.gifs.length){
+      await sendGifSafe(chatJid, pickFresh(r.gifs, chatJid), '', 2, 'slow', 'dmreply', true);
+      resetDailyStats(); dailyStats.picsSent++;
+    } else {
+      await sendBuffer(chatJid, { text: await t2(chatJid, 'No gif found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
+    }
+    return;
+  }
+  /* default: images */
+  const r = await scraperSearch(intent.query, false, prefer);
+  if (r.ok && r.images.length){
+    await sendImageSafe(chatJid, pickFresh(r.images, chatJid), '', 2, 'slow', 'dmreply', true);
+    resetDailyStats(); dailyStats.picsSent++;
+  } else {
+    await sendBuffer(chatJid, { text: await t2(chatJid, 'No picture found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
+  }
 }
 
 /* ═══ v84.5: ADMIN SIGN-IN REMOVED (owner's call) ═══

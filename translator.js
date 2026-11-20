@@ -213,7 +213,42 @@ async function viaGoogleGtx(text, source, target){
 }
 
 /* ── language detection (free, no key) ── */
+/* ── v87 NON-QWERTY SCRIPT DETECTION — instant, offline, no network ──
+ * Persian / Arabic / Urdu / Hebrew / Russian / Hindi / Thai / Chinese /
+ * Japanese / Korean / Greek / Bengali never touch a QWERTY layout, and
+ * their scripts identify the language with near-certainty. This runs
+ * BEFORE the network detection in detectLanguage(), so it works even
+ * when every provider is down, and it feeds the group language gate
+ * (Shona/English stay silent, Persian & co. get replies) with zero
+ * latency. Latin-script text returns null → the caller falls back to
+ * the network detector. */
+const SCRIPT_TESTS = [
+  [/[\u0679\u0688\u0691\u06BA\u06D2\u06C1\u06C3]/, 'ur'],   /* ٹ ڈ ڑ ں ے ہ — Urdu-only letters */
+  [/[\u067E\u0686\u0698\u06AF\u06CC]/, 'fa'],               /* پ چ ژ گ ی — Persian-only letters */
+  [/[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/, 'ar'],
+  [/[\u0590-\u05FF]/, 'he'],
+  [/[\u0400-\u04FF]/, 'ru'],
+  [/[\u0370-\u03FF]/, 'el'],
+  [/[\u0900-\u097F]/, 'hi'],
+  [/[\u0980-\u09FF]/, 'bn'],
+  [/[\u0E00-\u0E7F]/, 'th'],
+  [/[\uAC00-\uD7AF\u1100-\u11FF]/, 'ko'],
+  [/[\u3040-\u30FF]/, 'ja'],
+  [/[\u4E00-\u9FFF]/, 'zh']
+];
+function detectScriptLang(text){
+  if (!text) return null;
+  const s = String(text).replace(/https?:\/\/\S+|@\w+|[0-9\u00B9-\u00BF]/g, ' ');
+  for (const [re, lang] of SCRIPT_TESTS){
+    if (re.test(s)) return lang;
+  }
+  return null;
+}
+
 async function detectLanguage(text){
+  /* v87: non-QWERTY scripts answer instantly, offline — no provider call */
+  const script = detectScriptLang(text);
+  if (script) return script;
   const qs = new URLSearchParams({ client: 'gtx', sl: 'auto', tl: 'en', dt: 't', q: String(text || '').slice(0, 1000) });
   const r = await httpCall({
     url: 'https://translate.googleapis.com/translate_a/single?' + qs.toString(),
@@ -287,4 +322,4 @@ function langsText(){
   return '🌍 *Language codes*\n\n' + lines.join('\n');
 }
 
-module.exports = { translate, detectLanguage, LANGUAGES, langName, normalizeLang, usageText, langsText };
+module.exports = { translate, detectLanguage, detectScriptLang, LANGUAGES, langName, normalizeLang, usageText, langsText };

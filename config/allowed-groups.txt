@@ -1,0 +1,7 @@
+# ═══ ALLOWED GROUPS (v87) ═══
+# One WhatsApp group invite link (or a group JID ending in @g.us) per line.
+# The bot talks ONLY in these groups. Invite links are matched by their
+# CODE, so extra query junk (?s=cl&p=a&iam=2…) is ignored — and pasting
+# the same link twice stays ONE entry.
+# Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).
+https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW

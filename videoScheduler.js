@@ -308,6 +308,9 @@ const api = {
     _state: state,
     _stop(){ if (timer) clearInterval(timer); timer = null; },
     _queries: () => QUERIES.slice(),
+    /* v87: the access layer points the auto-drop at the designated NSFW
+     * group's query pool on activation (!nsfwgroup on) */
+    setQueries: (q) => { if (Array.isArray(q) && q.length) QUERIES = q.slice(); },
 };
 
 module.exports = {

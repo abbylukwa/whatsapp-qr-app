@@ -1,0 +1,7 @@
+# ═══ ALLOWED NUMBERS (v87) ═══
+# One WhatsApp number per line — the bot replies to THESE ONLY.
+# Formats: +27614159817 · 27614159817 · 0771122334 (Zimbabwe local)
+# The admin number is added automatically at every boot (do not remove).
+# Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).
++27614159817
++263777627210

@@ -308,8 +308,10 @@ async function main() {
     ]);
     assert(ownerOf(out[0]) === 'imagefap.com' || ownerOf(out[0]) === 'pornhub.com', 'own-domain result not first: ' + out[0]);
     assert(ownerOf(out[out.length - 1]) === 'example.net' || ownerOf(out[out.length - 1]) === 'darknaija.com', 'foreign results not pushed last');
-    assert(/ownDomainFirst\(cleanResults\(r\.data\?\.images\)/.test(src), 'images return not using ownDomainFirst');
-    assert(/ownDomainFirst\(cleanResults\(r\.data\?\.gifs\)/.test(src), 'gifs return not using ownDomainFirst');
+    /* v91 upgraded the reorder to rankRelevant (relevance first, own-domain ties +1, ownDomainFirst inside for zero-hit queries) */
+    assert(/rankRelevant\(cleanResults\(r\.data\?\.images\), query, myLinks\)/.test(src), 'images return not using rankRelevant');
+    assert(/rankRelevant\(cleanResults\(r\.data\?\.gifs\), query/.test(src), 'gifs return not using rankRelevant');
+    assert(/ownDomainFirst\(arr, chain\)/.test(src), 'rankRelevant lost the ownDomainFirst fallback');
   });
 
   /* ── 9c. v90: multilingual commands + listen-first + media queue ── */

@@ -427,12 +427,16 @@ function loadSiteRegistry(){
     SITE_REGISTRY = arr
       .filter(function(s){ return s && /^https?:\/\//i.test(String(s.url || '')); })
       .map(function(s, i){
-        return {
+        const out = {
           name: String(s.name || ('site_' + (i + 1))).slice(0, 60),
           url:  String(s.url),
           kind: ['images', 'gifs', 'videos', 'music', 'any'].includes(String(s.kind)) ? String(s.kind) : 'any',
           nsfw: !!s.nsfw
         };
+        /* v92 fix: `category` drives site-health localization — it used
+         * to be STRIPPED here, silently erasing every site's region */
+        if (s.category) out.category = String(s.category).slice(0, 30);
+        return out;
       });
   } catch (e) {
     pushLog('warn', 'sites', 'config/sites.json unreadable — registry empty (' + e.message + ')');
@@ -445,12 +449,14 @@ function saveSiteRegistry(list){
     .filter(function(s){ return s && /^https?:\/\//i.test(String(s.url || '')); })
     .slice(0, 2000)
     .map(function(s, i){
-      return {
+      const out = {
         name: String(s.name || ('site_' + (i + 1))).slice(0, 60),
         url:  String(s.url),
         kind: ['images', 'gifs', 'videos', 'music', 'any'].includes(String(s.kind)) ? String(s.kind) : 'any',
         nsfw: !!s.nsfw
       };
+      if (s.category) out.category = String(s.category).slice(0, 30);   /* v92: never strip again */
+      return out;
     });
   fs.writeFileSync(SITES_FILE, JSON.stringify({ sites: clean }, null, 2));
   SITE_REGISTRY = clean;
@@ -2673,8 +2679,8 @@ async function scrapperFetch(pathname, body, timeoutMs = 30000){
 
 /* v89 DUMMY-RESULT FILTER — the boss found junk in results: 1px
  * placeholders (static.pornpics.com/style/img/1px.png), logos, sprites,
- * loading images. v90.1: + Wikipedia/Wikimedia (the boss asked "why is
- * there Wikipedia" — the scraper's fallback sources inject encyclopedia
+ * loading images. v92: Wikipedia/Wikimedia stays HARD-BLOCKED (the
+ * boss hates wiki results — the junk filter keeps them out forever)
  * images when the sites produce nothing; members never see them now). */
 const JUNK_URL_RE = /1px\.png|\/style\/img\/|sprite|logo|blank|placeholder|spacer|loading\.|default\.(png|jpe?g)|pixel\.|\.svg($|\?)|transparent|wikipedia|wikimedia|wikimedia commons|giphy\.com\/(brand|static)/i;
 function cleanResults(list){
@@ -4185,14 +4191,11 @@ async function processDM(item){
       }
     } catch(e){ pushLog('warn','brain','dm: ' + e.message); }
   }
-  const brainMedia = !!(brainDec && ['media','gif','video','music'].includes(brainDec.action)
-                         && (brainDec.query || '').trim());
-  let intent = brainMedia
-    ? { type: brainDec.action === 'media' ? 'image' : brainDec.action, query: brainDec.query.trim() }
-    : item.intent;
-  /* a brain "chat" verdict flows to the persona chat at the bottom;
-   * a media verdict with an empty query degrades to chat too */
-  const brainChat = !brainMedia && brainDec && brainDec.action === 'chat';
+  /* v92 DOWNLOADS ≠ AI CONVERSATIONS: the brain's media verdicts are
+   * dropped in DMs too — downloads come only from the deterministic
+   * search pipeline (detectMediaIntent below). */
+  let intent = item.intent;
+  const brainChat = brainDec && brainDec.action === 'chat';
   const nsfwHit  = brainDec ? (brainChat && brainDec.nsfw === true) : (detectNsfw(text) || detectNsfw(aiText));
   const linkHit  = brainDec ? (brainDec.action === 'link') : detectGroupLinkRequest(text);
 
@@ -6021,6 +6024,18 @@ async function brainHandleGroup(chatJid, dec, opts){
   const nsfwWin = !!(opts && opts.nsfwWin);
   const senderJid = (opts && opts.senderJid) || '';
 
+  /* ═══ v92 DOWNLOADS ARE SEPARATE FROM AI CONVERSATIONS ═══
+   * The boss: "make sure the downloads are separate from the AI
+   * conversations." The brain now NEVER triggers a download — media
+   * requests are handled ONLY by the deterministic search pipeline
+   * (detectMediaIntent → scraper ranked search) that runs right after
+   * this. Returning false hands the message back to that chain, so a
+   * request still gets served — but by the downloader, not the AI. */
+  if (['music','gif','video','image','pic','media','download'].includes(dec.action)){
+    pushLog('info','brain','media action "' + dec.action + '" refused — downloads go through the search pipeline only (v92 separation)');
+    return false;
+  }
+
   /* the AI itself says silence — the #1 cure for unnecessary sends */
   if (dec.action === 'ignore' || dec.action === 'chat') return true;
 
@@ -6381,6 +6396,12 @@ async function handleMessage(msg){
             pushLog('error','admin',`Brain command blocked (${hitB})`);
             resetDailyStats(); dailyStats.policyBlocks++;
             await adminReply(chatJid, 'Command refused.');
+            return;
+          }
+          /* v92: the brain may NOT synthesize download commands —
+           * media requests ride the deterministic chain only */
+          if (/^!(dl|download|music|nsfwvideo|pic|gif)/i.test(synth)){
+            pushLog('info','brain','admin synth download refused (v92 separation): ' + synth);
             return;
           }
           pushLog('info','brain','admin → ' + synth);
@@ -7709,7 +7730,7 @@ Assign 2-20 API keys. <b style="color:#d29922">60% must go to video_pipeline</b>
 <div class="row"><span>Paid keys</span><span class="val" id="akPaid">9</span></div>
 </div>
 <div style="font-size:10px;color:#8b949e;margin-top:6px">
-<b>Free (no key needed):</b> Edge-TTS, Piper TTS, SheepIt, Wikipedia, arXiv, FreeToUse music, Blender bpy, moviepy<br>
+<b>Free (no key needed):</b> Edge-TTS, Piper TTS, SheepIt, FreeToUse music, Blender bpy, moviepy<br>
 <b>Needs key:</b> OpenAI (research/script gen), Google Search, YouTube OAuth, Twitter session, WhatsApp session, Proxy
 </div>
 <div style="margin-top:8px"><button onclick="runCrapTest('apikeys')" style="font-size:10px">🧪 Test API Keys</button></div>
@@ -7812,7 +7833,7 @@ Everything runs unofficially or for free:<br>
 <b>Upload:</b> YouTube Data API v3 (6 uploads/day free quota)<br>
 <b>3D:</b> Blender bpy Python API (free open source)<br>
 <b>Composite:</b> moviepy (free Python library)<br>
-<b>Research:</b> Wikipedia API (free) • arXiv (free)<br>
+<b>Research:</b> arXiv (free)<br>
 <b>Bot:</b> Puppeteer + stealth (free) • Baileys (free)<br>
 <b>Deploy:</b> Render.com free tier (512MB, 750hrs/mo) or your own machine
 </div></div>
@@ -8832,9 +8853,17 @@ app.get('/loadtest/observe', function(req,res){
   });
 });
 
+/* ═══ v92 CRON KEEP-ALIVE — cron-job.org pings this bot every 5 min.
+ * The old ping target (/) returned the FULL panel HTML → "output too
+ * large" → cron-job.org disables the job → Render sleeps. /ping is a
+ * few bytes; /health is small JSON too. Point cron-job.org at /ping
+ * (or switch its method to HEAD — Express answers HEAD with headers
+ * only, no body). ═══ */
+app.get('/ping', function(req,res){ res.json({ ok:true, ts:Date.now() }); });
+app.head('/', function(req,res){ res.status(200).end(); });
+
 app.get('/health', function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,
-  school: { status: schoolStatus, number: schoolNumber },
   uptime: Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
   window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
@@ -10175,10 +10204,8 @@ app.post('/admin/film/share', async function(req, res){
 app.get('/admin/free-apis', function(req,res){
   res.json({
     apis: [
-      {name:'Wikipedia',url:'https://en.wikipedia.org/w/api.php',category:'research',keyNeeded:false,limit:'unlimited'},
       {name:'Open-Meteo',url:'https://api.open-meteo.com/v1/forecast',category:'weather',keyNeeded:false,limit:'10K/day'},
       {name:'MyMemory Translation',url:'https://api.mymemory.translated.net/get',category:'translation',keyNeeded:false,limit:'5K chars/day'},
-      {name:'DuckDuckGo',url:'https://api.duckduckgo.com/',category:'search',keyNeeded:false,limit:'fair use'},
       {name:'Jina Reader',url:'https://r.jina.ai/',category:'web-to-markdown',keyNeeded:false,limit:'20 RPM'},
       {name:'iTunes Search',url:'https://itunes.apple.com/search',category:'music',keyNeeded:false,limit:'20/min'},
       {name:'CoinGecko',url:'https://api.coingecko.com/api/v3/',category:'crypto',keyNeeded:false,limit:'30/min'},
@@ -10346,10 +10373,8 @@ const HTTP_SERVER = app.listen(PORT, async function(){
     // School stub skipped in v82 (single-account mode by default)
   } else {
     connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
-    if (!SCHOOL_MODE && process.env.ENABLE_SCHOOL === 'true'){
-    } else {
-      pushLog('info','system','School account OFF (single-account mode). Set ENABLE_SCHOOL=true to enable.');
-    }
+    /* v92: the school account is REMOVED (boss: "totally remove the
+     * school buddy") — single manager bot, nothing to enable. */
   }
 });
 /* v84.3: double-boot used to crash-loop (EADDRINUSE → exit 1 → your

@@ -831,9 +831,16 @@ function describeDisconnect(lastDisconnect){
 function localHour() { return (new Date().getUTCHours() + TZ_OFFSET_HOURS) % 24; }
 function isNsfwWindow() {
   /* v72.3: admin override — !nsfw on|off|auto forces the window regardless
-   * of the clock (the old !nsfw on replied "on." and toggled NOTHING). */
+   * of the clock (the old !nsfw on replied "on." and toggled NOTHING).
+   * v92.6 BOSS ORDER: "keep the nsfw online all times" — the DEFAULT is
+   * now ALWAYS-ON (override starts true). !nsfw auto returns to the
+   * 21:00-08:00 clock; !nsfw off blocks everything. NSFW_HOURS=env with
+   * NSFW_HOURS=clock restores the old boot default. */
   if (nsfwWindowOverride !== null) return nsfwWindowOverride;
-  const h=localHour(); return h>=NSFW_START || h<NSFW_END;
+  if (process.env.NSFW_HOURS === 'clock'){
+    const h=localHour(); return h>=NSFW_START || h<NSFW_END;
+  }
+  return true;
 }
 function isDmAiWindow() {
   const h = localHour();
@@ -841,7 +848,11 @@ function isDmAiWindow() {
   return h >= DM_AI_START_HOUR || h < DM_AI_END_HOUR;
 }
 function describeWindow() { return `${String(localHour()).padStart(2,'0')}:xx`; }
-function describeNsfw() { return isNsfwWindow() ? 'ALLOWED (21:00-08:00)' : 'BLOCKED (08:00-21:00)'; }
+function describeNsfw() {
+  if (nsfwWindowOverride === false) return 'BLOCKED (!nsfw off)';
+  return isNsfwWindow() ? 'ALLOWED 24/7 (boss order v92.6 — !nsfw auto = clock, !nsfw off = block)'
+                        : 'BLOCKED (08:00-21:00)';
+}
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1884,12 +1895,25 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
       if (i < n - 1) await sleepMs(1500 + Math.random() * 1000);   /* human pace */
       continue;
     }
-    const url = st.results[st.idx];
-    st.idx++;
-    const label = st.idx + '/' + st.results.length;
-    const res = await sendFirstWorking(chatJid, [url], st.kind, opts.caption || label, { taskType: opts.taskType || 'group' });
-    if (res.ok) sent++;
-    if (i < n - 1) await sleepMs(1200 + Math.random() * 800);   /* human pace between sends */
+    /* v92.5 RETRY BUDGET — junk/dead candidates (16x16 logos, hotlink-
+     * protected files, dead hosts) must NOT end the batch. One rejected
+     * candidate used to fail the whole nsfw.see/.see request ("No working
+     * picture") even with 121 live URLs behind it. Walk down the ranked
+     * list until the batch is filled or the budget is spent — the video
+     * branch already did this; now images and gifs do too. */
+    let tries = 0;
+    while (sent < n && st.idx < st.results.length && tries < 12){
+      tries++;
+      const url = st.results[st.idx];
+      st.idx++;
+      const label = st.idx + '/' + st.results.length;
+      const res = await sendFirstWorking(chatJid, [url], st.kind, opts.caption || label, { taskType: opts.taskType || 'group' });
+      if (res.ok){
+        sent++;
+        if (sent < n) await sleepMs(1200 + Math.random() * 800);   /* human pace between sends */
+      }
+    }
+    break;   /* v92.5: the while above owns the rest of the list — done */
   }
   return sent;
 }
@@ -2777,8 +2801,13 @@ async function scraperGif(query, nsfw=false, prefer=null, boostCat=null){
     const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('gifs', !!nsfw, null, boostCat)))];
     if (gifLinks.length) params.myLinks = gifLinks.join(',');
     const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
-    /* v91: most-relevant gifs first, same ranking as image search */
-    return { ok:true, gifs: rankRelevant(cleanResults(r.data?.gifs), query, gifLinks.split(',')), site, myLinks: r.data?.myLinks || 0 };
+    /* v91: most-relevant gifs first, same ranking as image search.
+     * v92.5 BUGFIX: this called gifLinks.split(',') — but gifLinks is an
+     * ARRAY (it was built by concat/Set above), so EVERY gif search
+     * crashed with "gifLinks.split is not a function" and nsfw.gif /
+     * .gifs never returned anything. rankRelevant wants the array (the
+     * image path passes it directly) — pass gifLinks as-is. */
+    return { ok:true, gifs: rankRelevant(cleanResults(r.data?.gifs), query, gifLinks), site, myLinks: r.data?.myLinks || 0 };
   } catch(e){
     pushLog('error','scraper',`GIF "${query}": ${e.message}`);
     return { ok:false, error:e.message, gifs:[], site };

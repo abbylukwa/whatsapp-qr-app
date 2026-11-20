@@ -4832,10 +4832,51 @@ function pickBroadcastTargets(mode){
 }
 function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
 
+/* ═══ v92.8 HELP IN OTHER LANGUAGES ═══
+ * The full menu above is English syntax — a Persian/Arabic member can't
+ * read it. !help now APPENDS a quick-start in the chat's own language:
+ * fa / ar get hand-written native blocks (they work even if the
+ * translator is down); every other non-English chat gets the English
+ * quick block machine-translated on the fly. */
+const HELP_I18N = {
+  fa: '\n\n🇮🇷 راهنمای فارسی:\n' +
+      '· عکس <نام> — عکس می‌فرستد (مثال: عکس طبیعت)\n' +
+      '· فیلم <نام> — ویدیو · آهنگ یا موزیک <نام> — موسیقی\n' +
+      '· گیف <نام> — گیف متحرک · دانلود <نام> — دانلود\n' +
+      '· play <نام آهنگ> mp3 یا mp4 — موسیقی/ویدیو\n' +
+      '· بعدی یا next — نتیجه‌ی بعدی از همان جست‌وجو\n' +
+      '· nsfw.play / nsfw.see / nsfw.gif <نام> — محتوای بزرگسال (۲۴ ساعته)\n' +
+      '· !vidsites — فهرست سایت‌های ویدیو · nsfwvideo <نام> site:<شماره> — انتخاب سایت\n' +
+      '· املای اشتباه مهم نیست — yonalethu خودکار به YonaYethuu وصل می‌شود',
+  ar: '\n\n🇸🇦 الدليل بالعربية:\n' +
+      '· صورة <اسم> — يرسل صورة (مثال: صورة طبيعة)\n' +
+      '· فيلم <اسم> — فيديو · اغنية أو موسيقى <اسم> — موسيقى\n' +
+      '· متحرك <اسم> — صور متحركة · تحميل <اسم> — تنزيل\n' +
+      '· play <اسم الأغنية> mp3 أو mp4 — موسيقى/فيديو\n' +
+      '· next — النتيجة التالية من نفس البحث\n' +
+      '· nsfw.play / nsfw.see / nsfw.gif <اسم> — محتوى للبالغين (24 ساعة)\n' +
+      '· !vidsites — قائمة مواقع الفيديو · nsfwvideo <اسم> site:<رقم> — اختيار موقع'
+};
+async function localizedHelpBlock(chatJid, lang){
+  const eff = (lang && lang !== 'auto') ? lang : getChatLang(chatJid);
+  if (!eff || eff === 'en' || eff.startsWith('en-')) return '';
+  if (HELP_I18N[eff]) return HELP_I18N[eff];
+  try {
+    const tr = await replyInLang(chatJid, eff,
+      '\n\n— QUICK HELP —\n' +
+      '· picture: pic <name> · video: vid <name> · music: play <song> (mp4 = video)\n' +
+      '· more results: say "next"\n' +
+      '· nsfw (24/7): nsfw.play / nsfw.see / nsfw.gif <query>\n' +
+      '· video sites: !vidsites · force one: !nsfwvideo <query> site:<number>\n' +
+      '· full admin menu: !help');
+    return (tr && String(tr).trim()) ? String(tr) : '';
+  } catch(e){ return ''; }
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92 — Admin (manager — school buddy removed)
+const COMMAND_LIST = `BreadBot v92.8 — Admin (manager — school buddy removed)
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -4854,6 +4895,7 @@ CASUAL — no "!" needed in DM:
 
 BASICS
 !help / !ping / !status / !jobs / !flow
+  (non-English chat? !help ends with a quick-start in YOUR language — فارسی/عربي built in)
 !test / !testall / !aitest
 !brain on|off|status — AI decision engine (v71.5)
 
@@ -5002,7 +5044,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
    * command now ALWAYS answers. */
   try {
   switch(cmd){
-    case 'commands': case 'help': await reply(COMMAND_LIST); break;
+    case 'commands': case 'help': await reply(COMMAND_LIST + await localizedHelpBlock(chatJid)); break;
     /* ═══ v71.5 AI BRAIN — toggle + live stats ═══ */
     case 'sched': {
       /* ═══ v72 MAIN-GROUP VIDEO SCHEDULER — set/enable/run ═══ */
@@ -5745,7 +5787,16 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         resetDailyStats(); dailyStats.nsfwSent++;
         await reply('Sent.');
       } else if (r.available && r.available.length){
-        await reply('❌ No file. Available sites:\n' + r.available.map(s => '• ' + s.slot + ' — ' + s.name).join('\n'));
+        /* v92.8: the scraper's raw slot list used to print 100+
+         * "undefined — bot-link-N" lines (every registry URL the bot
+         * forwards shows as a request slot). Show the CANONICAL
+         * !vidsites list instead — the same numbers site: accepts. */
+        const vs = await scraperVideoSites();
+        const sites = (vs.ok && vs.sites.length) ? vs.sites : r.available.map(s => ({ pick: s.pick || s.slot, name: s.name || s.url }));
+        await reply('❌ No file. Video sites:\n' +
+          sites.slice(0, 20).map(s => '• ' + s.pick + ' — ' + s.name).join('\n') +
+          (sites.length > 20 ? '\n… +' + (sites.length - 20) + ' more' : '') +
+          '\nPick: !nsfwvideo <query> site:<number>');
       } else {
         await reply('Err: ' + r.error);
       }
@@ -5803,8 +5854,13 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         resetDailyStats(); dailyStats.nsfwSent++;
         await reply('Sent.');
       } else if (r.available && r.available.length){
-        await reply('❌ Site "' + picked.site + '" not found. Available sites:\n' +
-          r.available.map(s => '• ' + s.slot + ' — ' + s.name).join('\n'));
+        /* v92.8: canonical list, never the raw slot dump (bot-link-N) */
+        const vs = await scraperVideoSites();
+        const sites = (vs.ok && vs.sites.length) ? vs.sites : r.available.map(s => ({ pick: s.pick || s.slot, name: s.name || s.url }));
+        await reply('❌ Site "' + picked.site + '" not found. Video sites:\n' +
+          sites.slice(0, 20).map(s => '• ' + s.pick + ' — ' + s.name).join('\n') +
+          (sites.length > 20 ? '\n… +' + (sites.length - 20) + ' more' : '') +
+          '\nClose typos auto-match now (yonalethu → YonaYethuu). Pick: site:<number>');
       } else {
         await reply('Err: ' + r.error);
       }
@@ -7168,9 +7224,14 @@ async function connectBot(){
         });
         pushLog('success','admin','Live-log: ONLINE announcement');
 
+        /* v92.8: the boss asked for a deploy-time "notify admin things
+         * available" DM — the ONLINE message now carries a live capability
+         * block (video site count comes straight from the scraper). */
+        let vsCount = '?', vsDefault = '';
+        try { const vs = await scraperVideoSites(); if (vs.ok){ vsCount = vs.sites.length; vsDefault = vs.sites[0] ? vs.sites[0].name.split(' ')[0] : ''; } } catch(e){}
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v92 ONLINE\n' +
+            'BreadBot v92.8 ONLINE\n' +
             'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -7181,7 +7242,15 @@ async function connectBot(){
             'Account age: ' + getAccountAgeDays() + 'd\n' +
             'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n\n' +
             'Admin commands accepted in ANY chat (DM or group) — v69.\n' +
-            'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.'
+            'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.\n\n' +
+            '📦 THINGS AVAILABLE:\n' +
+            '· Video sites: ' + vsCount + (vsDefault ? ' (default: ' + vsDefault + ')' : '') + ' — say !vidsites · !nsfwvideo <q> site:<#>\n' +
+            '· Site typos auto-match: site:yonalethu → YonaYethuu (v92.8 fix)\n' +
+            '· NSFW: 24/7 always on (v92.6) — nsfw.play / nsfw.see / nsfw.gif <q>\n' +
+            '· Media: pic/gif/video/music, ranked "most relevant" + next for more\n' +
+            '· Languages: عکس/فیلم/آهنگ/گیف/دانلود + 10 more — no ! needed\n' +
+            '· Help in other languages: !help now ends with a فارسی/عربي quick block\n' +
+            '· Keepalive: self-ping every 10 min + session auto-restore (no QR re-scan)'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin','DM: '+e.message); }

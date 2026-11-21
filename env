@@ -30,6 +30,11 @@ MYLINKS=
 #   2. panel → 💾 Session Backup → Copy GROUPS blob → paste into
 #      Render env SESSION_B64_GROUPS
 #   3. redeploy once — from now on every boot auto-restores. No QR.
+# v92.9.8 (NEW — DO THIS): the session backs ITSELF up to an encrypted
+# secret gist and auto-restores on every boot — NO QR rescans, ever.
+# GitHub push protection forbids tokens inside this file, so add it in
+# the RENDER DASHBOARD instead: Environment → GITHUB_TOKEN = (the PAT
+# with gist scope). No redeploy needed — the next QR scan backs up.
 
 # Your scraper deployment (the bot sends MYLINKS to it automatically)
 SCRAPER=https://intelligent-scraper.onrender.com

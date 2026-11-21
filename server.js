@@ -853,7 +853,9 @@ function describeNsfw() {
   return isNsfwWindow() ? 'ALLOWED 24/7 (boss order v92.6 — !nsfw auto = clock, !nsfw off = block)'
                         : 'BLOCKED (08:00-21:00)';
 }
-function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
+function describeDm()   { return 'OFF (v92.9.8 boss rule — AI replies in activated groups, not DMs)'; }
+/* v92.9.8: master switch for group AI chatter — !groupchat on|off */
+let groupAiChat = (process.env.GROUP_AI_CHAT || 'true') !== 'false';
 
 /* ══════════════════════════════════════════════════════════════
  *  AI — DYNAMIC PROVIDER POOL (v69, v92.9.7)
@@ -4527,6 +4529,11 @@ function dmIsInteractive(jid, e){
   return (Date.now() - e.ts) < DM_FRESH_MS;
 }
 async function runDmAiBatch(){
+  /* v92.9.8 BOSS RULE: the AI does NOT talk in DMs anymore — the persona
+   * batch is retired. DMs keep commands, admin service and media requests
+   * (all handled by the deterministic chains). AI conversation lives in
+   * the groups the boss ACTIVATES (!on) — see brainHandleGroup "chat". */
+  return;
   if (!sock || connectionStatus !== 'connected') return;
   if (botPaused || Date.now() < botOfflineUntil) return;
   if (focus.busy) return;
@@ -6378,7 +6385,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'groupchat': {
-      await reply('v68.5: AI chats in DMs ONLY (groups account). Group AI chat is permanently off — no toggle. Group media requests (send pics/music) still work.');
+      /* v92.9.8 BOSS RULE: AI chatter now lives in ACTIVATED groups (not
+       * DMs). This toggle is the master switch for it. */
+      const arg = (args[1]||'').toLowerCase();
+      if (arg === 'on' || arg === 'off') groupAiChat = (arg === 'on');
+      await reply('Group AI chat: ' + (groupAiChat ? 'ON — the AI responds to chatter in groups you activate (!on)' : 'OFF — stays silent everywhere') + '. DM AI is retired (v92.9.8).');
       break;
     }
     case 'registry': {
@@ -6670,6 +6681,40 @@ function checkFlood(){
  *  the decision consumed the message (caller stops); false/null →
  *  caller falls back to the legacy regex chain.
  * ══════════════════════════════════════════════════════════════ */
+/* ═══ v92.9.8 GROUP CHATTER — the AI responds in ACTIVATED groups ═══
+ * Boss rule: "the AI is supposed to respond in the groups I activate,
+ * not on the DMs." The DM persona batch is retired (runDmAiBatch is a
+ * no-op) and chatter replies live HERE: a "chat" decision from the
+ * brain in a group the boss turned ON (!on) gets a short persona
+ * reply through the free AI pool. Guardrails:
+ *   - activated groups only (opts.activated = accessCtl.isGroupActive)
+ *   - !groupchat master toggle (admin command)
+ *   - 45s cooldown per group + 40 replies/hour across all groups
+ *   - the model can answer SKIP when a reply would be noise        */
+const CHATTER_GROUP_COOLDOWN_MS = 45000;
+const CHATTER_HOURLY_CAP        = 40;
+const chatterLastByGroup = new Map();
+let   chatterHourStamp = 0, chatterCountHour = 0;
+function chatterAllowed(chatJid){
+  const now = Date.now();
+  if (now - chatterHourStamp > 3600000){ chatterHourStamp = now; chatterCountHour = 0; }
+  if (chatterCountHour >= CHATTER_HOURLY_CAP) return false;
+  if (now - (chatterLastByGroup.get(chatJid) || 0) < CHATTER_GROUP_COOLDOWN_MS) return false;
+  return true;
+}
+function chatterMarkSent(chatJid){
+  chatterLastByGroup.set(chatJid, Date.now());
+  chatterCountHour++;
+}
+function groupChatterSys(){
+  return 'You are a friendly member of a WhatsApp group chat (Zimbabwe). ' +
+    'Reply to the LATEST message like a real person would: warm, casual, playful, ' +
+    'ONE or TWO short sentences MAX, matching their language (Shona slang, Ndebele or English). ' +
+    'You may joke, hype people up, answer simple questions or comment on what was said. ' +
+    'HARD RULES: family-safe only (no NSFW/sex talk in groups), no links, no hashtags, ' +
+    'never say you are an AI or a bot. If the message is pure spam, a chain forward, ' +
+    'or really not aimed at anyone, output exactly SKIP and nothing else.';
+}
 async function brainHandleGroup(chatJid, dec, opts){
   if (!dec) return false;
   const isAdmin = !!(opts && opts.isAdmin);
@@ -6689,7 +6734,33 @@ async function brainHandleGroup(chatJid, dec, opts){
   }
 
   /* the AI itself says silence — the #1 cure for unnecessary sends */
-  if (dec.action === 'ignore' || dec.action === 'chat') return true;
+  if (dec.action === 'ignore') return true;
+
+  /* ═══ v92.9.8 BOSS RULE: "chat" in an ACTIVATED group gets a real
+   * reply (this used to be folded into silence). Everywhere else the
+   * bot stays quiet — non-activated groups, DMs, admin messages. ═══ */
+  if (dec.action === 'chat'){
+    if (!groupAiChat || !(opts && opts.activated)) return true;
+    if (!chatterAllowed(chatJid)) return true;
+    try {
+      const recent = (opts && opts.recent && opts.recent.length)
+        ? opts.recent.slice(-6).map(function(r){ return '- ' + String(r).replace(/\s+/g,' ').slice(0,110); }).join('\n')
+        : '(no recent context)';
+      const sys  = groupChatterSys();
+      const ask  = 'Group: ' + (opts && opts.groupName || 'the group') + '\n' +
+                   'Recent messages (latest last):\n' + recent + '\n' +
+                   'LATEST from ' + (opts && opts.senderName || 'someone') + ': "' +
+                   String((opts && opts.gtext) || '').replace(/\s+/g,' ').slice(0,200) + '"\n' +
+                   'Reply now (or SKIP).';
+      const reply = await askAI(ask, sys);
+      if (reply && String(reply).trim() && String(reply).trim().toUpperCase() !== 'SKIP'){
+        chatterMarkSent(chatJid);
+        await sendBuffer(chatJid, { text: String(reply).trim() }, 3, 'slow', 'group', true);
+        pushLog('info','chatter','AI chatter reply sent in ' + (opts && opts.groupName || chatJid));
+      }
+    } catch(e){ pushLog('warn','chatter','group reply failed: ' + e.message); }
+    return true;
+  }
 
   if (dec.action === 'link'){
     await sendBuffer(chatJid, { text:'Join: '+ADMIN_GROUP_LINK }, 3, 'slow', 'group', true);
@@ -7416,9 +7487,13 @@ async function handleMessage(msg){
             mode:'group', senderName:pushName, isAdmin,
             groupName: getGroupName(chatJid) || 'main',
             recent: recentGroupTexts(chatJid, 6),
-            nsfwWindow: nsfwOpen
+            nsfwWindow: nsfwOpen,
+            activated: !!groupOn          /* v92.9.8: boss-activated group? */
           });
-          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: nsfwOpen, senderJid })) return;
+          if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: nsfwOpen, senderJid,
+              activated: !!groupOn, recent: recentGroupTexts(chatJid, 6),
+              senderName: pushName, groupName: getGroupName(chatJid) || 'main',
+              gtext: gText })) return;
         } catch(e){ pushLog('warn','brain','group: ' + e.message); }
       }
       if (detectGroupLinkRequest(gText)){ await sendBuffer(chatJid, { text: await t2(chatJid,'Join: '+ADMIN_GROUP_LINK) }, 3, 'slow', 'group', true); return; }

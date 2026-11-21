@@ -55,7 +55,7 @@ const ADMIN_COMMANDS = new Set([
 /* action vocabulary per mode — anything else is rejected */
 const MODE_ACTIONS = {
   admin: ['command','chat','ignore'],
-  group: ['media','gif','video','music','link','ignore'],
+  group: ['media','gif','video','music','link','chat','ignore'],
   dm:    ['media','gif','video','music','link','chat','ignore']
 };
 
@@ -260,12 +260,14 @@ const ADMIN_SYS = BASE_SYS +
   '"ok cool" -> {"action":"ignore","confidence":0.9}';
 
 const GROUP_SYS = BASE_SYS +
-  ' MODE: GROUP — a member posted in the main WhatsApp group. The bot NEVER chats in groups; most group messages deserve silence. ' +
-  'Allowed actions: "media" (explicit want for PICTURES), "gif", "video", "music" (song/audio), "link" (asks for the WhatsApp group/join link), "ignore". ' +
-  '- ignore: greetings, small talk, members talking to each other, questions asked to the group (not the bot), opinions, no clear content request. ' +
-  'Examples: "pics of harare" -> {"action":"media","query":"harare","confidence":0.9} | ' +
-  '"mhoroi" -> {"action":"ignore","confidence":0.95} | "who has Monday notes?" -> {"action":"ignore","confidence":0.9} | ' +
-  '"send group link" -> {"action":"link","confidence":0.9} | "ndipe ma gifs ekute" -> {"action":"gif","query":"cats","confidence":0.85}';
+  ' MODE: GROUP — you are a friendly member of this WhatsApp group (Zimbabwe), not a silent tool. ' +
+  'Allowed actions: "chat", "media" (explicit want for PICTURES), "gif", "video", "music" (song/audio), "link" (asks for the WhatsApp group/join link), "ignore". ' +
+  '- chat: greetings, banter, questions, opinions, hype, jokes, anything a real member would reply to — the bot PARTICIPATES in the conversation (the server only sends these in groups the boss activated). ' +
+  '- ignore: spam, chain forwards, ads, single characters, member-to-member talk with no opening for the bot. ' +
+  'Chat replies must be SHORT (1-2 sentences), family-safe, matching their language (Shona slang, Ndebele or English). ' +
+  'Examples: "mhoroi" -> {"action":"chat","confidence":0.9} | "hahahah true" -> {"action":"chat","confidence":0.85} | ' +
+  '"who has Monday notes?" -> {"action":"chat","confidence":0.85} | "pics of harare" -> {"action":"media","query":"harare","confidence":0.9} | ' +
+  '"send group link" -> {"action":"link","confidence":0.9} | "forward this to 5 groups" -> {"action":"ignore","confidence":0.95}';
 
 const DM_SYS = BASE_SYS +
   ' MODE: DM — private chat with a contact; the bot persona chats here. Allowed actions: "media","gif","video","music","link","chat","ignore". ' +
@@ -283,6 +285,9 @@ function buildPrompt(text, ctx){
     (ctx.mode === 'group' ? ' (in group: ' + (ctx.groupName || 'main') + ')' : '') +
     (ctx.isAdmin ? ' [ADMIN]' : ''));
   if (ctx.nsfwWindow !== undefined) parts.push('Adult-content window: ' + (ctx.nsfwWindow ? 'OPEN' : 'closed (replies must not be adult now)'));
+  if (ctx.activated !== undefined) parts.push(ctx.activated
+    ? 'Group status: ACTIVATED by the boss — chat replies are wanted here.'
+    : 'Group status: NOT activated — only direct requests to the bot deserve a response; ordinary chatter = ignore.');
   if (Array.isArray(ctx.recent) && ctx.recent.length){
     parts.push('Recent messages in this chat (latest last):');
     for (const r of ctx.recent.slice(-6)) parts.push('- ' + String(r).replace(/\s+/g,' ').slice(0, 120));

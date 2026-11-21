@@ -1,7 +1,11 @@
 {
   "firstRunAt": 1793047134771,
   "day": "2026-11-20",
-  "dailyRecipients": {},
+  "dailyRecipients": {
+    "120000000000001@g.us": 1
+  },
   "dailyJoins": 0,
-  "recipientLastSent": {}
+  "recipientLastSent": {
+    "120000000000001@g.us": 1795201060841
+  }
 }

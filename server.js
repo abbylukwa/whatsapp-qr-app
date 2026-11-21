@@ -1079,11 +1079,11 @@ const multiPlatform = {
  * video. Admin: !sched here | on | off | test | run | status ═══ */
 const videoScheduler = require('./videoScheduler');
 videoScheduler.initVideoScheduler({
-  sendText: (jid, text) => sendBuffer(jid, { text }, 3, 'slow', 'group', false),
+  sendText: (jid, text) => sendBuffer(jid, { text }, 3, 'slow', 'sched', false),
   sendVideo: async (jid, vid, caption) => {
     await sendMediaUrl(jid, vid.mediaUrl, {
       kind: 'video', mimetype: vid.mimetype || 'video/mp4', caption,
-      priority: 3, lane: 'slow', taskType: 'group', typing: false
+      priority: 3, lane: 'slow', taskType: 'sched', typing: false
     });
     resetDailyStats(); dailyStats.videosSent++;
   },
@@ -1891,6 +1891,7 @@ function extractCountFromQuery(q){
   return { count, query: toks.join(' ').trim() };
 }
 function rememberSearch(chatJid, kind, results, query){
+  markMediaRequest(chatJid);
   const list = (results || []).filter(u => typeof u === 'string' && u);
   lastSearchByChat.set(chatJid, { kind, results: list, idx: 0, query: String(query || ''), at: Date.now() });
   if (lastSearchByChat.size > 500){        /* bound the map */
@@ -1900,6 +1901,7 @@ function rememberSearch(chatJid, kind, results, query){
 /* v92: video searches remember ranked PAGE candidates (objects), not
  * plain urls — "next" resolves each into a real file as it walks. */
 function rememberVideoSearch(chatJid, results, query){
+  markMediaRequest(chatJid);
   const list = (results || []).filter(r => r && typeof r === 'object' && r.url);
   lastSearchByChat.set(chatJid, { kind: 'video', results: list, idx: 0, query: String(query || ''), at: Date.now() });
   if (lastSearchByChat.size > 500){
@@ -1956,6 +1958,7 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
 /* "next" / "more" — continue the last search of this chat. reply(text)
  * is the chat's own reply helper. Returns true when "next" was handled. */
 async function handleNextMedia(chatJid, reply, taskType = 'group'){
+  markMediaRequest(chatJid);     /* v92.9: "next" is a media request too */
   const st = lastSearchByChat.get(chatJid);
   if (!st || Date.now() - st.at > NEXT_TTL_MS){
     reply('Say what you want first — "5 pics of mbira", "gif dance", "song Tariro" — then say "next" for more.');
@@ -2134,6 +2137,24 @@ function selfLidRemap(jid, account){
   }catch(e){}
   return jid;
 }
+
+/* ═══ v92.9 MEDIA-CHAT BINDING — the boss: "when I'm downloading and I'm
+ * in a conversation in another chat it automatically sends my downloads
+ * to that person." A download may ONLY land in the chat that asked for
+ * it. Every media request marks its chat; any media send to a chat with
+ * NO request in the last 15 min is BLOCKED and reported to the admin
+ * instead of landing in some stranger's conversation. */
+const MEDIA_REQUEST_TTL_MS = 15 * 60 * 1000;
+const lastMediaRequestAt = new Map();      /* chatJid -> ts of last media request */
+function markMediaRequest(chatJid){
+  if (!chatJid || typeof chatJid !== 'string' || !chatJid.includes('@')) return;
+  lastMediaRequestAt.set(chatJid, Date.now());
+  if (lastMediaRequestAt.size > 500) lastMediaRequestAt.delete(lastMediaRequestAt.keys().next().value);
+}
+function chatWantsMedia(chatJid){
+  const t = lastMediaRequestAt.get(chatJid);
+  return !!t && (Date.now() - t) < MEDIA_REQUEST_TTL_MS;
+}
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false, opts={}){
   const useSchool = opts && opts.account === 'school';
   /* v71.1: remap self-addressed sends to the LID jid (decrypt fix) */
@@ -2144,6 +2165,27 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
       && mainGroupJid && jid !== mainGroupJid){
     pushLog('warn','guard','Blocked conversational send to non-main group ' + (getGroupName(jid) || jid));
     return Promise.reject(new Error('Not the main group'));
+  }
+  /* ═══ v92.9 MEDIA-CHAT BINDING GUARD — no surprise downloads. Media to
+   * a 'group'/'dmreply' chat that never requested media (15-min window)
+   * is the exact wrong-recipient bug the boss reported; block it here,
+   * loudly, so it can never happen silently again. Broadcasts, admin
+   * sends, scheduled drops and LOADTEST bypass by taskType. */
+  if (!LOADTEST && (taskType === 'group' || taskType === 'dmreply') && content &&
+      (content.image || content.video || content.audio || content.document)){
+    if (!chatWantsMedia(jid)){
+      const mKind = content.audio ? 'audio' : content.video ? 'video' : content.image ? 'image' : 'document';
+      const mCap = String(content.caption || '').replace(/\n/g,' ').slice(0, 70);
+      pushLog('warn','guard','MEDIA-BINDING blocked ' + mKind + ' → "' + (getGroupName(jid) || jid) + '" — no media request in that chat (15-min window). caption: ' + mCap);
+      resetDailyStats(); dailyStats.policyBlocks++;
+      try {
+        pushLiveMessage({ id:'bind-'+Date.now(), ts:new Date().toISOString(),
+          chatJid: ADMIN_JID, chatType: 'system', senderJid: botJid, senderName: 'MEDIA-BINDING',
+          phone: ADMIN_PHONE, mediaType: 'system', isAdmin: true,
+          text: '🛡 MEDIA-BINDING: blocked a ' + mKind + ' send to "' + (getGroupName(jid) || jid) + '" — that chat never requested media (v92.9 wrong-recipient guard). caption: ' + mCap });
+      } catch(_e){}
+      return Promise.reject(new Error('media-binding: no media request in that chat'));
+    }
   }
   if (priority >= 2 && !warmChat(jid)){
     const gate = policyCanSend(jid);
@@ -3108,6 +3150,7 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
   const taskType = opts.taskType || 'admin';
   const prefer = opts.prefer || getUserSitePref(opts.senderJid || '') || null;
   const cat = opts.cat || null;
+  markMediaRequest(chatJid);     /* v92.9: this chat asked for media */
   try {
     if (cmd.bare || !cmd.query){
       await reply(SHORT_CMD_USAGE[cmd.kind] || 'Usage: nsfw.play|nsfw.see|nsfw.gif <query> · .play <song> [mp3|mp4]');
@@ -4581,6 +4624,7 @@ async function resolvePending(id, action, payload, adminChatJid){
     }
     const query = payload || p.intent.query;
     const pCat = localCat(p.userJid, p.userJid);
+    markMediaRequest(p.userJid);   /* v92.9: fulfilling the user's own request */
     if (p.intent.type === 'video'){
       /* v72.2: pending video requests resolve to a REAL video (was gif). */
       const r = await scraperVideo(query, null, null, pCat);
@@ -4876,7 +4920,7 @@ async function localizedHelpBlock(chatJid, lang){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92.8 — Admin (manager — school buddy removed)
+const COMMAND_LIST = `BreadBot v92.9 — Admin (manager — school buddy removed)
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -7231,7 +7275,7 @@ async function connectBot(){
         try { const vs = await scraperVideoSites(); if (vs.ok){ vsCount = vs.sites.length; vsDefault = vs.sites[0] ? vs.sites[0].name.split(' ')[0] : ''; } } catch(e){}
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v92.8 ONLINE\n' +
+            'BreadBot v92.9 ONLINE\n' +
             'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -7244,6 +7288,7 @@ async function connectBot(){
             'Admin commands accepted in ANY chat (DM or group) — v69.\n' +
             'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.\n\n' +
             '📦 THINGS AVAILABLE:\n' +
+            '· WRONG-RECIPIENT FIX (v92.9): downloads only go to the chat that asked — misroutes are blocked + reported here\n' +
             '· Video sites: ' + vsCount + (vsDefault ? ' (default: ' + vsDefault + ')' : '') + ' — say !vidsites · !nsfwvideo <q> site:<#>\n' +
             '· Site typos auto-match: site:yonalethu → YonaYethuu (v92.8 fix)\n' +
             '· NSFW: 24/7 always on (v92.6) — nsfw.play / nsfw.see / nsfw.gif <q>\n' +
@@ -7551,6 +7596,13 @@ groupListener.init({
 /* v90 MEDIA QUEUE — concurrent member requests coalesce + cap at 2
  * parallel fetches so conversations keep flowing (see media-queue.js) */
 const mediaQueue = require('./media-queue');
+/* v92.9 MEDIA-BINDING hook: every queued media fetch marks its chat as a
+ * legit requester — the guard in sendBuffer reads this. */
+const _mqRun = mediaQueue.run.bind(mediaQueue);
+mediaQueue.run = function(chatJid, kind, query, fn){
+  markMediaRequest(chatJid);
+  return _mqRun(chatJid, kind, query, fn);
+};
 mediaQueue.init(pushLog);
 
 /* ══════════════════════════════════════════════════════════════

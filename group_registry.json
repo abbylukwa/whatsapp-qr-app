@@ -1,0 +1,72 @@
+[
+  [
+    "120000000000001@g.us",
+    {
+      "subject": "Main Loadtest",
+      "size": 100,
+      "announce": false,
+      "botAdmin": true,
+      "participants": []
+    }
+  ],
+  [
+    "120000000000012@g.us",
+    {
+      "subject": "Other 1",
+      "size": 50,
+      "announce": false,
+      "botAdmin": false,
+      "participants": []
+    }
+  ],
+  [
+    "120000000000022@g.us",
+    {
+      "subject": "Other 2",
+      "size": 50,
+      "announce": false,
+      "botAdmin": false,
+      "participants": []
+    }
+  ],
+  [
+    "120000000000032@g.us",
+    {
+      "subject": "Other 3",
+      "size": 50,
+      "announce": false,
+      "botAdmin": false,
+      "participants": []
+    }
+  ],
+  [
+    "120000000000042@g.us",
+    {
+      "subject": "Other 4",
+      "size": 50,
+      "announce": false,
+      "botAdmin": false,
+      "participants": []
+    }
+  ],
+  [
+    "120000000000052@g.us",
+    {
+      "subject": "Other 5",
+      "size": 50,
+      "announce": false,
+      "botAdmin": false,
+      "participants": []
+    }
+  ],
+  [
+    "120000000000062@g.us",
+    {
+      "subject": "Other 6",
+      "size": 50,
+      "announce": false,
+      "botAdmin": false,
+      "participants": []
+    }
+  ]
+]

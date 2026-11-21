@@ -1,0 +1,51 @@
+[
+  {
+    "jid": "120000000000001@g.us",
+    "name": "Main Loadtest",
+    "joinedAt": 1795200160851,
+    "discovered": false,
+    "lastGreetedAt": 1795201060840
+  },
+  {
+    "jid": "120000000000012@g.us",
+    "name": "Other 1",
+    "joinedAt": 1795200160851,
+    "discovered": true,
+    "lastGreetedAt": null
+  },
+  {
+    "jid": "120000000000022@g.us",
+    "name": "Other 2",
+    "joinedAt": 1795200160851,
+    "discovered": true,
+    "lastGreetedAt": null
+  },
+  {
+    "jid": "120000000000032@g.us",
+    "name": "Other 3",
+    "joinedAt": 1795200160851,
+    "discovered": true,
+    "lastGreetedAt": null
+  },
+  {
+    "jid": "120000000000042@g.us",
+    "name": "Other 4",
+    "joinedAt": 1795200160851,
+    "discovered": true,
+    "lastGreetedAt": null
+  },
+  {
+    "jid": "120000000000052@g.us",
+    "name": "Other 5",
+    "joinedAt": 1795200160851,
+    "discovered": true,
+    "lastGreetedAt": null
+  },
+  {
+    "jid": "120000000000062@g.us",
+    "name": "Other 6",
+    "joinedAt": 1795200160851,
+    "discovered": true,
+    "lastGreetedAt": null
+  }
+]

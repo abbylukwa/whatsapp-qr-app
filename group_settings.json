@@ -1,0 +1,9 @@
+{
+  "120000000000001@g.us": {
+    "antilink": true,
+    "welcome": false,
+    "goodbye": false,
+    "welcomeMsg": "Welcome {user}!",
+    "goodbyeMsg": "{user} left."
+  }
+}

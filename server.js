@@ -10569,6 +10569,32 @@ app.post('/admin/scraper-test', async function(req,res){
   });
 });
 
+/* ═══ v92.9.6c: MUSIC ENGINE TEST — the REAL .play path ═══
+ * The panel's 🎵 button above tests the OLD scraper slots only — it never
+ * touched the converter engine that .play actually uses. After the
+ * 2026-11-21 probe (cobalt auth-walled, piped dead, one invidious search
+ * instance alive) the engine needs a live probe button of its own.
+ * Runs musicDownload(query, mode) — engine → audius → scraper fallback,
+ * the exact chain a DM `.play <song>` runs — and reports JSON. NEVER
+ * sends anything into WhatsApp. */
+app.post('/admin/music-engine-test', async function(req,res){
+  const query = String(req.body?.query || '').trim().slice(0, 120);
+  const mode = String(req.body?.mode) === 'video' ? 'video' : 'audio';
+  if (!query) return res.json({ ok:false, error:'Empty query — type a song name first.' });
+  const t0 = Date.now();
+  pushLog('info','music','Engine test [' + mode + ']: "' + query + '"');
+  const m = await musicDownload(query, mode);
+  const steps = { provider: m.provider || null, engine: m.engine || null, localFile: !!m.localFile };
+  if (!m.ok) return res.json({ ok:false, query, mode, steps, ms:Date.now()-t0, error:m.error,
+    hint:'The converter chain failed — exact per-provider errors are on the panel logs (source: music).' });
+  pushLog('success','music','Engine test [' + mode + '] OK: "' + query + '" via ' + (m.provider || m.engine || '?') +
+    (m.sizeBytes ? ' (' + (m.sizeBytes/1024/1024).toFixed(1) + 'MB)' : '') + ' in ' + (Date.now()-t0) + 'ms');
+  return res.json({ ok:true, query, mode, steps,
+    title:m.title || query, sizeBytes:m.sizeBytes || 0, mimetype:m.mimetype || (mode === 'audio' ? 'audio/mpeg' : 'video/mp4'),
+    mediaUrl:absoluteUrl(req, m.mediaUrl), sourceUrl:m.sourceUrl || m.mediaUrl, tempLink:!!m.tempLink,
+    ms: Date.now()-t0 });
+});
+
 /* ═══ v84.3: BLENDER VIEW + HEAR PREVIEW ═══
  * The old flow produced only a TEXT prompt — you could never SEE the
  * scene or HEAR the narration before Blender ran. Two honest additions:

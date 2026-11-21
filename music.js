@@ -4,11 +4,9 @@
  *  The boss: "use online downloader site it y2mate do not use ytp". So the
  *  chain here is online converters + stream-mirror APIs, NOT yt-dlp:
  *
- *   search  → Invidious API → Piped API → YouTube HTML scrape (fallback)
- *   audio   → Piped streams → Invidious streams → y2mate ajax → cobalt
- *             instances → vevioz simple API
- *   video   → Invidious progressive mp4 (720→360 quality fallback) →
- *             Piped combined streams → cobalt → y2mate mp4
+ *   search  → Invidious API (materialio first) → Piped API → YouTube HTML scrape (fallback)
+ *   audio   → Piped streams → Invidious streams → cobalt instances → AUDIUS fallback
+ *   video   → Piped combined streams → Invidious progressive mp4 (720→360) → cobalt
  *
  *  Every provider is HEALTH-MARKED (data/music-health.json): a provider
  *  that throws is skipped for 10 minutes (self-healing failover), tried
@@ -28,16 +26,22 @@ const PROVIDER_COOLDOWN = 10 * 60 * 1000;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const SEARCH_INSTANCES = {
-  invidious: ['https://inv.nadeko.net', 'https://invidious.nerdvpn.de', 'https://yewtu.be',
+  /* v92.9.6c probe (2026-11-21, datacenter IP): materialio is the only
+   * instance answering /api/v1/search with real JSON — put it FIRST.
+   * yewtu.be DROPPED: it answers API paths with its HTML frontend (HTTP
+   * 200 but not JSON), so it wasted a slot and poisoned "200 = alive". */
+  invidious: ['https://invidious.materialio.us', 'https://inv.nadeko.net', 'https://invidious.nerdvpn.de',
               'https://invidious.f5.si', 'https://iv.melmac.space'],
   piped:     ['https://pipedapi.kavin.rocks', 'https://pipedapi.adminforge.de',
               'https://api.piped.private.coffee', 'https://pipedapi.drgns.space']
 };
-/* v92.9.6: cobalt v10, minimal body (probe-proven the only shape every
- * instance accepts) — instances get YouTube-login-walled intermittently,
- * the health tracker skips a walled one for 10 min and tries the next. */
-const COBALT_INSTANCES = ['https://co.otomir23.me', 'https://api.cobalt.tools',
-                          'https://cobalt-backend.canine.tools', 'https://kityune.imput.net'];
+/* v92.9.6c probe: api.cobalt.tools + cobalt-backend.canine.tools now answer
+ * `error.api.auth.jwt.missing` (API-key wall — PERMANENT, not a blip), so
+ * they are removed. co.otomir23.me answers `error.api.youtube.login`
+ * (Google datacenter-IP wall — comes and goes per IP, keep trying) and
+ * kityune.imput.net sits behind Cloudflare (passes from some IPs). Cobalt
+ * is tried LAST in the chain — see the order note in convert(). */
+const COBALT_INSTANCES = ['https://co.otomir23.me', 'https://kityune.imput.net'];
 
 let health = {};                                  /* provider -> {fails,lastError,lastCheck} */
 let chainDownUntil = 0;                           /* whole-chain cooldown (v90.1 self-healing) */
@@ -174,9 +178,19 @@ async function audiusHostGet(){
 }
 async function audius(query){
   const H = await audiusHostGet();
-  const s = await http({ url: H + '/v1/tracks/search',
-    params: { query: query, app_name: 'breadbot' }, maxContentLength: 6 * 1024 * 1024 });
-  const tracks = (s.data && s.data.data) || [];
+  /* v92.9.6c: boss-style queries carry YouTube junk ("official audio",
+   * "lyrics", "mp3") that Audius titles never match — strip fillers and
+   * retry once before giving up (probe: "nle choppa" → 10 tracks,
+   * "nle choppa depression" → 0; fillers are the usual silent killer). */
+  const FILLER = /\b(official( |$)|lyrics( |$)|lyric( |$)|audio( |$)|video( |$)|mp3( |$)|mp4( |$)|song( |$)|hd( |$)|4k( |$))/gi;
+  let tracks = [];
+  for (const q of [query, query.replace(FILLER, ' ').replace(/\s+/g, ' ').trim()]){
+    if (!q || (q === query && tracks.length)) continue;
+    const s = await http({ url: H + '/v1/tracks/search',
+      params: { query: q, app_name: 'breadbot' }, maxContentLength: 6 * 1024 * 1024 });
+    tracks = (s.data && s.data.data) || [];
+    if (tracks.length) break;
+  }
   if (!tracks.length) throw new Error('audius: no tracks for "' + query + '"');
   const t = tracks[0];
   const artist = (t.user && t.user.name) ? t.user.name + ' - ' : '';
@@ -198,19 +212,21 @@ async function convert(videoId, mode, opts = {}){
     } catch (e) { markFail(name, e.message); tries.push(name + ': ' + e.message); return null; }
   };
   let r;
-  /* v92.9.6: cobalt FIRST — a working instance tunnels the file directly
-   * (no stream-matrix puzzles); when YouTube login-walls an instance the
-   * health mark skips it for 10 min and the next one gets its chance. */
-  for (const base of COBALT_INSTANCES){
-    r = await attempt('cobalt:' + new URL(base).host, () => cobalt(base, videoId, mode, opts.quality || (mode === 'video' ? '360' : undefined)));
-    if (r) return r;
-  }
+  /* v92.9.6c ORDER CHANGE (probe 2026-11-21): STREAM MIRRORS FIRST, cobalt
+   * last. Cobalt used to lead, but all keyless instances are now either
+   * auth-walled (jwt.missing) or YouTube-login-walled — leading with them
+   * burned ~60-90s of dead 400s before the working provider got its turn.
+   * The health tracker still revives any provider that recovers. */
   for (const base of SEARCH_INSTANCES.piped){
     r = await attempt('audio:piped:' + new URL(base).host, () => audioPiped(base, videoId));
     if (r) return r;
   }
   for (const base of SEARCH_INSTANCES.invidious){
     r = await attempt((mode === 'audio' ? 'audio' : 'video') + ':invidious:' + new URL(base).host, () => streamsInvidious(base, videoId, mode));
+    if (r) return r;
+  }
+  for (const base of COBALT_INSTANCES){
+    r = await attempt('cobalt:' + new URL(base).host, () => cobalt(base, videoId, mode, opts.quality || (mode === 'video' ? '360' : undefined)));
     if (r) return r;
   }
   /* v92.9.6: the whole chain failed — converters/stream mirrors are often

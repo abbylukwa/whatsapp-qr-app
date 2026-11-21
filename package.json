@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-qr-app",
-  "version": "92.9.8",
+  "version": "92.9.9",
   "description": "BreadBot v83 - commercial-grade multi-platform automation (WhatsApp + Facebook + YouTube + Twitter + TikTok), 100% unofficial browser automation, AI BRAIN, anti-bot detection with detection meter, human behavior simulation, per-platform schedules, cross-platform broadcast, self-update, crash recovery, health monitoring, structured logging, YouTube video upload + community posts + Shorts + educational content generator, Facebook content adapter (half YT frequency) + auto-join from WhatsApp links, research-based safe rate limits, spintax content variation, intelligent-scraper integration, cross-platform interaction tracker, internet monitor, optional API keys config, Twitter standalone config, all admin commands via WhatsApp",
   "main": "server.js",
   "scripts": {
@@ -20,7 +20,7 @@
   "dependencies": {
     "@puppeteer/browsers": "^2.0.0",
     "@sparticuz/chromium": "^133.0.0",
-    "@whiskeysockets/baileys": "6.7.18",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "axios": "^1.7.0",
     "baileys-antiban": "^4.10.0",
     "dotenv": "^16.4.5",

@@ -163,6 +163,10 @@ const {
   generateWAMessageFromContent
 } = require('@whiskeysockets/baileys');
 
+/* v92.9.9: 6.7.18 half-paired (registered never flipped true) and Bad-MAC'd
+ * every message after WhatsApp's LID migration; 7.x is LID-native. */
+const BAILEYS_VERSION = (()=>{ try { return require('@whiskeysockets/baileys/package.json').version; } catch(e){ return 'unknown'; } })();
+
 let RedgifsDownloader = null;   /* v73.1: redgifs lib no longer used — videos come only from the owner's slots */
 
 const QRCode = require('qrcode');
@@ -11530,6 +11534,7 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   pushLog('info','policy','Age '+getAccountAgeDays()+'d · '+dailyRecipientLimit(getAccountAgeDays())+' rec/day · '+dailyJoinLimit(getAccountAgeDays())+' joins/day');
   pushLog('info','policy','Typing='+(ENABLE_TYPING?'ON':'OFF')+' Reads='+(ENABLE_READ_RECEIPTS?'ON':'OFF')+' Block='+(ENABLE_CONTENT_BLOCK?'ON':'OFF'));
   pushLog('info','env','AI pool: ' + (AI_POOL.length ? AI_POOL.map(function(p){ return p.name; }).join(',') : 'NONE — add API_1=<key> in env'));
+  pushLog('info','env','Baileys ' + BAILEYS_VERSION + ' (LID-native — v92.9.9 upgrade from 6.7.18 to fix Bad-MAC decrypt storms)');
   pushLog('info','env','SCRAPER='+SCRAPER_URL);
   pushLog('info','env','MY LINKS: ' + (MY_LINKS_ENV.length ? MY_LINKS_ENV.length + ' url(s) — sent with every search, YOUR sites tried FIRST' : 'none — add MYLINKS=https://yoursite.com in env to download from your websites'));
   pushLog('info','session',

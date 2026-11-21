@@ -56,6 +56,31 @@ function markOk(p){ health[p] = { fails: 0, lastError: null, lastCheck: Date.now
 function providerDead(p){ const h = health[p]; return !!(h && h.fails >= 2 && Date.now() - h.lastCheck < PROVIDER_COOLDOWN); }
 function providerStats(){ return health; }
 
+/* v92.9.9 FAKE-SONG GATE — score a candidate title against the query.
+ * Share of query tokens found in the title (0..1). "winky d mauro"
+ * vs "Winky D - Mauro (Official Audio)" → 1.0; a random Audius upload
+ * that merely shares one word → ~0.33 and gets refused. */
+function titleMatchScore(title, query){
+  const norm = s => String(s || '').toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const qt = norm(query).split(' ').filter(w => w.length > 1);
+  if (!qt.length) return 1;                       /* bare URL/ID ask — no gate */
+  const tt = ' ' + norm(title) + ' ';
+  const hits = qt.filter(w => tt.includes(' ' + w + ' ') || tt.includes(w)).length;
+  return hits / qt.length;
+}
+/* pick the best candidate of the first N by title match; floors apply */
+function bestByTitle(cands, query, { max = 8, floor = 0 } = {}){
+  const list = (cands || []).filter(Boolean).slice(0, max)
+    .map(c => ({ ...c, score: titleMatchScore(c.title, query) }))
+    .sort((a, b) => b.score - a.score);
+  if (!list.length) throw new Error('no results');
+  if (floor > 0 && list[0].score < floor) throw new Error('no close title match (best ' + list[0].score.toFixed(2) + ')');
+  return list[0];
+}
+
 /* ── one HTTP helper for the whole module ───────────────────────────── */
 async function http(opts){
   const r = await axios({ timeout: 20000, maxRedirects: 5, validateStatus: s => s >= 200 && s < 400,
@@ -67,18 +92,16 @@ async function http(opts){
 async function searchInvidious(base, query){
   const r = await http({ url: base + '/api/v1/search', params: { q: query, type: 'video' }, maxContentLength: 4 * 1024 * 1024 });
   const arr = r.data || [];
-  for (const v of arr){
-    if (v && v.videoId) return { videoId: v.videoId, title: v.title || query, provider: 'invidious:' + new URL(base).host };
-  }
-  throw new Error('no results');
+  /* v92.9.9: best-of-8 by title match instead of the blind first hit */
+  const cand = arr.filter(v => v && v.videoId).map(v => ({ videoId: v.videoId, title: v.title || query, provider: 'invidious:' + new URL(base).host }));
+  return bestByTitle(cand, query);
 }
 async function searchPiped(base, query){
   const r = await http({ url: base + '/search', params: { q: query, filter: 'videos' }, maxContentLength: 4 * 1024 * 1024 });
   const items = (r.data && r.data.items) || [];
-  for (const v of items){
-    if (v && v.url && /watch\?v=([\w-]{11})/.test(v.url)) return { videoId: RegExp.$1, title: v.title || query, provider: 'piped:' + new URL(base).host };
-  }
-  throw new Error('no results');
+  const cand = items.filter(v => v && v.url && /watch\?v=([\w-]{11})/.test(v.url))
+    .map(v => ({ videoId: RegExp.$1, title: v.title || query, provider: 'piped:' + new URL(base).host }));
+  return bestByTitle(cand, query);
 }
 async function searchHtml(query){
   const r = await http({ url: 'https://www.youtube.com/results',
@@ -86,9 +109,13 @@ async function searchHtml(query){
     maxContentLength: 3 * 1024 * 1024,
     headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' } });
   const html = String(r.data || '');
-  const m = /"videoRenderer":\{"videoId":"([\w-]{11})"[\s\S]{0,600}?"title":\{"runs":\[\{"text":"(.*?)"\}/.exec(html);
-  if (!m) throw new Error('html scrape: no result');
-  return { videoId: m[1], title: m[2].replace(/\\u([\dA-Fa-f]{4})/g, (x, h) => String.fromCharCode(parseInt(h, 16))).replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'"), provider: 'youtube-html' };
+  /* v92.9.9: score the first few renderers, take the best title match */
+  const re = /"videoRenderer":\{"videoId":"([\w-]{11})"[\s\S]{0,600}?"title":\{"runs":\[\{"text":"(.*?)"\}/g;
+  const cand = []; let m;
+  while ((m = re.exec(html)) !== null && cand.length < 8){
+    cand.push({ videoId: m[1], title: m[2].replace(/\\u([\dA-Fa-f]{4})/g, (x, h) => String.fromCharCode(parseInt(h, 16))).replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'"), provider: 'youtube-html' });
+  }
+  return bestByTitle(cand, query);
 }
 async function search(query){
   const attempts = [];
@@ -192,10 +219,21 @@ async function audius(query){
     if (tracks.length) break;
   }
   if (!tracks.length) throw new Error('audius: no tracks for "' + query + '"');
-  const t = tracks[0];
-  const artist = (t.user && t.user.name) ? t.user.name + ' - ' : '';
+  /* v92.9.9 FAKE-SONG GATE — Audius search is fuzzy and full of
+   * unofficial remix/karaoke uploads that match by one word. Walk the
+   * top 10 and take the first whose title carries at least HALF the
+   * query tokens; refuse the song rather than send a wrong one. */
+  const cand = tracks.slice(0, 10).map(t => ({
+    id: t.id,
+    title: ((t.user && t.user.name) ? t.user.name + ' - ' : '') + (t.title || ''),
+    rawTitle: t.title || ''
+  }));
+  let t = null;
+  try { t = bestByTitle(cand, query, { max: 10, floor: 0.5 }); } catch (e) {
+    throw new Error('audius: no close match for "' + query + '" — refusing a wrong song');
+  }
   return { mediaUrl: H + '/v1/tracks/' + t.id + '/stream?app_name=breadbot',
-           title: artist + (t.title || ''), sizeBytes: 0,
+           title: t.title, sizeBytes: 0,
            mimetype: 'audio/mpeg', provider: 'audius' };
 }
 

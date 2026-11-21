@@ -356,6 +356,10 @@ const ACTIVE_SET_CAP      = 20000;
 const SCHOOL_STRICT_ADMIN = (process.env.SCHOOL_STRICT_ADMIN || 'true') === 'true';
 const DOC_ENABLED         = (process.env.DOC_ENABLED || 'true') === 'true';
 const DOC_MAX_BYTES       = Math.max(1, parseInt(process.env.DOC_MAX_MB || '20', 10)) * 1024 * 1024;
+/* v92.9.9 FIX: DOC_OK_EXTS was referenced in handleIncomingDocument but
+ * never defined — every document message threw "DOC_OK_EXTS is not
+ * defined" (seen in live logs). Keep in sync with the reply text below. */
+const DOC_OK_EXTS         = ['pdf', 'docx', 'doc', 'txt', 'csv', 'md'];
 const DOC_MAX_TEXT        = Math.max(2000, parseInt(process.env.DOC_MAX_TEXT || '120000', 10));
 const DOC_KEEP_PER_CHAT   = 4;      // most recent docs kept per chat
 const DOC_TTL_MS          = 12 * 60 * 60 * 1000; // 12h document memory
@@ -3070,7 +3074,7 @@ async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
     const body = { query, site, nsfw: !!nsfw };
     const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('images', !!nsfw, null, boostCat)))];
     if (myLinks.length) body.myLinks = myLinks;
-    const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 45000 });
+    const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 150000 });   /* v92.9.9: 45s always lost to the scraper's multi-site ladder → "no pics". Scraper now answers ≤40s (bounded engine) but keep headroom for cold starts. */
     /* v91: MOST-RELEVANT first — word-hit ranking over the URL slugs,
      * own-chain domains as tiebreak (v90.3 authenticity kept) */
     return { ok:true, images: rankRelevant(cleanResults(r.data?.images), query, myLinks), site, myLinks: r.data?.myLinks || 0 };
@@ -3092,7 +3096,7 @@ async function scraperGif(query, nsfw=false, prefer=null, boostCat=null){
     if (nsfw) params.nsfw = '1';
     const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('gifs', !!nsfw, null, boostCat)))];
     if (gifLinks.length) params.myLinks = gifLinks.join(',');
-    const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout:30000 });
+    const r = await axios.get(`${SCRAPER_URL}/gif`, { params, timeout: 90000 });   /* v92.9.9: was 30000 — gif hunts walk several slots; 30s killed half the answers */
     /* v91: most-relevant gifs first, same ranking as image search.
      * v92.5 BUGFIX: this called gifLinks.split(',') — but gifLinks is an
      * ARRAY (it was built by concat/Set above), so EVERY gif search
@@ -3177,6 +3181,17 @@ async function scraperMusic(query){
  * every file under WhatsApp's 34MB rule BEFORE we ever try to send). ═══ */
 async function musicDownload(query, mode = 'audio'){
   resetDailyStats(); dailyStats.scraperMusic++;
+  /* v92.9.9 ORDER FIX — the boss's promised sites (JustNaija /
+   * NotJustOk / TrendyBeatz + the new Persian slots nex1music /
+   * Radio Javan) go FIRST through the scraper's song-page digging.
+   * The converter chain (YouTube/Invidious) is the fallback, and
+   * Audius — which served the "fake songs" (random uploads matched
+   * by name) — is gated by a title-relevance check in music.js. */
+  if (mode === 'audio') {
+    const m = await scraperMusic(query);
+    if (m.ok) { m.engine = 'scraper-slots'; return m; }
+    pushLog('info', 'music', `scraper slots: no result for "${query}" — trying converter chain`);
+  }
   try {
     const r = await musicEngine.getMusic(query, mode);
     /* local copy first — converter links die within minutes */
@@ -3191,10 +3206,6 @@ async function musicDownload(query, mode = 'audio'){
       sizeBytes: r.sizeBytes || 0, provider: r.provider, engine: 'converter', tempLink: true };
   } catch (e) {
     pushLog('warn', 'music', `engine ${mode} "${query}": ${e.message}`);
-    if (mode === 'audio') {
-      const m = await scraperMusic(query);        /* old slot — final fallback */
-      if (m.ok) { m.engine = 'scraper-fallback'; return m; }
-    }
     return { ok: false, error: e.message };
   }
 }
@@ -3244,7 +3255,7 @@ async function scraperVideoRanked(query, opts = {}){
     const preferUrl = resolvePreferUrl(opts.site);
     const vidLinks = [...new Set([].concat(preferUrl || [], MY_LINKS_ENV, siteHealth.healthyLinks('videos', false, null, opts.boostCat || null)))];
     if (vidLinks.length) body.myLinks = vidLinks;
-    const r = await scrapperFetch('/video-ranked', body, 45000);
+    const r = await scrapperFetch('/video-ranked', body, 150000);   /* v92.9.9: was 45000 — ranked hunts walk per-site pages; give the budgeted engine headroom */
     if (!r || !r.success || !Array.isArray(r.results)) throw new Error('scrapper: no ranked results');
     const list = r.results.filter(x => x && x.url)
       .map(x => ({ title: x.title || 'video', url: x.url, site: x.site || '', kind: x.kind || 'page', score: x.score || 0 }));
@@ -3360,8 +3371,16 @@ const SHORT_CMD_USAGE = {
 async function runShortMediaCommand(chatJid, cmd, opts = {}){
   const reply = opts.replyFn || ((t) => adminReply(chatJid, t));
   const taskType = opts.taskType || 'admin';
-  const prefer = opts.prefer || getUserSitePref(opts.senderJid || '') || null;
+  let prefer = opts.prefer || getUserSitePref(opts.senderJid || '') || null;
   const cat = opts.cat || null;
+  /* v92.9.9: PER-COMMAND site pick — "nsfw.see <q> site:afghan",
+   * "nsfw.gif <q> #2", "@2" forces ONE site for this ask only; the
+   * saved !site pref still applies when no pick is given. Same syntax
+   * the video commands already had. */
+  if (cmd.query){
+    const cmdPick = parseVideoSitePick(cmd.query);
+    if (cmdPick && cmdPick.site && cmdPick.query){ cmd.query = cmdPick.query; prefer = cmdPick.site; }
+  }
   markMediaRequest(chatJid);     /* v92.9: this chat asked for media */
   try {
     if (cmd.bare || !cmd.query){
@@ -5111,14 +5130,24 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
  * quick block machine-translated on the fly. */
 const HELP_I18N = {
   fa: '\n\n🇮🇷 راهنمای فارسی:\n' +
-      '· عکس <نام> — عکس می‌فرستد (مثال: عکس طبیعت)\n' +
-      '· فیلم <نام> — ویدیو · آهنگ یا موزیک <نام> — موسیقی\n' +
-      '· گیف <نام> — گیف متحرک · دانلود <نام> — دانلود\n' +
-      '· play <نام آهنگ> mp3 یا mp4 — موسیقی/ویدیو\n' +
-      '· بعدی یا next — نتیجه‌ی بعدی از همان جست‌وجو\n' +
+      '· عکس یا pic <نام> — عکس می‌فرستد (مثال: pic طبیعت)\n' +
+      '· فیلم یا vid <نام> — ویدیو · گیف یا nsfw.gif <نام> — گیف متحرک\n' +
+      '· آهنگ یا play <نام آهنگ> — موسیقی · play <نام> mp4 — ویدیو\n' +
       '· nsfw.play / nsfw.see / nsfw.gif <نام> — محتوای بزرگسال (۲۴ ساعته)\n' +
-      '· !vidsites — فهرست سایت‌های ویدیو · nsfwvideo <نام> site:<شماره> — انتخاب سایت\n' +
-      '· املای اشتباه مهم نیست — yonalethu خودکار به YonaYethuu وصل می‌شود',
+      '· بعدی یا next — نتیجه‌ی بعدی از همان جست‌وجو\n' +
+      '· انتخاب سایت: !vidsites فهرست را می‌دهد · nsfwvideo <نام> site:<شماره> — ویدیو از همان سایت\n' +
+      '· !pic <نام> site:<شماره> — عکس از سایت دلخواه\n' +
+      '· آهنگ فارسی: play <نام خواننده> — از Nex1Music و Radio Javan\n' +
+      '· املای اشتباه مهم نیست — yonalethu خودکار به YonaYethuu وصل می‌شود\n' +
+      '· !help فارسی — همین راهنما · !help english — انگلیسی · !help shona — شونا',
+  sn: '\n\n🇿🇼 Rundava muShona:\n' +
+      '· pic <zita> — inotumira mufananidzo (semuenzaniso: pic mvura)\n' +
+      '· vid <zita> — vhidhiyo · gif <zita> — gif inofambira\n' +
+      '· play <rizha rwenziyo> — nziyo · play <zita> mp4 — vhidhiyo\n' +
+      '· next — mhinduro inotevera yedzvinyirwo rimwechete\n' +
+      '· !vidsites — rondedzero yemasaiti evhidhiyo\n' +
+      '· nsfw.play / nsfw.see / nsfw.gif <zita> — zvemukati mevhu (24/7)\n' +
+      '· !help persian — rundava yePersian · !help english — English',
   ar: '\n\n🇸🇦 الدليل بالعربية:\n' +
       '· صورة <اسم> — يرسل صورة (مثال: صورة طبيعة)\n' +
       '· فيلم <اسم> — فيديو · اغنية أو موسيقى <اسم> — موسيقى\n' +
@@ -5128,6 +5157,27 @@ const HELP_I18N = {
       '· nsfw.play / nsfw.see / nsfw.gif <اسم> — محتوى للبالغين (24 ساعة)\n' +
       '· !vidsites — قائمة مواقع الفيديو · nsfwvideo <اسم> site:<رقم> — اختيار موقع'
 };
+
+/* v92.9.9 HELP IN A CHOSEN LANGUAGE — "!help persian".
+ * The boss: "I want to activate it with !help persian just like that".
+ * Language words are matched exactly (no fuzzy), Persian first: */
+const HELP_LANG_ALIASES = {
+  fa: ['persian', 'farsi', 'fa', 'iran', 'irani', 'پارسی', 'فارسی', 'ایرانی'],
+  ar: ['arabic', 'arabi', 'ar', 'عربي', 'العربية'],
+  sn: ['shona', 'sn', 'zimbabwe', 'zw'],
+  es: ['spanish', 'espanol', 'es', 'español'],
+  fr: ['french', 'francais', 'fr', 'français'],
+  en: ['english', 'en', 'eng']
+};
+function helpLangFromArg(arg){
+  const deaccent = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const a = deaccent(String(arg || '').trim().toLowerCase());
+  if (!a) return null;
+  for (const [code, names] of Object.entries(HELP_LANG_ALIASES)){
+    if (names.some(n => a === deaccent(n))) return code;
+  }
+  return null;
+}
 async function localizedHelpBlock(chatJid, lang){
   const eff = (lang && lang !== 'auto') ? lang : getChatLang(chatJid);
   if (!eff || eff === 'en' || eff.startsWith('en-')) return '';
@@ -5377,7 +5427,23 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
    * command now ALWAYS answers. */
   try {
   switch(cmd){
-    case 'commands': case 'help': await reply(COMMAND_LIST + await localizedHelpBlock(chatJid)); break;
+    case 'commands': case 'help': {
+      /* v92.9.9 HELP IN A CHOSEN LANGUAGE — "!help persian" (also
+       * farsi/فارسی/shona/arabic/spanish/french/english) forces the
+       * native help block AND switches this chat's language, so the
+       * search replies follow it too. Plain !help keeps auto-detect. */
+      const langArg = args.slice(1).join(' ').trim();
+      const forced = helpLangFromArg(langArg);
+      if (langArg && !forced){
+        await reply('I do not know that language yet. Try: !help persian · !help shona · !help arabic · !help spanish · !help french · !help english');
+      } else if (forced){
+        try { rememberChatLang(chatJid, forced); } catch(e){}
+        const block = HELP_I18N[forced] || await localizedHelpBlock(chatJid, forced);
+        await reply(COMMAND_LIST + block);
+      } else {
+        await reply(COMMAND_LIST + await localizedHelpBlock(chatJid));
+      }
+    } break;
     /* ═══ v71.5 AI BRAIN — toggle + live stats ═══ */
     case 'sched': {
       /* ═══ v72 MAIN-GROUP VIDEO SCHEDULER — set/enable/run ═══ */

@@ -2051,7 +2051,16 @@ async function sendMediaUrl(jid, mediaUrl, opts = {}){
           : isVideoB ? { video: buf, mimetype: mimetype || 'video/mp4', caption }
           : isImageB ? { image: buf, mimetype: mimetype || 'image/jpeg', caption }
           : { document: buf, mimetype: mimetype || 'application/octet-stream', caption, fileName: selfName };
-        return sendBuffer(jid, contentB, priority, lane, taskType, typing, account ? { account } : undefined);
+        /* v92.9.4: AFTER-SUCCESS SEND CLEANUP — the boss: "after
+         * successfully sending finish everything." The local copy is a
+         * delivery cache: once the message is out, the bytes are dead
+         * weight on a free-tier box. Delete immediately; keep the file
+         * if the send failed so retries still work. */
+        const sentP = sendBuffer(jid, contentB, priority, lane, taskType, typing, account ? { account } : undefined);
+        Promise.resolve(sentP).then(() => {
+          fs.unlink(selfPath, () => {});
+        }).catch(() => { /* send failed — keep for retry */ });
+        return sentP;
       }
     }
   } catch (_selfErr) { /* fall through to URL delivery below */ }
@@ -2642,7 +2651,11 @@ async function routeButton(jid, id, account, msg){
  * lists everything you can open. Files: data/media-cache/
  * ══════════════════════════════════════════════════════════ */
 const MEDIA_DIR = path.join(__dirname, 'data', 'media-cache');
-const MEDIA_MAX_AGE_MS = 24 * 3600 * 1000;   /* panel copies live 24h, then swept */
+/* v92.9.4: FREE-TIER MEMORY — Render free boxes are small and both
+ * services were mailed for exceeding limits. Local copies are a
+ * delivery cache, not storage: 24h → 2h, sweep every 5min, and
+ * sendMediaUrl deletes each file the moment its send succeeds. */
+const MEDIA_MAX_AGE_MS = 2 * 3600 * 1000;   /* panel copies live 2h, then swept */
 const MEDIA_CACHE_MAX_BYTES = 60 * 1024 * 1024;
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 const MEDIA_CRYPTO = require('crypto');
@@ -2754,7 +2767,7 @@ function mediaSweep(){
     return deleted;
   } catch(e){ return 0; }
 }
-setInterval(mediaSweep, 15 * 60 * 1000).unref();     /* v89: every 15min (was hourly) */
+setInterval(mediaSweep, 5 * 60 * 1000).unref();     /* v92.9.4: every 5min (was 15) */
 function guessMediaKind(file){
   const m = /_(video|audio|music|image|gif|prompt|script|blender|scene|film)_/.exec(file);
   if (m) return m[1] === 'music' ? 'audio' : m[1];

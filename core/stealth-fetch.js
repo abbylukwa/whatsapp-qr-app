@@ -20,7 +20,7 @@ const ant = require('./anti-detection');
 let _browser = null;
 let _launching = null;
 let _lastUse = 0;
-const BROWSER_IDLE_MS = 5 * 60 * 1000;      /* close after 5 idle minutes */
+const BROWSER_IDLE_MS = 2 * 60 * 1000;      /* close after 2 idle minutes (free-tier RAM) */
 
 async function getBrowser(){
   if (_browser){

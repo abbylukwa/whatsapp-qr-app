@@ -2232,9 +2232,17 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
     }
   }
   /* v67: main-group lock for conversational group sends. Broadcasts,
-   * admin !send and media pushes to other groups stay allowed. */
+   * admin !send and media pushes to other groups stay allowed.
+   * v92.9.6b: groups the boss ACTIVATED are exempt now — his multi-group
+   * switch (".play / nsfw.play / !help inside it") opens a group for the
+   * members to download there, so member cards + command replies must
+   * reach non-main groups too. The old lock silently rejected every text
+   * reply to them ("Not the main group"). Non-activated groups stay
+   * locked (and the v92.9.6 gate already silences them entirely). */
   if (taskType === 'group' && typeof jid === 'string' && jid.endsWith('@g.us')
-      && mainGroupJid && jid !== mainGroupJid){
+      && mainGroupJid && jid !== mainGroupJid
+      && !accessCtl.isGroupActive(jid)
+      && !(opts && (opts.adminTrigger || opts.activationConfirm))){
     pushLog('warn','guard','Blocked conversational send to non-main group ' + (getGroupName(jid) || jid));
     return Promise.reject(new Error('Not the main group'));
   }
@@ -5039,17 +5047,50 @@ function groupHelpText(){
     + 'Downloads are free. One request at a time — I reply when your file is ready.';
 }
 
+/* ═══ v92.9.6b — the help a GROUP sees follows the group's language
+ * (getChatLang): Persian group → Persian card, Arabic → Arabic,
+ * everything else English. The command tokens (.play, !pic, next …)
+ * stay Latin on purpose — members type them exactly as shown. */
+const GROUP_HELP_I18N = {
+  fa: '🤖 *ربات رسانه — راهنما*\n\n'
+    + '🎵 *آهنگ / صدا* — بنویس:\n'
+    + '      .play <نام آهنگ> mp3\n'
+    + '      مثال:  .play Jerusalema mp3\n\n'
+    + '🎬 *ویدیو* — بنویس:\n'
+    + '      .play <نام> mp4   ·   .video <نام>\n\n'
+    + '🖼 *عکس* —  !pic <نام>\n'
+    + '⏭ *نتیجه بعدی* — بنویس  next\n'
+    + '🌐 *انتخاب سایت* —  !sites  و بعد  !site <نام>\n\n'
+    + 'دانلود رایگان است. هر بار یک درخواست — وقتی فایل آماده شد جواب می‌دهم.',
+  ar: '🤖 *بوت الوسائط — الدليل*\n\n'
+    + '🎵 *أغنية / صوت* — اكتب:\n'
+    + '      .play <اسم الأغنية> mp3\n'
+    + '      مثال:  .play Jerusalema mp3\n\n'
+    + '🎬 *فيديو* — اكتب:\n'
+    + '      .play <الاسم> mp4   ·   .video <الاسم>\n\n'
+    + '🖼 *صورة* —  !pic <الاسم>\n'
+    + '⏭ *النتيجة التالية* — اكتب  next\n'
+    + '🌐 *اختيار المصدر* —  !sites  ثم  !site <الاسم>\n\n'
+    + 'التحميل مجاني. طلب واحد في المرة — أجيبك عندما يصبح الملف جاهزًا.'
+};
+function groupHelpLocalized(chatJid, prefix){
+  let lang = 'en';
+  try { lang = getChatLang(chatJid) || 'en'; } catch(e){}
+  const body = GROUP_HELP_I18N[lang] || groupHelpText();
+  return (prefix || '') + body;
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92.9.6 — Admin (manager — school buddy removed)
+const COMMAND_LIST = `BreadBot v92.9.6b — Admin (manager — school buddy removed)
 
 ACCESS (v92.9.6 boss rules)
 !mediastats — photos/videos the bot sent, per chat + total
 !activegroups — groups the boss activated · !groupoff closes one (run inside it)
 !blockgroup <name|link|jid> — HARD blacklist, the bot NEVER sends there
 !unblockgroup <name> — unblock (KCC Youth Fellowship / KCC Bubble Study are permanent)
-Groups are SILENT until you request a video inside one — that activates it.
+Groups are SILENT until YOU switch one on: .play <song>, nsfw.play … or !help inside it (you only).
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -6340,7 +6381,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (!target){ await reply('Usage: run !groupoff INSIDE the group, or !groupoff <part-of-group-name>'); break; }
       const off = accessCtl.deactivateGroup(target);
       await reply(off
-        ? '🛑 ' + (getGroupName(target) || target) + ' DEACTIVATED — the bot goes silent there (nothing more sends). Re-open: request a video inside it.'
+        ? '🛑 ' + (getGroupName(target) || target) + ' DEACTIVATED — the bot goes silent there (nothing more sends). Re-open: .play <song>, nsfw.play … or !help inside it (you only).'
         : 'ℹ️ That group was not activated.');
       pushLog('info','access','group deactivated by admin: ' + (getGroupName(target) || target));
       break;
@@ -7024,16 +7065,21 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ v92.9.6 REQUEST-ACTIVATION — THE BOSS'S GROUP SWITCH ═══
-   * "I will tell it which groups to send by requesting a video in that
-   * group so that it activated." An ADMIN media request inside ANY group
-   * (whitelisted or not — blacklisted groups never reach this line)
-   * opens that group for good: whitelist entry + persistent activation
-   * (data/access-state.json survives reboots). Everyone else in a silent
-   * group still gets total silence. An NSFW request additionally
-   * designates it as THE NSFW group (explicit media goes there only). */
+  /* ═══ v92.9.6b REQUEST-ACTIVATION — THE BOSS'S GROUP SWITCH ═══
+   * "activation only me … the activation is obviously something like
+   * nsfw.play…… or play song or !help". The switches are EXACTLY the
+   * short commands (nsfw.play / nsfw.see / nsfw.gif / .play) — loose
+   * natural-language requests ("give me a video") do NOT open a group
+   * anymore, and neither does "next". An ADMIN typing one inside ANY
+   * group (whitelisted or not — blacklisted groups never reach this
+   * line) opens that group for good: whitelist entry + persistent
+   * activation (data/access-state.json survives reboots). Everyone
+   * else in a silent group still gets total silence until he does.
+   * !help activates even earlier (serveUniversalCommand). An NSFW
+   * command additionally designates it as THE NSFW group (explicit
+   * media goes there only). */
   if (isGroup && isAdmin && text
-      && (parseShortMediaCommand(text) || detectMediaIntent(text) || isNextRequest(text))
+      && parseShortMediaCommand(text)
       && !accessCtl.isGroupActive(chatJid)){
     const nsfwQ = detectNsfw(text);
     accessCtl.addGroup(chatJid);
@@ -7047,9 +7093,12 @@ async function handleMessage(msg){
       videoScheduler.enable();
     }
     pushLog('success','access','group ACTIVATED via admin request: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ ? ' (NSFW designated)' : ''));
-    await reply('🔥 ACTIVATED: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ
+    /* v92.9.6b: was `reply(...)` — no such helper in this scope; the boss's
+     * FIRST .play in a fresh group crashed right here (ReferenceError) and
+     * the download never ran. sendBuffer, house style. */
+    await sendBuffer(chatJid, { text: '🔥 ACTIVATED: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ
       ? '\n🞊 NSFW media group — explicit content goes HERE only'
-      : '') + '\nMembers can search in this chat now — type !help for how.');
+      : '') + '\nMembers can search in this chat now — type !help for how.' }, 3, 'slow', 'group', true);
   }
 
   if (botPaused && !isAdmin) return;
@@ -7992,12 +8041,30 @@ async function serveUniversalCommand(chatJid, senderJid, text, isAdmin, mode){
 
   const t0 = text.trim();
 
-  /* ═══ v92.9.6 MEMBER HELP — the boss: "make a !help for those group
-   * users to download and test the audios and songs". Short, member-
-   * facing, audio first. The admin keeps the full menu. */
+  /* ═══ v92.9.6b MEMBER HELP — the boss: "make a !help for those group
+   * users to download and test the audios and songs" + "!help in the
+   * group to send group commands". In GROUPS !help is for EVERYONE
+   * (admin included) and comes in the group's language — Persian group
+   * → Persian card. From the ADMIN it is ALSO an activation switch: an
+   * inactive group opens right here (only he can flip it — members in
+   * an inactive group were already silenced above). In DMs the admin
+   * still gets the full admin menu (return false → admin dispatch). */
   if (/^!(help|menu|start)\b/i.test(t0)){
-    if (isAdmin) return false;
-    await sendBuffer(chatJid, { text: groupHelpText() }, 3, 'slow', mode, true);
+    if (mode === 'group'){
+      if (isAdmin && !accessCtl.isGroupActive(chatJid)){
+        accessCtl.addGroup(chatJid);
+        accessCtl.activateGroup(chatJid, { by: 'admin-!help', name: getGroupName(chatJid) });
+        markMediaRequest(chatJid);
+        pushLog('success','access','group ACTIVATED via admin !help: ' + (getGroupName(chatJid) || chatJid));
+        await sendBuffer(chatJid, { text: groupHelpLocalized(chatJid,
+          '🔥 ACTIVATED: ' + (getGroupName(chatJid) || chatJid) + '\nMembers can search in this chat now.\n\n') }, 3, 'slow', 'group', true);
+        return true;
+      }
+      await sendBuffer(chatJid, { text: groupHelpLocalized(chatJid) }, 3, 'slow', 'group', true);
+      return true;
+    }
+    if (isAdmin) return false;   /* DM — the full admin menu follows below */
+    await sendBuffer(chatJid, { text: groupHelpLocalized(chatJid) }, 3, 'slow', mode, true);
     return true;
   }
 

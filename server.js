@@ -8064,7 +8064,7 @@ app.post('/stealth-fetch', express.json({ limit: '2mb' }), async function(req, r
   const tok = process.env.STEALTH_TOKEN;
   if (tok && (req.get('x-bb-token') || '') !== tok) return res.status(403).json({ ok: false, error: 'bad token' });
   try {
-    const html = await stealthFetchMod.stealthFetchHtml(url, { timeoutMs: 45000 });
+    const html = await stealthFetchMod.stealthFetchHtml(url, { timeoutMs: 60000 });
     res.json({ ok: true, bytes: html.length, html: html });
   } catch (e) {
     console.error('[stealth-fetch] ' + url.slice(0, 100) + ': ' + e.message);

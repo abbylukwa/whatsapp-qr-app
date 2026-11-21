@@ -3054,6 +3054,12 @@ async function scraperVideoResolve(pageUrl){
   try {
     const r = await scrapperFetch('/video-resolve', { url: pageUrl }, 150000);
     if (!r || !r.mediaUrl) throw new Error('scrapper: resolve failed');
+    /* v92.9.3c: FILE-TOO-BIG GUARD — the "file too big" failures came
+     * from oversized videos walking the whole download+upload cycle
+     * before WhatsApp rejected them. Refuse them HERE, at resolve time,
+     * with a message that says what to do next. */
+    if (r.sizeBytes && r.sizeBytes > MEDIA_MAX_BYTES)
+      throw new Error('video too big (' + (r.sizeBytes / 1048576).toFixed(0) + 'MB — cap ' + MEDIA_MAX_MB + 'MB). Say "next" for a smaller one.');
     /* local copy first — temp scraper links die within the hour */
     const local = await downloadToLocalMedia(r.mediaUrl, 'video');
     if (local) return { ok:true, mediaUrl:local.url, sourceUrl:r.mediaUrl, localFile:local.file,

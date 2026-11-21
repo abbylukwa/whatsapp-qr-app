@@ -116,6 +116,14 @@ async function stealthFetchHtml(url, opts = {}){
       });
     }
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    /* v92.9.5 SPA SETTLE — app-shell sites (redgifs, beeg, sexgifs…)
+     * render their results via XHR AFTER domcontentloaded, so the old
+     * immediate snapshot shipped an empty framework shell and the
+     * scraper read "0 media". Let the network go quiet (up to 12s) plus
+     * a short settle before the first read — challenge pages just fall
+     * through to the reload loop below. */
+    try { await page.waitForNetworkIdle({ idleTime: 800, timeout: 12000 }); } catch (e) { /* keep what loaded */ }
+    await sleepMs(1200);
     /* The challenge reloads itself after ~5s (frame detaches mid-read —
      * reading is unreliable). Re-NAVIGATE instead: the browser now holds
      * the challenge cookie from round 1, so a fresh goto passes it.

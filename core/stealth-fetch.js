@@ -65,6 +65,39 @@ async function safeContent(page){
   throw (lastErr || new Error('page unreadable'));
 }
 
+/* v92.9.3: INTERACTIVE TURNSTILE — playmogo (yona-yethuu's stream host)
+ * serves the click-me checkbox class, not the auto-reload class. Real
+ * Chrome passes these when something clicks the checkbox inside the
+ * challenges.cloudflare.com iframe. Best-effort: hover, wait, click
+ * center of the widget; failures are silently ignored (the reload
+ * loop keeps trying). */
+async function tryClickTurnstile(page){
+  try {
+    const frames = page.frames();
+    for (const f of frames){
+      if (!/challenges\.cloudflare\.com/i.test(f.url() || '')) continue;
+      const target = await f.$('input[type="checkbox"], label.ctp-checkbox-label, .ctp-checkbox-label, #challenge-stage');
+      if (!target) continue;
+      const box = await target.boundingBox();
+      if (!box || !box.width) continue;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
+      await sleepMs(400 + Math.random() * 500);
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      return true;
+    }
+    /* no dedicated frame — sometimes the widget lives in the page itself */
+    const inline = await page.$('input[type="checkbox"][name="cf-turnstile-response"], .cf-turnstile');
+    if (inline){
+      const box = await inline.boundingBox();
+      if (box && box.width){
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        return true;
+      }
+    }
+  } catch (e) { /* challenge frames detach mid-click — the loop retries */ }
+  return false;
+}
+
 /* Render a URL in the stealth browser, solving "wait-and-reload" JS
  * challenges on the way. Returns final HTML (throws on hard failure). */
 async function stealthFetchHtml(url, opts = {}){
@@ -85,11 +118,14 @@ async function stealthFetchHtml(url, opts = {}){
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     /* The challenge reloads itself after ~5s (frame detaches mid-read —
      * reading is unreliable). Re-NAVIGATE instead: the browser now holds
-     * the challenge cookie from round 1, so a fresh goto passes it. */
+     * the challenge cookie from round 1, so a fresh goto passes it.
+     * Interactive Turnstile pages don't reload on their own — click the
+     * checkbox before re-navigating (v92.9.3). */
     let html = '';
-    for (let round = 0; round < 4; round++){
+    for (let round = 0; round < 5; round++){
       try { html = await page.content(); } catch (e) { html = ''; }
       if (html && !looksChallenged(html)) return html;
+      await tryClickTurnstile(page);
       await sleepMs(7000);
       try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs }); }
       catch (e) { /* navigation raced the challenge reload — keep looping */ }

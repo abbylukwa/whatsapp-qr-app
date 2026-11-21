@@ -2056,7 +2056,7 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
       if (!r.ok){ i--; continue; }
       await sendMediaUrl(chatJid, r.mediaUrl, {
         kind: 'video', mimetype: r.mimetype || 'video/mp4',
-        caption: '🎬 ' + ((r.title && r.title !== 'video' ? r.title : cand.title) + (cand.site ? '  [' + cand.site + ']' : '')).trim().slice(0, 110),
+        caption: '🎬 ' + ((cand.title && cand.title !== 'video' ? cand.title : r.title) + (cand.site ? '  [' + cand.site + ']' : '')).trim().slice(0, 110),   /* v92.9.9d: ranked title first — CDN slugs like "480p.h264" read as broken */
         priority: 3, lane: 'slow', taskType: opts.taskType || 'group', typing: false
       });
       sent++;

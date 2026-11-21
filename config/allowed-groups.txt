@@ -5,3 +5,4 @@
 # the same link twice stays ONE entry.
 # Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).
 https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW
+1203630@g.us

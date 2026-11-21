@@ -28,7 +28,30 @@ const path = require('path');
 
 const NUMBERS_FILE = path.join(__dirname, 'config', 'allowed-numbers.txt');
 const GROUPS_FILE  = path.join(__dirname, 'config', 'allowed-groups.txt');
+const BLOCKED_FILE = path.join(__dirname, 'config', 'blocked-groups.txt');
 const STATE_FILE   = path.join(__dirname, 'data', 'access-state.json');
+
+/* ═══ v92.9.6 HARD GROUP BLACKLIST ═══
+ * The boss: the bot "is sending messages to the wrong … groups — in the
+ * groups KCC youth fellowship and KCC bubble study it should never send
+ * anything". These two (plus anything in config/blocked-groups.txt) are
+ * BLOCKHOLES: no reply, no media, no admin echo, no read receipt, no
+ * verification prompt — and the check runs again inside sendBuffer so a
+ * scheduler/broadcast/brain path can never sneak past the handler. */
+const BLOCKED_HEADER = [
+  '# ═══ BLOCKED GROUPS (v92.9.6) ═══',
+  '# The bot NEVER sends anything to these groups. One per line:',
+  '#   · a group NAME (matched case-insensitively, e.g. KCC Youth Fellowship)',
+  '#   · a group JID ending in @g.us',
+  '#   · a group invite link',
+  '# Lines starting with # are comments. The two KCC groups are permanent.',
+  ''
+].join('\n');
+const BLOCKED_NAME_PATTERNS = [
+  /kcc\s+youth/i,          /* "KCC Youth Fellowship" and any wording around it */
+  /kcc\s+bubble/i          /* "KCC Bubble Study" */
+];
+const PERMANENT_BLOCKED_LINES = ['KCC Youth Fellowship', 'KCC Bubble Study'];
 
 const NUMBERS_HEADER = [
   '# ═══ ALLOWED NUMBERS (v87) ═══',
@@ -146,7 +169,8 @@ function isAllowedNumber(phoneOrJid, adminPhone){
 /* ── groups ─────────────────────────────────────────────────────────── */
 let allowedGroupCodes = [];                              /* invite codes      */
 let allowedGroupJids  = [];                              /* raw @g.us entries */
-let state = { inviteToJid: {}, designated: null, activated: false };
+let blockedLines      = [];                              /* file entries      */
+let state = { inviteToJid: {}, designated: null, activated: false, activeGroups: {} };
 
 function loadGroups(){
   const lines = readLines(GROUPS_FILE);
@@ -158,6 +182,7 @@ function loadGroups(){
   }
   allowedGroupCodes = [...codes];                        /* dedupes same link */
   allowedGroupJids  = [...jids];
+  blockedLines = readLines(BLOCKED_FILE);                /* v92.9.6 blacklist */
   loadState();
   return { codes: allowedGroupCodes, jids: allowedGroupJids };
 }
@@ -206,6 +231,88 @@ function isAllowedGroup(chatJid){
   }
   return false;
 }
+/* ── v92.9.6 HARD BLACKLIST — KCC Youth Fellowship / KCC Bubble Study ── */
+function normalizeName(s){
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function nameIsBlocked(subject){
+  const n = normalizeName(subject);
+  if (!n) return false;
+  if (BLOCKED_NAME_PATTERNS.some(re => re.test(n))) return true;
+  for (const line of blockedLines){
+    const ln = normalizeName(line);
+    /* a name line matches when one contains the other (both directions —
+     * the file may hold the short form, the WhatsApp subject the long one) */
+    if (ln && (n.includes(ln) || ln.includes(n))) return true;
+  }
+  return false;
+}
+function isBlockedChat(chatJid, subject){
+  if (!isGroupJid(chatJid)) return false;
+  /* JID lines in the file match directly; invite-code lines match through
+   * the learned code→JID map; name lines match the live WhatsApp subject. */
+  for (const l of blockedLines){
+    const t = l.trim();
+    if (t === chatJid) return true;
+    const code = parseInviteCode(t);
+    if (code && state.inviteToJid[code] === chatJid) return true;
+  }
+  return nameIsBlocked(subject);
+}
+function addBlocked(entry){
+  const raw = String(entry || '').trim();
+  if (!raw) return { ok: false, error: 'empty' };
+  const rawFile = readLines(BLOCKED_FILE);
+  const norm = normalizeName(raw);
+  if (rawFile.some(l => normalizeName(l) === norm)) return { ok: true, added: false, count: blockedLines.length };
+  writeLines(BLOCKED_FILE, BLOCKED_HEADER, [...rawFile, raw]);
+  blockedLines = readLines(BLOCKED_FILE);
+  return { ok: true, added: true, count: blockedLines.length };
+}
+function removeBlocked(entry){
+  const rawFile = readLines(BLOCKED_FILE);
+  const norm = normalizeName(entry);
+  const left = rawFile.filter(l => {
+    if (PERMANENT_BLOCKED_LINES.some(p => normalizeName(p) === normalizeName(l))) return true;  /* the two KCC groups stay */
+    return normalizeName(l) !== norm;
+  });
+  if (left.length === rawFile.length) return { ok: false, error: 'not in the list' };
+  writeLines(BLOCKED_FILE, BLOCKED_HEADER, left);
+  blockedLines = readLines(BLOCKED_FILE);
+  return { ok: true, removed: entry, count: blockedLines.length };
+}
+function blockedEntries(){ return blockedLines.slice(); }
+
+/* ── v92.9.6 REQUEST-ACTIVATED GROUPS — silence until the boss acts ───
+ * The boss: "I will tell it which groups to send by requesting a video
+ * in that group so that it activated." A group is BORN SILENT; it opens
+ * when the ADMIN makes a media request inside it (search / .play / next
+ * / !download) and stays open until the admin closes it (!groupoff).
+ * Persisted in access-state.json so reboots keep the boss's choices. */
+function activateGroup(chatJid, meta){
+  if (!isGroupJid(chatJid)) return false;
+  state.activeGroups = state.activeGroups || {};
+  state.activeGroups[chatJid] = {
+    by: (meta && meta.by) || 'admin-request',
+    name: (meta && meta.name) || null,
+    ts: Date.now()
+  };
+  saveState();
+  return true;
+}
+function deactivateGroup(chatJid){
+  if (!state.activeGroups || !state.activeGroups[chatJid]) return false;
+  delete state.activeGroups[chatJid];
+  saveState();
+  return true;
+}
+function isGroupActive(chatJid){
+  return !!(state.activeGroups && state.activeGroups[chatJid]);
+}
+function activeGroupList(){
+  return Object.entries(state.activeGroups || {}).map(([jid, v]) => ({ jid, name: v.name, by: v.by, ts: v.ts }));
+}
+
 /* ── NSFW designated group + activation ─────────────────────────────── */
 function setDesignated(jid){ state.designated = isGroupJid(jid) ? jid : null; saveState(); return state.designated; }
 function getDesignated(){ return state.designated; }
@@ -226,18 +333,21 @@ function shouldReplyGroup(langCode){
   return !HOME_LANGS.includes(String(langCode || 'en').toLowerCase());
 }
 /* Group send matrix — the single decision the whole group flow funnels into.
- * v92: the ACTIVATED designated group is full service — the boss's people
- * can casually ask for media there ("give me a … video") in ANY language;
- * every OTHER group keeps the language gate (English/Shona = silence). */
-function groupDecision(chatJid, langCode, isAdmin){
+ * v92.9.6 (boss rule): silence is the DEFAULT everywhere.
+ *   · blacklisted groups (KCC Youth Fellowship / KCC Bubble Study and any
+ *     entry in config/blocked-groups.txt) NEVER get anything — not even
+ *     admin echoes;
+ *   · a group that is not on the whitelist never gets anything (the old
+ *     foreign-language open-door is gone — language no longer opens doors);
+ *   · a whitelisted group stays silent until the ADMIN activates it by
+ *     making a media request inside it;
+ *   · an activated group serves everyone in it (the boss opted it in). */
+function groupDecision(chatJid, langCode, isAdmin, subject){
+  if (!isGroupJid(chatJid))            return { reply: false, reason: 'not-a-group' };
+  if (isBlockedChat(chatJid, subject)) return { reply: false, reason: 'group-blacklisted' };
   if (!isAllowedGroup(chatJid))        return { reply: false, reason: 'group-not-allowed' };
-  if (isAdmin)                         return { reply: true,  reason: 'admin' };
-  if (isDesignated(chatJid)){
-    if (!isNsfwActivated())            return { reply: false, reason: 'nsfw-group-not-activated' };
-    return { reply: true,  reason: 'activated-media-group' };
-  }
-  if (!shouldReplyGroup(langCode))     return { reply: false, reason: 'shona-or-english' };
-  return { reply: true, reason: 'foreign-language:' + langCode };
+  if (!isGroupActive(chatJid))         return { reply: false, reason: 'group-not-activated' };
+  return { reply: true, reason: isAdmin ? 'admin' : 'activated-media-group' };
 }
 
 /* ── boot ───────────────────────────────────────────────────────────── */
@@ -249,9 +359,12 @@ function init(adminPhone){
   if (!fs.existsSync(GROUPS_FILE)){
     writeLines(GROUPS_FILE, GROUPS_HEADER, ['https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW']);
   }
+  if (!fs.existsSync(BLOCKED_FILE)){
+    writeLines(BLOCKED_FILE, BLOCKED_HEADER, PERMANENT_BLOCKED_LINES);
+  }
   loadNumbers(adminPhone);
   loadGroups();
-  return { numbers: allowedNumbers.length, groups: allowedGroupCodes.length + allowedGroupJids.length };
+  return { numbers: allowedNumbers.length, groups: allowedGroupCodes.length + allowedGroupJids.length, blocked: blockedLines.length };
 }
 
 module.exports = {
@@ -260,6 +373,9 @@ module.exports = {
   addNumber, removeNumber, isAllowedNumber, allowedNumbers: () => allowedNumbers,
   addGroup, registerInviteJid, isAllowedGroup,
   allowedGroupCodes: () => allowedGroupCodes, allowedGroupJids: () => allowedGroupJids,
+  /* v92.9.6 blacklist + request-activation */
+  isBlockedChat, nameIsBlocked, addBlocked, removeBlocked, blockedEntries, BLOCKED_FILE,
+  activateGroup, deactivateGroup, isGroupActive, activeGroupList,
   setDesignated, getDesignated, isDesignated, setNsfwActivated, isNsfwActivated,
   dmPolicy, shouldReplyGroup, groupDecision, HOME_LANGS,
   NUMBERS_FILE, GROUPS_FILE, STATE_FILE

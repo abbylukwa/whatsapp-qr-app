@@ -1,0 +1,8 @@
+# ═══ BLOCKED GROUPS (v92.9.6) ═══
+# The bot NEVER sends anything to these groups. One per line:
+#   · a group NAME (matched case-insensitively, e.g. KCC Youth Fellowship)
+#   · a group JID ending in @g.us
+#   · a group invite link
+# Lines starting with # are comments. The two KCC groups are permanent.
+KCC Youth Fellowship
+KCC Bubble Study

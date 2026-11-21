@@ -28,10 +28,16 @@ const PROVIDER_COOLDOWN = 10 * 60 * 1000;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const SEARCH_INSTANCES = {
-  invidious: ['https://inv.nadeko.net', 'https://invidious.nerdvpn.de', 'https://yewtu.be'],
-  piped:     ['https://pipedapi.kavin.rocks', 'https://pipedapi.adminforge.de']
+  invidious: ['https://inv.nadeko.net', 'https://invidious.nerdvpn.de', 'https://yewtu.be',
+              'https://invidious.f5.si', 'https://iv.melmac.space'],
+  piped:     ['https://pipedapi.kavin.rocks', 'https://pipedapi.adminforge.de',
+              'https://api.piped.private.coffee', 'https://pipedapi.drgns.space']
 };
-const COBALT_INSTANCES = ['https://cobalt-api.kwiatekmiki.com', 'https://api.cobalt.tools'];
+/* v92.9.6: cobalt v10, minimal body (probe-proven the only shape every
+ * instance accepts) — instances get YouTube-login-walled intermittently,
+ * the health tracker skips a walled one for 10 min and tries the next. */
+const COBALT_INSTANCES = ['https://co.otomir23.me', 'https://api.cobalt.tools',
+                          'https://cobalt-backend.canine.tools', 'https://kityune.imput.net'];
 
 let health = {};                                  /* provider -> {fails,lastError,lastCheck} */
 let chainDownUntil = 0;                           /* whole-chain cooldown (v90.1 self-healing) */
@@ -132,37 +138,17 @@ async function streamsInvidious(base, videoId, mode){
   throw new Error('no progressive mp4');
 }
 
-/* ═══ 3. CONVERTER-SITE PROVIDERS (y2mate + cobalt + vevioz) ══════════ */
-async function y2mate(videoId, mode, quality){
-  const watchUrl = 'https://www.youtube.com/watch?v=' + videoId;
-  const an = await http({ url: 'https://www.y2mate.com/mates/analyzeV2/ajax', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest',
-               'Referer': 'https://www.y2mate.com/youtube/' + videoId, 'User-Agent': UA, 'Origin': 'https://www.y2mate.com' },
-    data: new URLSearchParams({ k_query: watchUrl, k_host: 'y2mate.com', k_token: '', k_agen: 'true' }).toString(),
-    maxContentLength: 2 * 1024 * 1024 });
-  const a = an.data || {};
-  if (a.status !== 'ok' || !a.links) throw new Error('analyze: ' + (a.message || 'no links'));
-  const bucket = mode === 'audio' ? a.links.mp3 : a.links.mp4;
-  if (!bucket) throw new Error('no ' + mode + ' links');
-  const keys = Object.keys(bucket).sort((x, y) => parseInt(bucket[y].q || 0, 10) - parseInt(bucket[x].q || 0, 10));
-  const key = (mode === 'video' && quality) ? keys.find(k => parseInt(bucket[k].q || 0, 10) <= parseInt(quality, 10)) || keys[keys.length - 1] : keys[0];
-  const cv = await http({ url: 'https://www.y2mate.com/mates/convertV2/ajax', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest',
-               'Referer': 'https://www.y2mate.com/youtube/' + videoId, 'User-Agent': UA, 'Origin': 'https://www.y2mate.com' },
-    data: new URLSearchParams({ vid: videoId, k: bucket[key].k, host: 'y2mate.com' }).toString(),
-    maxContentLength: 2 * 1024 * 1024 });
-  const c = cv.data || {};
-  if (!c.dlink) throw new Error('convert: no dlink');
-  return { mediaUrl: c.dlink, title: a.title || '', sizeBytes: parseInt(c.size || 0, 10) || 0,
-           mimetype: mode === 'audio' ? 'audio/mpeg' : 'video/mp4', provider: 'y2mate' };
-}
+/* ═══ 3. CONVERTER-SITE PROVIDERS (cobalt v10) ════════════════════════ */
+/* v92.9.6: y2mate + vevioz REMOVED — y2mate.com no longer resolves (its
+ * domain is gone, confirmed from both the sandbox and Render's network),
+ * vevioz answers 403. They were only slowing every request down. */
 async function cobalt(base, videoId, mode, quality){
   const r = await http({ url: base + '/', method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'User-Agent': UA },
     data: { url: 'https://www.youtube.com/watch?v=' + videoId,
             downloadMode: mode === 'audio' ? 'audio' : 'auto',
             ...(mode === 'video' && quality ? { videoQuality: String(quality) } : {}),
-            youtubeVideoCodec: 'h264', filenameStyle: 'basic' },
+            filenameStyle: 'basic' },
     maxContentLength: 2 * 1024 * 1024 });
   const d = r.data || {};
   if ((d.status === 'tunnel' || d.status === 'redirect') && d.url) {
@@ -171,16 +157,32 @@ async function cobalt(base, videoId, mode, quality){
   }
   throw new Error('cobalt: ' + (d.error && d.error.code || d.status || 'refused'));
 }
-async function vevioz(videoId){
-  const url = 'https://api.vevioz.com/api/button/mp3/' + videoId;
-  const head = await axios.get(url, { timeout: 20000, maxRedirects: 0, validateStatus: () => true });
-  if (head.status >= 300 && head.status < 400 && head.headers.location) {
-    return { mediaUrl: head.headers.location, title: '', sizeBytes: 0, mimetype: 'audio/mpeg', provider: 'vevioz' };
-  }
-  if (head.status === 200 && String(head.data).match(/https?:\/\/[^"']+\.(mp3|m4a)/i)) {
-    return { mediaUrl: RegExp.lastMatch, title: '', sizeBytes: 0, mimetype: 'audio/mpeg', provider: 'vevioz' };
-  }
-  throw new Error('vevioz: status ' + head.status);
+
+/* ═══ v92.9.6 AUDIUS — keyless music API, no YouTube anywhere ═════════
+ * The boss: "do real life queries make sure they work." The YouTube
+ * converter chain is hostage to Google's login walls, but Audius is a
+ * public, keyless, artist-backed API with a deep amapiano / DJ / gospel
+ * catalog and DIRECT mp3 streams — probe-proven: Master KG Jerusalema,
+ * Kabza De Small, Amapiano 2024 all resolve with real audio bytes. */
+let audiusHost = null;
+async function audiusHostGet(){
+  if (audiusHost) return audiusHost;
+  const r = await http({ url: 'https://api.audius.co', maxContentLength: 1024 * 1024 });
+  const list = (r.data && r.data.data) || [];
+  audiusHost = list[0] || 'https://api.audius.co';
+  return audiusHost;
+}
+async function audius(query){
+  const H = await audiusHostGet();
+  const s = await http({ url: H + '/v1/tracks/search',
+    params: { query: query, app_name: 'breadbot' }, maxContentLength: 6 * 1024 * 1024 });
+  const tracks = (s.data && s.data.data) || [];
+  if (!tracks.length) throw new Error('audius: no tracks for "' + query + '"');
+  const t = tracks[0];
+  const artist = (t.user && t.user.name) ? t.user.name + ' - ' : '';
+  return { mediaUrl: H + '/v1/tracks/' + t.id + '/stream?app_name=breadbot',
+           title: artist + (t.title || ''), sizeBytes: 0,
+           mimetype: 'audio/mpeg', provider: 'audius' };
 }
 
 /* ═══ 4. CONVERT — the full self-healing chain ════════════════════════ */
@@ -196,6 +198,13 @@ async function convert(videoId, mode, opts = {}){
     } catch (e) { markFail(name, e.message); tries.push(name + ': ' + e.message); return null; }
   };
   let r;
+  /* v92.9.6: cobalt FIRST — a working instance tunnels the file directly
+   * (no stream-matrix puzzles); when YouTube login-walls an instance the
+   * health mark skips it for 10 min and the next one gets its chance. */
+  for (const base of COBALT_INSTANCES){
+    r = await attempt('cobalt:' + new URL(base).host, () => cobalt(base, videoId, mode, opts.quality || (mode === 'video' ? '360' : undefined)));
+    if (r) return r;
+  }
   for (const base of SEARCH_INSTANCES.piped){
     r = await attempt('audio:piped:' + new URL(base).host, () => audioPiped(base, videoId));
     if (r) return r;
@@ -204,21 +213,9 @@ async function convert(videoId, mode, opts = {}){
     r = await attempt((mode === 'audio' ? 'audio' : 'video') + ':invidious:' + new URL(base).host, () => streamsInvidious(base, videoId, mode));
     if (r) return r;
   }
-  r = await attempt('y2mate', () => y2mate(videoId, mode, opts.quality));
-  if (r) return r;
-  for (const base of COBALT_INSTANCES){
-    r = await attempt('cobalt:' + new URL(base).host, () => cobalt(base, videoId, mode, opts.quality || (mode === 'video' ? '360' : undefined)));
-    if (r) return r;
-  }
-  if (mode === 'audio'){ r = await attempt('vevioz', () => vevioz(videoId)); if (r) return r; }
-  /* last resort for video: lower quality y2mate */
-  if (mode === 'video'){
-    r = await attempt('y2mate-low', () => y2mate(videoId, 'video', '360'));
-    if (r) return r;
-  }
-  /* v90.1: the whole chain failed — converters/stream mirrors are often
+  /* v92.9.6: the whole chain failed — converters/stream mirrors are often
    * IP-blocked on datacenter hosts. Skip the chain for 5 min so requests
-   * fall to the scraper slot FAST (no ~90s of dead timeouts per ask); the
+   * fall to the fallbacks FAST (no ~90s of dead timeouts per ask); the
    * chain retries itself after the cooldown (self-healing). */
   chainDownUntil = Date.now() + CHAIN_DOWN_MS;
   throw new Error('all download providers failed — ' + tries.slice(0, 4).join(' | '));
@@ -226,23 +223,41 @@ async function convert(videoId, mode, opts = {}){
 
 /* ═══ 5. PUBLIC API — getMusic(query, mode) ═══════════════════════════ */
 async function getMusic(query, mode){
-  /* whole-chain cooldown: fail fast so the caller's fallback takes over */
-  if (Date.now() < chainDownUntil){
+  /* v92.9.6: the whole-chain cooldown gates the CONVERTER chain only —
+   * the Audius fallback is not YouTube-dependent and must NEVER be
+   * blocked by it (a cooling chain still serves songs through Audius). */
+  const cooling = Date.now() < chainDownUntil;
+  let videoId = null, title = '';
+  let result = null, lastErr = null;
+  if (!cooling){
+    const urlMatch = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/.exec(query);
+    if (urlMatch){ videoId = urlMatch[1]; }
+    else {
+      const s = await search(query);
+      videoId = s.videoId; title = s.title;
+    }
+    /* quality ladder for video: 720 → 480 → 360 (keeps files under the cap) */
+    const ladder = mode === 'video' ? ['720', '480', '360'] : [undefined];
+    for (const q of ladder){
+      try { result = await convert(videoId, mode, { quality: q }); break; }
+      catch (e) { lastErr = e.message; }
+    }
+    if (result){
+      if (!result.title) result.title = title || query;
+      return { ok: true, videoId, mode, ...result };
+    }
+  } else if (mode !== 'audio'){
     throw new Error('converter chain cooling down (providers IP-blocked or down) — fallback takes over, retry in ' + Math.ceil((chainDownUntil - Date.now()) / 60000) + 'min');
   }
-  let videoId = null, title = '';
-  const urlMatch = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/.exec(query);
-  if (urlMatch){ videoId = urlMatch[1]; }
-  else {
-    const s = await search(query);
-    videoId = s.videoId; title = s.title;
-  }
-  let result = null, lastErr = null;
-  /* quality ladder for video: 720 → 480 → 360 (keeps files under the cap) */
-  const ladder = mode === 'video' ? ['720', '480', '360'] : [undefined];
-  for (const q of ladder){
-    try { result = await convert(videoId, mode, { quality: q }); break; }
-    catch (e) { lastErr = e.message; }
+  /* v92.9.6: AUDIUS FALLBACK — the converter chain is hostage to Google's
+   * login walls; Audius is keyless with direct mp3 streams and a deep
+   * amapiano / gospel / DJ catalog (probe-proven real bytes). */
+  if (!result && mode === 'audio'){
+    try {
+      const a = await audius(query);
+      log('info', 'music', 'audio via audius — ' + (a.title || '').slice(0, 60));
+      result = a;
+    } catch (e) { lastErr = (lastErr ? lastErr + ' | ' : '') + 'audius: ' + e.message; }
   }
   if (!result) throw new Error(lastErr || 'no provider succeeded');
   if (!result.title) result.title = title || query;

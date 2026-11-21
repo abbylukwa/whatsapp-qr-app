@@ -1079,8 +1079,22 @@ const multiPlatform = {
  * video. Admin: !sched here | on | off | test | run | status ═══ */
 const videoScheduler = require('./videoScheduler');
 videoScheduler.initVideoScheduler({
-  sendText: (jid, text) => sendBuffer(jid, { text }, 3, 'slow', 'sched', false),
+  sendText: (jid, text) => {
+    /* v92.9.6: scheduled drops only land in the ACTIVATED, non-blacklisted
+     * group — a deactivated or blocked target skips, never sends. */
+    if (typeof jid === 'string' && jid.endsWith('@g.us')
+        && (accessCtl.isBlockedChat(jid, getGroupName(jid)) || !accessCtl.isGroupActive(jid))){
+      pushLog('warn','sched','drop skipped — target group not active/blacklisted: ' + (getGroupName(jid) || jid));
+      return Promise.reject(new Error('scheduler target not activated'));
+    }
+    return sendBuffer(jid, { text }, 3, 'slow', 'sched', false);
+  },
   sendVideo: async (jid, vid, caption) => {
+    if (typeof jid === 'string' && jid.endsWith('@g.us')
+        && (accessCtl.isBlockedChat(jid, getGroupName(jid)) || !accessCtl.isGroupActive(jid))){
+      pushLog('warn','sched','drop skipped — target group not active/blacklisted: ' + (getGroupName(jid) || jid));
+      throw new Error('scheduler target not activated');
+    }
     await sendMediaUrl(jid, vid.mediaUrl, {
       kind: 'video', mimetype: vid.mimetype || 'video/mp4', caption,
       priority: 3, lane: 'slow', taskType: 'sched', typing: false
@@ -1107,6 +1121,7 @@ const NSFW_QUERIES = (process.env.NSFW_QUERIES || 'persian,irani,iranian,iran')
  * member video downloads. */
 function applyNsfwActivation(){
   if (accessCtl.isNsfwActivated() && accessCtl.getDesignated()){
+    accessCtl.activateGroup(accessCtl.getDesignated(), { by: 'admin', name: getGroupName(accessCtl.getDesignated()) });   /* v92.9.6: reboot keeps the boss's choice */
     videoScheduler.setQueries(NSFW_QUERIES);
     videoScheduler.setGroup(accessCtl.getDesignated());
     videoScheduler.enable();
@@ -2161,13 +2176,61 @@ function markMediaRequest(chatJid){
   if (lastMediaRequestAt.size > 500) lastMediaRequestAt.delete(lastMediaRequestAt.keys().next().value);
 }
 function chatWantsMedia(chatJid){
+  /* v92.9.6: a group the boss ACTIVATED is a media chat by definition —
+   * its members may request at any time. The 15-min request window
+   * stays for DMs (that was the stranger-gets-your-download bug). */
+  if (typeof chatJid === 'string' && chatJid.endsWith('@g.us') && accessCtl.isGroupActive(chatJid)) return true;
   const t = lastMediaRequestAt.get(chatJid);
   return !!t && (Date.now() - t) < MEDIA_REQUEST_TTL_MS;
+}
+
+/* ═══ v92.9.6 SENT-MEDIA COUNTERS — "keep count of photos or videos sent".
+ * Counted at the single choke point AFTER a successful send; per chat +
+ * totals, persisted to data/media-stats.json (debounced). */
+const MEDIA_STATS_FILE = path.join(__dirname, 'data', 'media-stats.json');
+let mediaStats = { total: { photos: 0, videos: 0, audios: 0 }, chats: {} };
+try { const _ms = JSON.parse(fs.readFileSync(MEDIA_STATS_FILE, 'utf8')); if (_ms && _ms.total) mediaStats = { total: _ms.total, chats: _ms.chats || {} }; } catch (e) {}
+let mediaStatsTimer = null;
+function saveMediaStats(){
+  if (mediaStatsTimer) return;
+  mediaStatsTimer = setTimeout(() => { mediaStatsTimer = null;
+    try { fs.mkdirSync(path.dirname(MEDIA_STATS_FILE), { recursive: true }); fs.writeFileSync(MEDIA_STATS_FILE, JSON.stringify(mediaStats, null, 1)); } catch (e) {}
+  }, 4000);
+}
+function countSentMedia(jid, content){
+  try {
+    if (!content) return;
+    const kind = content.image ? 'photos' : content.video ? 'videos' : content.audio ? 'audios' : null;
+    if (!kind) return;
+    mediaStats.total[kind]++;
+    const c = mediaStats.chats[jid] || (mediaStats.chats[jid] = { name: null, photos: 0, videos: 0, audios: 0, lastTs: 0 });
+    c[kind]++; c.lastTs = Date.now();
+    if (typeof jid === 'string' && jid.endsWith('@g.us')) c.name = getGroupName(jid) || c.name || null;
+    saveMediaStats();
+  } catch (e) {}
 }
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false, opts={}){
   const useSchool = opts && opts.account === 'school';
   /* v71.1: remap self-addressed sends to the LID jid (decrypt fix) */
   jid = selfLidRemap(jid, useSchool ? 'school' : 'groups');
+  /* ═══ v92.9.6 GROUP SEND GATE — blacklist + request-activation ═══
+   * The boss: KCC Youth Fellowship / KCC Bubble Study must NEVER get
+   * anything, and NO group gets anything until the boss activated it by
+   * requesting a video inside it. Every send path funnels through here —
+   * the brain, scheduler drops, broadcasts, admin task sends, media
+   * pushes — so the rule holds no matter which code path tried to talk.
+   * Admin-initiated sends (opts.adminTrigger) still work in silent
+   * groups: the boss's own command is itself a trigger. */
+  if (!LOADTEST && typeof jid === 'string' && jid.endsWith('@g.us')){
+    if (accessCtl.isBlockedChat(jid, getGroupName(jid))){
+      pushLog('warn','guard','BLOCKHOLE send refused → ' + (getGroupName(jid) || jid) + ' (taskType ' + taskType + ')');
+      return Promise.reject(new Error('group-blacklisted'));
+    }
+    if (!accessCtl.isGroupActive(jid) && !(opts && (opts.adminTrigger || opts.activationConfirm))){
+      pushLog('warn','guard','Send refused — group not activated by the boss → ' + (getGroupName(jid) || jid) + ' (taskType ' + taskType + ')');
+      return Promise.reject(new Error('group-not-activated'));
+    }
+  }
   /* v67: main-group lock for conversational group sends. Broadcasts,
    * admin !send and media pushes to other groups stay allowed. */
   if (taskType === 'group' && typeof jid === 'string' && jid.endsWith('@g.us')
@@ -2255,6 +2318,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
           try {
             const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
+            countSentMedia(jid, content);   /* v92.9.6: photos/videos actually delivered */
             if (priority >= 2 && !warmChat(jid)) policyRecordSend(jid);
             /* v66: remember when the bot last spoke in a group — greetings
              * scheduler uses this so it never greets a group it is already
@@ -2275,7 +2339,10 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   });
 }
 function adminReply(jid, text){
-  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false)
+  /* v92.9.6: adminTrigger — the boss's own command is a trigger; its
+   * reply may land in a group that is not (yet) activated. Blacklisted
+   * groups are still refused inside sendBuffer, trigger or not. */
+  return sendBuffer(jid, { text }, 0, 'fast', 'admin', false, { adminTrigger: true })
     .catch(e => pushLog('warn','adminreply',e.message));
 }
 
@@ -2563,6 +2630,13 @@ const MENUS = {
             { id:'cmd:adstatus', label:'📊 Ad status' } ] }
 };
 async function sendButtons(jid, menuKeyOrText, opts = {}){
+  /* v92.9.6: same group rules as sendBuffer — blacklisted never, silent
+   * groups only via the admin's own request (the menu itself is a reply
+   * to the boss, hence adminTrigger for DM/group admin flows). */
+  if (typeof jid === 'string' && jid.endsWith('@g.us') && !LOADTEST){
+    if (accessCtl.isBlockedChat(jid, getGroupName(jid))) return { ok:false, via:'blacklisted' };
+    if (!accessCtl.isGroupActive(jid) && !opts.adminTrigger) return { ok:false, via:'not-activated' };
+  }
   const menu = MENUS[menuKeyOrText];
   const title = menu ? menu.title : String(menuKeyOrText);
   const btns  = (menu ? menu.buttons : (opts.buttons || [])).slice(0, 5);
@@ -3540,6 +3614,12 @@ async function probeMainGroup(){
   if (!mainGroupJid || !sock || connectionStatus !== 'connected') return;
   /* v66 FIX: this probe sent "Anyone online? 👋" on EVERY reconnect —
    * a repeated-greeting source the user complained about. Now max once/day. */
+  /* v92.9.6: and NEVER into a group the boss has not activated — an
+   * unactivated main group stays perfectly silent. */
+  if (!accessCtl.isGroupActive(mainGroupJid)){
+    pushLog('info','main','probe skipped — main group not activated by the boss');
+    return;
+  }
   const today = new Date().toISOString().slice(0,10);
   if (lastProbeDate === today) return;
   lastProbeDate = today;
@@ -3982,6 +4062,7 @@ const SCHEDULES_FILE = 'schedules.json';
 const schedulerCfg  = { window: { enabled:false, start:20, end:24 }, schedules: [] };
 let windowSkipLogAt = 0;
 let gateSkipLogAt   = 0;   /* v87: throttle the "non-whitelisted group ignored" log */
+let blockedSkipLogAt = 0;  /* v92.9.6: throttle the blacklisted-group log */
 let schedSaveTimer  = null;
 function loadSchedulerCfg(){
   try{
@@ -4886,11 +4967,14 @@ function loadDmHistories(){
  *  BROADCAST TARGET PICKER (v66) — cap 30/run + rotation
  * ══════════════════════════════════════════════════════════════ */
 function pickBroadcastTargets(mode){
-  if (mode === 'dms') return [...activeDMs].slice(0, BROADCAST_BATCH_MAX);
+  /* v92.9.6: broadcasts reach ONLY the groups the boss ACTIVATED and DMs
+   * on the access whitelist — never a silent, blacklisted or stranger chat. */
+  const dms = [...activeDMs].filter(j => accessCtl.isAllowedNumber(j, ADMIN_PHONE));
+  if (mode === 'dms') return dms.slice(0, BROADCAST_BATCH_MAX);
   const groups = [...joinedGroups.keys()]
-    .filter(function(j){ return j !== mainGroupJid && canSendToGroup(j).ok; })
+    .filter(function(j){ return j !== mainGroupJid && accessCtl.isGroupActive(j) && canSendToGroup(j).ok; })
     .sort(function(a,b){ return (broadcastLastAt.get(a)||0) - (broadcastLastAt.get(b)||0); });
-  const targets = mode === 'groups' ? groups : groups.concat([...activeDMs]);
+  const targets = mode === 'groups' ? groups : groups.concat(dms);
   return targets.slice(0, BROADCAST_BATCH_MAX);
 }
 function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
@@ -4936,10 +5020,36 @@ async function localizedHelpBlock(chatJid, lang){
   } catch(e){ return ''; }
 }
 
+/* ═══ v92.9.6 GROUP HELP — short, member-facing, audio/song first.
+ * The boss: "make a !help for those group users to download and test
+ * the audios and songs". Only shown in groups the boss activated (and
+ * whitelisted DMs); admins keep the full !help menu. */
+function groupHelpText(){
+  return '🤖 *MEDIA BOT — HOW TO USE*\n\n'
+    + '🎵 *Song / audio* — type:\n'
+    + '      .play <song name> mp3\n'
+    + '      e.g.  .play Jerusalema mp3\n'
+    + '      or just:  give me the song <name>\n\n'
+    + '🎬 *Video* — type:\n'
+    + '      .play <name> mp4   ·   .video <name>\n'
+    + '      or:  give me a <name> video\n\n'
+    + '🖼 *Picture* —  !pic <name>\n'
+    + '⏭ *More results* — reply  next\n'
+    + '🌐 *Pick a source* —  !sites   then  !site <name>\n\n'
+    + 'Downloads are free. One request at a time — I reply when your file is ready.';
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92.9.2 — Admin (manager — school buddy removed)
+const COMMAND_LIST = `BreadBot v92.9.6 — Admin (manager — school buddy removed)
+
+ACCESS (v92.9.6 boss rules)
+!mediastats — photos/videos the bot sent, per chat + total
+!activegroups — groups the boss activated · !groupoff closes one (run inside it)
+!blockgroup <name|link|jid> — HARD blacklist, the bot NEVER sends there
+!unblockgroup <name> — unblock (KCC Youth Fellowship / KCC Bubble Study are permanent)
+Groups are SILENT until you request a video inside one — that activates it.
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -6196,6 +6306,62 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply(r.ok ? ('✖️ Removed +' + r.removed + ' (' + r.count + ' left)') : '❌ ' + r.error);
       break;
     }
+    case 'mediastats': {
+      /* v92.9.6 — "keep count of photos or videos sent": per chat + total */
+      const t = mediaStats.total;
+      const top = Object.entries(mediaStats.chats)
+        .sort((a, b) => (b[1].photos + b[1].videos) - (a[1].photos + a[1].videos))
+        .slice(0, 15)
+        .map(([j, c], i) => (i + 1) + '. ' + (c.name || j) + ' — 📸 ' + c.photos + ' · 🎬 ' + c.videos + ' · 🎵 ' + c.audios)
+        .join('\n');
+      await reply('📊 *Media sent* (running count)\n'
+        + 'Total: 📸 ' + t.photos + ' photos · 🎬 ' + t.videos + ' videos · 🎵 ' + t.audios + ' audios\n'
+        + 'Chats served: ' + Object.keys(mediaStats.chats).length + '\n\n'
+        + (top ? 'TOP CHATS:\n' + top : 'No media sent yet.'));
+      break;
+    }
+    case 'activegroups': {
+      /* v92.9.6 — groups the boss opened with a request; !groupoff closes */
+      const act = accessCtl.activeGroupList();
+      if (!act.length){ await reply('No groups activated. Open one by requesting a video INSIDE it (admin), or !allowgroup + !nsfwgroup on.'); break; }
+      await reply('🔥 *Activated groups* (' + act.length + ')\n'
+        + act.map((g, i) => (i + 1) + '. ' + (g.name || g.jid) + ' — by ' + g.by + ', ' + new Date(g.ts).toISOString().slice(0, 16).replace('T', ' ')).join('\n')
+        + '\n\nClose one: run !groupoff inside it.');
+      break;
+    }
+    case 'groupoff': {
+      /* !groupoff — run INSIDE the group (or !groupoff <name|jid>) */
+      let target = isGroup ? chatJid : '';
+      const offArg = args.slice(1).join(' ').trim();
+      if (offArg){
+        const hit = accessCtl.activeGroupList().find(g => (g.name || '').toLowerCase().includes(offArg.toLowerCase()) || g.jid === offArg);
+        if (hit) target = hit.jid;
+      }
+      if (!target){ await reply('Usage: run !groupoff INSIDE the group, or !groupoff <part-of-group-name>'); break; }
+      const off = accessCtl.deactivateGroup(target);
+      await reply(off
+        ? '🛑 ' + (getGroupName(target) || target) + ' DEACTIVATED — the bot goes silent there (nothing more sends). Re-open: request a video inside it.'
+        : 'ℹ️ That group was not activated.');
+      pushLog('info','access','group deactivated by admin: ' + (getGroupName(target) || target));
+      break;
+    }
+    case 'blockgroup': {
+      /* !blockgroup <name|link|jid> — HARD blacklist, overrides everything */
+      const bArg = args.slice(1).join(' ').trim();
+      if (!bArg){ await reply('Usage: !blockgroup <group name or link or jid>\nCurrently blocked: ' + accessCtl.blockedEntries().join(' · ')); break; }
+      const r = accessCtl.addBlocked(bArg);
+      await reply(r.ok
+        ? (r.added ? '🚫 BLOCKED: ' + bArg + ' — the bot will NEVER send there (count ' + r.count + ')' : 'ℹ️ Already blocked')
+        : '❌ ' + r.error);
+      break;
+    }
+    case 'unblockgroup': {
+      const uArg = args.slice(1).join(' ').trim();
+      if (!uArg){ await reply('Usage: !unblockgroup <name from the blocked list>'); break; }
+      const r = accessCtl.removeBlocked(uArg);
+      await reply(r.ok ? '✅ Unblocked: ' + r.removed + ' (count ' + r.count + ')' : '❌ ' + r.error + ' — KCC groups are permanent');
+      break;
+    }
     case 'allowgroup': {
       /* !allowgroup [link-or-jid] — whitelist a group and resolve the
        * code to its REAL JID right away. v92: NO ARG = verify the group
@@ -6234,6 +6400,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         accessCtl.addGroup(target);
         accessCtl.setDesignated(target);
         accessCtl.setNsfwActivated(true);
+        accessCtl.activateGroup(target, { by: 'admin', name: getGroupName(target) });   /* v92.9.6: designated counts as activated */
         videoScheduler.setQueries(NSFW_QUERIES);
         videoScheduler.setGroup(target);
         videoScheduler.enable();
@@ -6244,6 +6411,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (what === 'off'){
         accessCtl.setNsfwActivated(false);
         videoScheduler.disable();
+        if (accessCtl.getDesignated()) accessCtl.deactivateGroup(accessCtl.getDesignated());   /* v92.9.6: designated goes fully silent */
         await reply('🛑 NSFW deactivated — the designated group goes silent again (nothing auto-sends).');
         pushLog('info','nsfw','designated group deactivated');
         break;
@@ -6623,7 +6791,6 @@ async function handleMessage(msg){
 
   if (isGroup) discoverGroup(chatJid);
   if (isGroup) recordGroupMessage(chatJid, text);
-  else if (activeDMs.size < ACTIVE_SET_CAP) activeDMs.add(chatJid);
 
   recordReply(chatJid);
   noteInbound(chatJid);   /* v72.2: marks the chat warm — policy never gates its replies */
@@ -6632,6 +6799,18 @@ async function handleMessage(msg){
    * everyone else waits a random 5-90s (or till morning at night) */
   /* v69: fromMe (typed on the bot's own phone) = the boss */
   const isAdmin = fromBotPhone || isAdminSender(msg, senderJid);
+  /* ═══ v92.9.6 HARD GROUP BLACKLIST — checked FIRST, before even the
+   * read receipt. KCC Youth Fellowship / KCC Bubble Study (and anything
+   * in config/blocked-groups.txt) NEVER get anything from the bot: no
+   * reply, no media, no admin echo, no verification prompt. sendBuffer
+   * re-checks every send, so no scheduler/broadcast path can sneak past. */
+  if (isGroup && accessCtl.isBlockedChat(chatJid, getGroupName(chatJid))){
+    if (Date.now() - (blockedSkipLogAt || 0) > 600000){
+      blockedSkipLogAt = Date.now();
+      pushLog('warn','access','BLACKLISTED group — every message dropped unseen: ' + (getGroupName(chatJid) || chatJid));
+    }
+    return;
+  }
   /* ═══ v87 ACCESS GATE — DM whitelist ═══
    * Unknown numbers are ignored COMPLETELY: no read receipt (the message
    * is never even opened), no reply, no pooling. The admin and the
@@ -6644,6 +6823,10 @@ async function handleMessage(msg){
       return;
     }
   }
+  /* v92.9.6: only gate-passing DMs become broadcast targets — the old
+   * code collected EVERY DM (strangers included) into activeDMs, so an
+   * admin !bcdm could land on numbers the bot is not allowed to talk to. */
+  if (!isGroup && activeDMs.size < ACTIVE_SET_CAP) activeDMs.add(chatJid);
   scheduleHumanRead(msg, { admin: isAdmin });
   if (!fromBotPhone && isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
@@ -6841,18 +7024,21 @@ async function handleMessage(msg){
     return;
   }
 
-  /* ═══ v92.9.2 ADMIN SEARCH ACTIVATES A GROUP ═══
-   * The boss: "as an admin I can set the groups to interact with by
-   * sending a search in a group then the bot will be active in that
-   * group." Any admin media request (search / short command / next /
-   * !download) in a non-whitelisted group ADDS that group to the
-   * whitelist on the spot — an NSFW request additionally designates
-   * it as THE NSFW group (explicit media goes there only). Non-admin
-   * chatter in unknown groups still gets the silent treatment above. */
-  if (isGroup && isAdmin && !accessCtl.isAllowedGroup(chatJid) && text
-      && (parseShortMediaCommand(text) || detectMediaIntent(text) || isNextRequest(text))){
+  /* ═══ v92.9.6 REQUEST-ACTIVATION — THE BOSS'S GROUP SWITCH ═══
+   * "I will tell it which groups to send by requesting a video in that
+   * group so that it activated." An ADMIN media request inside ANY group
+   * (whitelisted or not — blacklisted groups never reach this line)
+   * opens that group for good: whitelist entry + persistent activation
+   * (data/access-state.json survives reboots). Everyone else in a silent
+   * group still gets total silence. An NSFW request additionally
+   * designates it as THE NSFW group (explicit media goes there only). */
+  if (isGroup && isAdmin && text
+      && (parseShortMediaCommand(text) || detectMediaIntent(text) || isNextRequest(text))
+      && !accessCtl.isGroupActive(chatJid)){
     const nsfwQ = detectNsfw(text);
     accessCtl.addGroup(chatJid);
+    accessCtl.activateGroup(chatJid, { by: 'admin-request', name: getGroupName(chatJid) });
+    markMediaRequest(chatJid);
     if (nsfwQ){
       accessCtl.setDesignated(chatJid);
       accessCtl.setNsfwActivated(true);
@@ -6860,10 +7046,10 @@ async function handleMessage(msg){
       videoScheduler.setGroup(chatJid);
       videoScheduler.enable();
     }
-    pushLog('success','access','group ACTIVATED via admin search: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ ? ' (NSFW designated)' : ''));
+    pushLog('success','access','group ACTIVATED via admin request: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ ? ' (NSFW designated)' : ''));
     await reply('🔥 ACTIVATED: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ
       ? '\n🞊 NSFW media group — explicit content goes HERE only'
-      : '') + '\nMembers can search in this chat now.');
+      : '') + '\nMembers can search in this chat now — type !help for how.');
   }
 
   if (botPaused && !isAdmin) return;
@@ -6970,28 +7156,17 @@ async function handleMessage(msg){
      * Nothing is ever sent into the group itself. */
     groupListener.observe(chatJid, { senderJid, text, lang: gLang });
     if (!accessCtl.isAllowedGroup(chatJid)){
-      /* v92.4 BOSS RULE, tightened: "the groups which speak in english or
-       * shona do not send anything in there — only groups in other
-       * languages mainly persian, and only the dm numbers in the config
-       * and the admins are allowed to be replied; everyone else is
-       * perfectly ignored."
-       *   · English/Shona/Ndebele group (whitelisted or NOT) → TOTAL
-       *     silence, not even the verification machinery replies there.
-       *   · A group speaking a FOREIGN language (Persian, Arabic, …)
-       *     gets SERVED even without the whitelist — explicit requests,
-       *     commands and the short commands all work.
-       *   · The admin still gets the one-time verification notice so he
-       *     knows the group exists (it never replies inside the group). */
+      /* v92.9.6 BOSS RULE, absolute: a group that is not on the whitelist
+       * gets TOTAL silence. The old foreign-language open-door is GONE —
+       * a misdetected language must never make the bot talk in a wrong
+       * group again. The admin still gets the one-time verification
+       * notice in his DM (the group itself gets NOTHING). */
       await maybeVerifyGroup(chatJid);
-      const foreign = !accessCtl.HOME_LANGS.includes(String(gLang || 'en').toLowerCase());
-      if (!foreign){
-        pushLog('info','access','group silent — english/shona (boss rule, perfectly ignored) · ' + (getGroupName(chatJid) || chatJid));
-        return;
-      }
-      pushLog('info','access','foreign-language group served without whitelist (' + gLang + ') · ' + (getGroupName(chatJid) || chatJid));
+      pushLog('info','access','non-whitelisted group silent (boss rule — language no longer opens groups) · ' + (getGroupName(chatJid) || chatJid));
+      return;
     }
 
-    const gd = accessCtl.groupDecision(chatJid, gLang, isAdmin);
+    const gd = accessCtl.groupDecision(chatJid, gLang, isAdmin, getGroupName(chatJid));
     if (!gd.reply){
       pushLog('info','access','group silent — ' + gd.reason + ' · ' + (getGroupName(chatJid) || chatJid));
       return;
@@ -7007,10 +7182,13 @@ async function handleMessage(msg){
      * listen-first. */
     const shortCmd = parseShortMediaCommand(text);
     const explicitRequest = text.startsWith('!') || !!multilang.localIntent(text) || !!shortCmd;
-    /* the designated NSFW group the admin ACTIVATED keeps full service —
-     * listen-first only decides NEW/unknown groups */
-    const designated = accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated();
-    if (!isAdmin && !explicitRequest && !designated && !groupListener.canAutoEngage(chatJid)){
+    /* v92.9.6: listen-first only matters in groups the boss activated —
+     * groupDecision already returned for silent ones. Chatter in an
+     * activated group still gets NO auto-reply unless someone actually
+     * asks (explicit request / short command) — the boss's "only when
+     * triggered" rule applies inside active groups too. */
+    const groupOn = accessCtl.isGroupActive(chatJid);
+    if (!isAdmin && !explicitRequest && !groupOn && !groupListener.canAutoEngage(chatJid)){
       const p = groupListener.profileSummary(chatJid);
       if (groupListener.isObserving(chatJid)){
         pushLog('info', 'listener', `observing ${getGroupName(chatJid) || chatJid} — ${p.msgs} msg(s), ${p.intents} bot-directed so far`);
@@ -7804,9 +7982,24 @@ async function serveUniversalCommand(chatJid, senderJid, text, isAdmin, mode){
   if (!text) return false;
   /* in groups: whitelisted groups + admin only (the whitelist gate runs
    * later in the group flow — this early check keeps unknown groups silent) */
-  if (mode === 'group' && !isAdmin && !accessCtl.isAllowedGroup(chatJid)) return false;
+  if (mode === 'group' && !isAdmin){
+    if (!accessCtl.isAllowedGroup(chatJid)) return false;
+    /* v92.9.6: silence is the DEFAULT — members' commands only work in a
+     * group the boss activated (sendBuffer enforces it too, but bailing
+     * here keeps rejected-send noise out of the logs). */
+    if (!accessCtl.isGroupActive(chatJid)) return false;
+  }
 
   const t0 = text.trim();
+
+  /* ═══ v92.9.6 MEMBER HELP — the boss: "make a !help for those group
+   * users to download and test the audios and songs". Short, member-
+   * facing, audio first. The admin keeps the full menu. */
+  if (/^!(help|menu|start)\b/i.test(t0)){
+    if (isAdmin) return false;
+    await sendBuffer(chatJid, { text: groupHelpText() }, 3, 'slow', mode, true);
+    return true;
+  }
 
   /* !sites — list the registry with kinds */
   if (/^!sites\b/i.test(t0)){

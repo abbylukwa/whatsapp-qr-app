@@ -4920,7 +4920,7 @@ async function localizedHelpBlock(chatJid, lang){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92.9 — Admin (manager — school buddy removed)
+const COMMAND_LIST = `BreadBot v92.9.1 — Admin (manager — school buddy removed)
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -7275,7 +7275,7 @@ async function connectBot(){
         try { const vs = await scraperVideoSites(); if (vs.ok){ vsCount = vs.sites.length; vsDefault = vs.sites[0] ? vs.sites[0].name.split(' ')[0] : ''; } } catch(e){}
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v92.9 ONLINE\n' +
+            'BreadBot v92.9.1 ONLINE\n' +
             'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -8010,8 +8010,32 @@ app.get('/api/site-health', function(req, res){
   });
 });
 
+/* ═══ v92.9.1: STEALTH-FETCH ENDPOINT — the scraper's browser layer ═══
+ * intelligent-scraper runs axios + cycletls only (no browser), so sites
+ * with JS challenges (yona-yethuu.co.za "One moment, please…") hand it
+ * a challenge shell and every search reads as "404". The bot already
+ * ships the stealth Chrome stack (core/anti-detection.js) — expose it
+ * as a fetch service. The scraper reaches it when its own ladder is
+ * blocked (scraper env: STEALTH_FETCH_URL + optional STEALTH_FETCH_TOKEN
+ * ↔ STEALTH_TOKEN here). Same trust model as /admin routes: URL stays
+ * private; token optional but recommended. */
+const stealthFetchMod = require('./core/stealth-fetch');
+app.post('/stealth-fetch', express.json({ limit: '2mb' }), async function(req, res){
+  const url = String((req.body || {}).url || '').trim();
+  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ ok: false, error: 'body must be {"url":"https://…"}' });
+  const tok = process.env.STEALTH_TOKEN;
+  if (tok && (req.get('x-bb-token') || '') !== tok) return res.status(403).json({ ok: false, error: 'bad token' });
+  try {
+    const html = await stealthFetchMod.stealthFetchHtml(url, { timeoutMs: 45000 });
+    res.json({ ok: true, bytes: html.length, html: html });
+  } catch (e) {
+    console.error('[stealth-fetch] ' + url.slice(0, 100) + ': ' + e.message);
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v92.7</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v92.9.1</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}

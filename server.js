@@ -7559,7 +7559,7 @@ async function connectBot(){
         try { const vs = await scraperVideoSites(); if (vs.ok){ vsCount = vs.sites.length; vsDefault = vs.sites[0] ? vs.sites[0].name.split(' ')[0] : ''; } } catch(e){}
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v92.9.1 ONLINE\n' +
+            'BreadBot v92.9.6b ONLINE\n' +
             'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -8352,7 +8352,7 @@ app.post('/stealth-fetch', express.json({ limit: '2mb' }), async function(req, r
 });
 
 const PANEL_HTML = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v92.9.1</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BreadBot v92.9.6b</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px}
 h1{font-size:20px;color:#58a6ff}.sub{font-size:12px;color:#8b949e;margin-bottom:16px}
@@ -8373,7 +8373,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 .alert{background:#5a1d1d;color:#fff;padding:8px;border-radius:6px;margin-bottom:8px;font-size:12px;display:none}
 .alert.show{display:block}
 </style></head><body>
-<h1>BreadBot v92.7</h1>
+<h1>BreadBot v92.9.6b</h1>
 <div class="alert" id="noMain">⚠️ Main group NOT SET — the groups account auto-sets it from ADMIN_GROUP_LINK once QR 1 is scanned &amp; connected (or send <b>!setmain &lt;link&gt;</b> from DM).</div>
 <div class="sub">Mode: <b id="md">-</b> | Admin: <b id="ap">-</b> | Window: <b id="w">-</b> | NSFW: <b id="ns">-</b> | DM: <b id="dm">-</b> | AI: <b id="ai">-</b> | Main: <b id="mg">-</b> | <b id="bdm">Bot Detect: -</b></div>
 <div class="grid">
@@ -10714,7 +10714,7 @@ function renderSceneSvg(spec){
 }
 function buildBpyScript(spec){
   const th = spec.theme, L = [];
-  L.push('# ' + spec.topic + ' — BreadBot v92.7 scene preview script');
+  L.push('# ' + spec.topic + ' — BreadBot v92.9.6b scene preview script');
   L.push('# Deterministic: the same topic always regenerates this exact scene.');
   L.push('# Run inside Blender:   blender --background --python THIS_FILE.py');
   L.push('# It renders preview.png (1920x1080) next to the script.');
@@ -11237,7 +11237,7 @@ function startSelfKeepAlive(){
 
 const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);
-  console.log('BreadBot v92.7 — short commands · session auto-backup · self-keepalive · NSFW 24/7 · hotlink-proxy downloads');
+  console.log('BreadBot v92.9.6b — short commands · session auto-backup · self-keepalive · NSFW 24/7 · hotlink-proxy downloads');
   console.log('Mode: MANAGER (group management — school buddy removed v92)');
   console.log('Admin: '+ADMIN_PHONE);
   console.log('Main group: '+(mainGroupJid||'NOT SET — will auto-resolve from ADMIN_GROUP_LINK'));

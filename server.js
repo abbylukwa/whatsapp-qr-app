@@ -3223,7 +3223,7 @@ async function scraperVideo(query, exclude, site, boostCat=null){
     /* v73.1: optional site pick — "yona" / "pornpics" / slot number.
      * Absent = the scraper's file order (YonaYethuu first). */
     if (site) body.site = String(site).trim();
-    const r = await scrapperFetch('/video', body, 90000);
+    const r = await scrapperFetch('/video', body, 150000);   /* v92.9.9c: yona-pinned hunts + download can run ~120s under the scraper budget; 90s killed real answers */
     if (!r || !r.mediaUrl) throw new Error('scrapper: no videoUrl');
     /* v84.2: local copy first — temp scraper links die within the hour */
     const local = await downloadToLocalMedia(r.mediaUrl, 'video');

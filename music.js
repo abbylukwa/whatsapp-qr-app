@@ -272,7 +272,10 @@ async function convert(videoId, mode, opts = {}){
    * fall to the fallbacks FAST (no ~90s of dead timeouts per ask); the
    * chain retries itself after the cooldown (self-healing). */
   chainDownUntil = Date.now() + CHAIN_DOWN_MS;
-  throw new Error('all download providers failed — ' + tries.slice(0, 4).join(' | '));
+  /* v92.9.9: one honest line instead of a provider-error wall —
+   * the detail lives in the logs (!logs music) for debugging. */
+  const nConvert = tries.filter(t => /piped|invidious|cobalt|youtube/.test(t)).length;
+  throw new Error('no song found for "' + (opts.query || '') + '" — ' + nConvert + ' converter(s) + Audius all failed or IP-blocked. Try artist name only, or your own slots had no on-topic file. (!logs music has details)');
 }
 
 /* ═══ 5. PUBLIC API — getMusic(query, mode) ═══════════════════════════ */
@@ -293,7 +296,7 @@ async function getMusic(query, mode){
     /* quality ladder for video: 720 → 480 → 360 (keeps files under the cap) */
     const ladder = mode === 'video' ? ['720', '480', '360'] : [undefined];
     for (const q of ladder){
-      try { result = await convert(videoId, mode, { quality: q }); break; }
+      try { result = await convert(videoId, mode, { quality: q, query }); break; }
       catch (e) { lastErr = e.message; }
     }
     if (result){

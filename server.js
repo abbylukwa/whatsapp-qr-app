@@ -3341,8 +3341,8 @@ function parseVideoSitePick(raw){
  *  activated designated group. Music "full album" goes to the YouTube
  *  search chain as-is (albums resolve just like singles).
  * ══════════════════════════════════════════════════════════════ */
-const SHORT_CMD_RE     = /^[.!]?\s*(nsfw\.play|nsfw\.see|nsfw\.gif|play)\s+([\s\S]+)$/i;
-const SHORT_CMD_BARE_RE = /^[.!]?\s*(nsfw\.play|nsfw\.see|nsfw\.gif|play)\s*$/i;
+const SHORT_CMD_RE     = /^[.!]?\s*(nsfw\.play|nsfw\.see|nsfw\.gif|nsfw\.video|play)\s+([\s\S]+)$/i;
+const SHORT_CMD_BARE_RE = /^[.!]?\s*(nsfw\.play|nsfw\.see|nsfw\.gif|nsfw\.video|play)\s*$/i;
 function parseShortMediaCommand(text){
   const t = String(text || '').trim();
   if (!t || t.length > 300 || t.includes('\n')) return null;
@@ -3366,6 +3366,7 @@ const SHORT_CMD_USAGE = {
   'nsfw.play': 'Usage: nsfw.play <query> — NSFW video, best match first (say "next" for more).',
   'nsfw.see':  'Usage: nsfw.see <query> — NSFW pictures.',
   'nsfw.gif':  'Usage: nsfw.gif <query> — NSFW gifs.',
+  'nsfw.video': 'Usage: nsfw.video <query> — the 5 most relevant videos, sent right here (say "next" for more).',
   'play':      'Usage: .play <song or album> [mp3|mp4] — music as audio (default) or video.'
 };
 async function runShortMediaCommand(chatJid, cmd, opts = {}){
@@ -3400,6 +3401,32 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       });
       resetDailyStats(); dailyStats.downloads++;
       await reply('Sent.');
+      return true;
+    }
+    if (cmd.kind === 'nsfw.video'){
+      /* v92.9.9 — the boss's group flow: ONE ask, FIVE most-relevant
+       * videos downloaded and sent straight into this chat. Works in
+       * DM + activated groups; site: / #n picks ride the same parser. */
+      await reply('Searching "' + cmd.query + '" — 5 best videos coming up...');
+      const ranked = await scraperVideoRanked(cmd.query, { site: prefer || null });
+      if (ranked.length){
+        rememberVideoSearch(chatJid, ranked, cmd.query);
+        const sent = await sendRelevantBatch(chatJid, 5, { taskType });
+        if (sent){
+          resetDailyStats(); dailyStats.nsfwSent += sent;
+          await reply('Sent ' + sent + ' video(s) — say "next" for more from this search.');
+          return true;
+        }
+      }
+      const r1 = await scraperVideo(cmd.query, null, prefer || null);
+      if (r1.ok){
+        await sendMediaUrl(chatJid, r1.mediaUrl, { kind:'video', mimetype:r1.mimetype||'video/mp4',
+          caption:'🎬 ' + (r1.title||cmd.query).slice(0,90), priority:0, lane:'fast', taskType, typing:false });
+        resetDailyStats(); dailyStats.nsfwSent++;
+        await reply('Only 1 match found — sent it. Say "next" after more searches.');
+      } else {
+        await reply('No video for "' + cmd.query + '" — ' + (r1.error || 'try different words') + ' · !vidsites lists the sites');
+      }
       return true;
     }
     if (cmd.kind === 'nsfw.play'){
@@ -5252,7 +5279,38 @@ function groupHelpLocalized(chatJid, prefix){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92.9.6b — Admin (manager — school buddy removed)
+const COMMAND_LIST = `🤖 BreadBot — WHAT WORKS
+
+📥 MEDIA (in DM or an activated group)
+  pic <name> — pictures · gif <name> — gifs
+  nsfw.see <name> · nsfw.gif <name> — NSFW pics/gifs (24/7)
+  nsfwvideo <name> — videos · nsfw.play <name> — NSFW video
+  .play <song> — music (add mp4 for video)
+  next — more results from the same search
+
+🌐 PICK A SITE (one ask or saved)
+  site:<name|#> after any command — e.g. nsfw.see teen site:afghan
+  #2 or @2 instead of site: works too
+  !vidsites — list video sites · !site <name> — save your pick
+  Persian songs: .play <خواننده> · Afghan: site:afghan / afghan-vid / afghan-gif
+
+🌍 LANGUAGE
+  !help persian · !help shona · !help arabic · !help spanish · !help french
+
+👥 GROUPS (boss only)
+  !activegroups — what is on · !groupoff (inside a group) — switch off
+  !setmain <link> · !join <link> · !blockgroup <name>
+
+⚙️ QUICK CONTROL
+  !status — health + AI · !pause / !resume · !cleantemp
+  !mediastats — what was sent where
+
+Everything else (scheduler, ads, broadcasts, films, study tools…):
+  !fullhelp — the complete menu`;
+
+/* v92.9.9: the old full menu survives as !fullhelp — nothing was deleted,
+ * the day-to-day menu above is just quiet now. */
+const FULL_COMMAND_LIST = `BreadBot v92.9.6b — Admin (manager — school buddy removed)
 
 ACCESS (v92.9.6 boss rules)
 !mediastats — photos/videos the bot sent, per chat + total
@@ -5444,6 +5502,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         await reply(COMMAND_LIST + await localizedHelpBlock(chatJid));
       }
     } break;
+    case 'fullhelp': case 'allcmds': await reply(FULL_COMMAND_LIST + await localizedHelpBlock(chatJid)); break;
     /* ═══ v71.5 AI BRAIN — toggle + live stats ═══ */
     case 'sched': {
       /* ═══ v72 MAIN-GROUP VIDEO SCHEDULER — set/enable/run ═══ */
@@ -6227,7 +6286,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply('Sent.');
       break;
     }
-    case 'nsfw.play': case 'nsfw.see': case 'nsfw.gif': case 'play': {
+    case 'nsfw.play': case 'nsfw.see': case 'nsfw.gif': case 'nsfw.video': case 'play': {
       /* v92.2 SHORT COMMANDS — same engine everywhere; admin bypasses the
        * NSFW window (admins always have). */
       const parsed = parseShortMediaCommand(text)
@@ -7837,15 +7896,13 @@ async function connectBot(){
             'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n\n' +
             'Admin commands accepted in ANY chat (DM or group) — v69.\n' +
             'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.\n\n' +
-            '📦 THINGS AVAILABLE:\n' +
-            '· WRONG-RECIPIENT FIX (v92.9): downloads only go to the chat that asked — misroutes are blocked + reported here\n' +
-            '· Video sites: ' + vsCount + (vsDefault ? ' (default: ' + vsDefault + ')' : '') + ' — say !vidsites · !nsfwvideo <q> site:<#>\n' +
-            '· Site typos auto-match: site:yonalethu → YonaYethuu (v92.8 fix)\n' +
-            '· NSFW: 24/7 always on (v92.6) — nsfw.play / nsfw.see / nsfw.gif <q>\n' +
-            '· Media: pic/gif/video/music, ranked "most relevant" + next for more\n' +
-            '· Languages: عکس/فیلم/آهنگ/گیف/دانلود + 10 more — no ! needed\n' +
-            '· Help in other languages: !help now ends with a فارسی/عربي quick block\n' +
-            '· Keepalive: self-ping every 10 min + session auto-restore (no QR re-scan)'
+            '📦 USEFUL NOW:\n' +
+            '· Media: pic <name> · gif <name> · nsfwvideo <name> · .play <song>\n' +
+            '· NSFW 24/7: nsfw.see / nsfw.gif / nsfw.play <name> · next = more\n' +
+            '· Site pick: add site:<name|#> to any ask (e.g. site:afghan) · !vidsites lists sites\n' +
+            '· Persian: !help persian · Persian songs: .play <خواننده>\n' +
+            '· Groups stay silent until you activate one (say .play inside it)\n' +
+            '· Video sites: ' + vsCount + (vsDefault ? ' (default: ' + vsDefault + ')' : '') + ' · full menu: !fullhelp'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin','DM: '+e.message); }

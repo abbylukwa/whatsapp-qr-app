@@ -856,23 +856,25 @@ function describeNsfw() {
 function describeDm()   { return isDmAiWindow()  ? 'ON (21:00-08:00)'    : 'OFF (08:00-21:00)'; }
 
 /* ══════════════════════════════════════════════════════════════
- *  AI — DYNAMIC PROVIDER POOL (v69)
- *  Put as many API keys as you want in env:
+ *  AI — DYNAMIC PROVIDER POOL (v69, v92.9.7)
+ *  v92.9.7 BOSS ORDER: REWIND IS GONE — sk-rewind-… env keys are now
+ *  IGNORED at pool build (they only ever answered a Cloudflare captcha
+ *  wall from datacenter IPs, so they contributed nothing but failed
+ *  tests). In their place the pool ALWAYS carries two KEYLESS free
+ *  providers taken from the boss's chosen repo (OshekharO/GPT-AI —
+ *  probe-proven live 2026-11-21):
+ *      gptfree-unlimited → app.unlimitedai.chat  (reasoning model, SSE)
+ *      gptfree-fiction   → chatwithfiction.com   (fast single-shot)
+ *  "No cash" — no keys, no payments, nothing to buy.
+ *  Env keys still stack on top:
  *      API_1=<key>   API_2=<key>   API_3=<key> ...
- *  The provider behind each slot is AUTO-DETECTED from the key:
+ *  Detected from the key:
  *      sk-or-v1-…  → OpenRouter
- *      sk-rewind-… → Rewind (checked BEFORE sk-)
+ *      sk-rewind-… → IGNORED (rewind removed by boss order)
  *      sk-…        → OpenAI
- *      anything else → Rewind (the current working endpoint)
+ *      anything else → OpenAI shape (fails fast + cooldowns if wrong)
  *  Per-slot overrides: API_1_NAME / API_1_URL / API_1_MODEL.
- *  Legacy keys still work: REWIND_KEY / OPENAI_KEY.
- *
- *  HOW THE WORK IS SPLIT: every askAI() call starts on the NEXT
- *  provider in the pool (round-robin), so N working APIs share the
- *  tasks evenly. A provider that fails twice goes on cooldown
- *  (5 min, doubling up to 30 min) and a background re-check every
- *  5 minutes revives it the moment it answers again. One healthy
- *  API = everything runs on it; eight = the load spreads 8 ways.
+ *  Legacy OPENAI_KEY still works. REWIND_KEY is no longer read.
  * ══════════════════════════════════════════════════════════════ */
 const AI_COOLDOWN_BASE_MS = 5 * 60 * 1000;
 const AI_COOLDOWN_MAX_MS  = 30 * 60 * 1000;
@@ -880,15 +882,15 @@ const AI_FAIL_STREAK_GATE = 2;
 
 function aiShapeFor(key, slot, existingBases){
   const k = String(key);
+  /* v92.9.7: rewind keys are IGNORED — boss removed rewind entirely */
+  if (/^sk-rewind-/.test(k)) return null;
   let name, url, model;
   if (/^sk-or-v1-/.test(k)){
     name='openrouter'; url='https://openrouter.ai/api/v1/chat/completions'; model='openrouter/auto';
-  } else if (/^sk-rewind-/.test(k)){
-    name='rewind'; url='https://api.rewind.ai/v1/chat/completions'; model='rewind-uncensored';
   } else if (/^sk-/.test(k)){
     name='openai'; url='https://api.openai.com/v1/chat/completions'; model='gpt-4o-mini';
   } else {
-    name='rewind'; url='https://api.rewind.ai/v1/chat/completions'; model='rewind-uncensored';
+    name='openai'; url='https://api.openai.com/v1/chat/completions'; model='gpt-4o-mini';
   }
   const nO = process.env['API_'+slot+'_NAME'], uO = process.env['API_'+slot+'_URL'], mO = process.env['API_'+slot+'_MODEL'];
   if (nO) name = nO; if (uO) url = uO; if (mO) model = mO;
@@ -905,17 +907,15 @@ function buildAiPool(){
     const key = process.env['API_'+s];
     if (!key || !String(key).trim()) continue;
     const shaped = aiShapeFor(String(key).trim(), s, bases);
+    if (!shaped) continue;                       /* v92.9.7: sk-rewind-… ignored */
     if (seen.has(shaped.url + '|' + key)) continue;
     seen.add(shaped.url + '|' + key);
     bases.push(shaped.base);
     pool.push(Object.assign(shaped, { key: String(key).trim(), failStreak:0, cooldownUntil:0 }));
   }
-  /* legacy named keys still honoured (appended, deduped by key) */
+  /* legacy named keys still honoured (appended, deduped by key).
+   * v92.9.7: REWIND_KEY/REWIND_KEY_2..4 no longer read — boss removed rewind. */
   const legacy = [
-    ['rewind', process.env.REWIND_KEY, 'https://api.rewind.ai/v1/chat/completions', process.env.REWIND_MODEL || 'rewind-uncensored'],
-    ['rewind2', process.env.REWIND_KEY_2, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
-    ['rewind3', process.env.REWIND_KEY_3, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
-    ['rewind4', process.env.REWIND_KEY_4, 'https://api.rewind.ai/v1/chat/completions', 'rewind-uncensored'],
     ['openai', process.env.OPENAI_KEY, 'https://api.openai.com/v1/chat/completions', process.env.OPENAI_MODEL || 'gpt-4o-mini']
   ];
   for (const [name, key, url, model] of legacy){
@@ -926,6 +926,15 @@ function buildAiPool(){
     bases.push(name);
     pool.push({ base:name, name: instances ? (name+'#'+(instances+1)) : name, url, model, key, failStreak:0, cooldownUntil:0 });
   }
+  /* v92.9.7: KEYLESS FREE AI — always in the pool, no env, no cash.
+   * Taken from the boss's chosen repo (github.com/OshekharO/GPT-AI),
+   * probe-proven live on 2026-11-21: both answered real completions.
+   * askProvider() speaks their dialects (shape field) and strips the
+   * upstream identity preamble. */
+  pool.push({ base:'gptfree', name:'gptfree-unlimited', url:'https://app.unlimitedai.chat/api/chat',
+              model:'chat-model-reasoning', shape:'unlimitedai', key:'keyless', failStreak:0, cooldownUntil:0 });
+  pool.push({ base:'gptfree', name:'gptfree-fiction', url:'https://www.chatwithfiction.com/api/gpt',
+              model:'gpt', shape:'fiction', key:'keyless', failStreak:0, cooldownUntil:0 });
   return pool;
 }
 const AI_POOL = buildAiPool();
@@ -955,7 +964,96 @@ function markAiFail(p, err){
   providerReport[p.name] = { ok:false, status: err?.status, error: (err?.message || 'failed').slice(0, 120) };
 }
 
+/* ═══ v92.9.7 WIKIPEDIA — facts for searches and AI answers ONLY ═══
+ * The boss: "add Wikipedia only for searches and ai", and it must NEVER
+ * interface with the NSFW side. So: wikiAnswer() powers the !wiki lookup
+ * and gives the AI a factual excerpt for question-shaped prompts; the
+ * media junk-filter's wikipedia/wikimedia HARD-BLOCK stays untouched
+ * (no wiki ever inside posted media), and any text that trips the NSFW
+ * detector is refused a wiki lookup outright. */
+const wikiCache = new Map();                          /* query → {summary, ts} */
+/* v92.9.7: Wikimedia 403s generic bot User-Agents on BOTH endpoints —
+ * the browser-grade UA below is required on the search AND the summary
+ * call (the sandbox audit proved the summary-only header was not enough). */
+const WIKI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 BreadBot/92.9.7 (group assistant)';
+async function wikiAnswer(query, lang){
+  const q = String(query || '').trim().slice(0, 200);
+  if (!q) return null;
+  const cached = wikiCache.get(q);
+  if (cached && Date.now() - cached.ts < 3600000) return cached.summary;
+  const L = (lang === 'simple') ? 'simple' : 'en';
+  const s1 = await axios.get('https://' + L + '.wikipedia.org/w/api.php', { params: {
+    action: 'query', list: 'search', srsearch: q, srlimit: 1, format: 'json', origin: '*' },
+    timeout: 6000, headers: { 'User-Agent': WIKI_UA } });
+  const hit = s1.data && s1.data.query && s1.data.query.search && s1.data.query.search[0];
+  if (!hit) return null;
+  const s2 = await axios.get('https://' + L + '.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(hit.title),
+    { timeout: 6000, headers: { 'User-Agent': WIKI_UA, 'Accept': 'application/json' } });
+  const text = (s2.data && s2.data.extract) || '';
+  const out = text ? ('📚 ' + ((s2.data && s2.data.title) || hit.title) + ' — ' + text.slice(0, 600)) : null;
+  if (out){ wikiCache.set(q, { summary: out, ts: Date.now() }); if (wikiCache.size > 300) wikiCache.clear(); }
+  return out;
+}
+async function wikiContextFor(prompt){
+  try {
+    const p = String(prompt || '');
+    if (!p || detectNsfw(p)) return '';               /* NSFW never touches wiki */
+    if (!/\b(who|what|when|where|which)\s+(is|are|was|were|did)\b|\btell me about\b|\bwiki\b/i.test(p)) return '';
+    const w = await Promise.race([
+      wikiAnswer(p.slice(0, 150)),
+      new Promise(res => setTimeout(() => res(null), 3500))
+    ]);
+    return w ? '\n\nWikipedia (use if relevant):\n' + w : '';
+  } catch(e){ return ''; }
+}
+
+/* v92.9.7: the free relays stamp an identity line on every reply —
+ * "Hello! I am UnlimitedAI.Chat, created by the UnlimitedAI.Chat team."
+ * or its Chinese twin. The bot must never speak that to members. */
+function stripUpstreamPreamble(t){
+  let s = String(t || '');
+  s = s.replace(/^[^\n]*UnlimitedAI\.Chat[^\n]*\n+/, '');   /* identity line (EN or 中文), then blank lines */
+  s = s.replace(/^你好，我是[^\n]*\n+/, '');
+  s = s.replace(/^Hello! I am[^\n]*\n+/, '');
+  return s.trim();
+}
+function freeUuid(){
+  try { return require('crypto').randomUUID(); } catch(e){}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
 async function askProvider(p, system, prompt, maxTokens, temperature, timeoutMs){
+  /* v92.9.7 dialect 1: unlimitedai.chat — SSE deltas, no key, system
+   * prompt is inlined into the user content (the relay has no system role) */
+  if (p.shape === 'unlimitedai'){
+    const content = (system ? system + '\n\n---\n\n' : '') + prompt;
+    const r = await axios.post(p.url, {
+      chatId: freeUuid(),
+      messages: [{ id: freeUuid(), role: 'user', content: content,
+                   parts: [{ type: 'text', text: content }], createdAt: new Date().toISOString() }],
+      selectedChatModel: p.model || 'chat-model-reasoning',
+      selectedCharacter: null, selectedStory: null,
+      deviceId: freeUuid(), locale: 'en'
+    }, { headers: { 'Content-Type': 'application/json', 'x-next-intl-locale': 'en' },
+         timeout: timeoutMs || 30000, responseType: 'text' });
+    let reply = '';
+    String(r.data || '').split('\n').forEach(line => {
+      line = line.trim(); if (!line) return;
+      try { const j = JSON.parse(line); if (j.type === 'delta' && j.delta) reply += j.delta; } catch(e){}
+    });
+    return { reply: stripUpstreamPreamble(reply) };
+  }
+  /* v92.9.7 dialect 2: chatwithfiction.com — plain prompt → plain string */
+  if (p.shape === 'fiction'){
+    const r = await axios.post(p.url, { prompt: (system ? system + '\n\n' : '') + prompt, prev: null },
+      { headers: { 'Content-Type': 'application/json',
+                   referer: 'https://www.chatwithfiction.com/chat',
+                   origin: 'https://www.chatwithfiction.com' }, timeout: timeoutMs || 30000 });
+    let reply = (typeof r.data === 'string') ? r.data : (r.data && (r.data.reply || r.data.content)) || '';
+    if (typeof reply === 'string') reply = reply.replace(/^"|"$/g, '');
+    return { reply: stripUpstreamPreamble(reply) };
+  }
   const r = await axios.post(p.url, {
     model: p.model,
     messages: [
@@ -1010,10 +1108,14 @@ async function askAI(prompt, system){
   const list = healthyAiProviders();
   const start = aiPoolIdx % list.length;
   let answer = null;
+  /* v92.9.7: question-shaped prompts get a Wikipedia excerpt attached —
+   * facts for the AI, never for NSFW (wikiContextFor refuses those). */
+  let promptWithContext = prompt;
+  try { promptWithContext = prompt + (await wikiContextFor(prompt)); } catch(e){}
   for (let i = 0; i < list.length && !answer; i++){
     const p = list[(start + i) % list.length];
     try {
-      const { reply } = await askProvider(p, system, prompt);
+      const { reply } = await askProvider(p, system, promptWithContext);
       if (!reply || !String(reply).trim()) throw new Error('empty response');
       const c = humanize(reply);
       if (c && !containsForbidden(c)){
@@ -1053,7 +1155,10 @@ brain.initBrain({
   getProviders: healthyAiProviders,
   markOk:  markAiOk,
   markFail: markAiFail,
-  log: pushLog
+  log: pushLog,
+  /* v92.9.7: the brain speaks the keyless free dialects through the
+   * host's askProvider (unlimitedai SSE + fiction shapes) */
+  askProvider: (p, s, prompt, max, temp, to) => askProvider(p, s, prompt, max, temp, to)
 });
 /* ═══ MULTI-PLATFORM MANAGER — Facebook, YouTube, Twitter, TikTok
  * automation controlled via WhatsApp admin commands.
@@ -5042,6 +5147,7 @@ function groupHelpText(){
     + '      .play <name> mp4   ·   .video <name>\n'
     + '      or:  give me a <name> video\n\n'
     + '🖼 *Picture* —  !pic <name>\n'
+    + '📚 *Facts* —  !wiki <topic>\n'
     + '⏭ *More results* — reply  next\n'
     + '🌐 *Pick a source* —  !sites   then  !site <name>\n\n'
     + 'Downloads are free. One request at a time — I reply when your file is ready.';
@@ -5059,6 +5165,7 @@ const GROUP_HELP_I18N = {
     + '🎬 *ویدیو* — بنویس:\n'
     + '      .play <نام> mp4   ·   .video <نام>\n\n'
     + '🖼 *عکس* —  !pic <نام>\n'
+    + '📚 *دانش* —  !wiki <موضوع>\n'
     + '⏭ *نتیجه بعدی* — بنویس  next\n'
     + '🌐 *انتخاب سایت* —  !sites  و بعد  !site <نام>\n\n'
     + 'دانلود رایگان است. هر بار یک درخواست — وقتی فایل آماده شد جواب می‌دهم.',
@@ -5069,6 +5176,7 @@ const GROUP_HELP_I18N = {
     + '🎬 *فيديو* — اكتب:\n'
     + '      .play <الاسم> mp4   ·   .video <الاسم>\n\n'
     + '🖼 *صورة* —  !pic <الاسم>\n'
+    + '📚 *معرفة* —  !wiki <موضوع>\n'
     + '⏭ *النتيجة التالية* — اكتب  next\n'
     + '🌐 *اختيار المصدر* —  !sites  ثم  !site <الاسم>\n\n'
     + 'التحميل مجاني. طلب واحد في المرة — أجيبك عندما يصبح الملف جاهزًا.'
@@ -7280,6 +7388,19 @@ async function handleMessage(msg){
         });
         if (handled) return;
       }
+      /* ═══ v92.9.7 !wiki — straight to Wikipedia, NEVER through the AI.
+       * Same pre-brain determinism as the short commands: the lookup runs,
+       * the summary goes out, the brain never sees the message. NSFW text
+       * is refused a lookup inside wikiAnswer's gate. ═══ */
+      if (/^!wiki\s+\S/i.test(text)){
+        const topic = text.replace(/^!wiki\s+/i, '').trim().slice(0, 150);
+        await sendBuffer(chatJid, { text: await (async () => {
+          try { return (await wikiAnswer(topic, "en"))
+                  || (await t2(chatJid, 'Nothing on Wikipedia for "' + topic + '"')); }
+          catch(e){ return await t2(chatJid, 'Wikipedia is not answering right now — try again in a minute'); }
+        })() }, 3, 'slow', 'group', true);
+        return;
+      }
       /* ═══ v71.5 AI BRAIN decides FIRST — regex chain stays as the
        * fallback for when the AI pool is down. The brain sees the
        * last 6 group messages, so "that" and follow-ups make sense,
@@ -9008,7 +9129,7 @@ async function runCrapTest(section){section=section||'all';var s=document.getEle
 async function saveAccountSetup(){var r=$('cfgResult');r.innerHTML='<span style="color:#d29922">Saving…</span>';try{var data={};var ak=$('cfgApiKey').value.trim();var as=$('cfgApiSlot').value;if(ak)data[as]=ak;var res=await fetch('/admin/save-env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});var d=await res.json();r.innerHTML=d.ok?'<span style="color:#3fb950">Saved ✓ — restart server for changes to take effect.</span>':'<span style="color:#f85149">'+esc(d.error||'failed')+'</span>';}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 async function testAllScraperSites(){var r=$('siteTestResult');r.innerHTML='<span style="color:#d29922">Testing all sites…</span>';try{var res=await fetch('/admin/test-scraper-sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});var d=await res.json();var h='<b>Per-Site Test Results</b> ('+d.passed+'/'+d.total+' OK)<br>';for(var i=0;i<d.results.length;i++){var s=d.results[i];h+='<span style="color:'+(s.ok?'#3fb950':'#f85149')+'">'+(s.ok?'✅':'❌')+'</span> <b>'+esc(s.name||s.url)+'</b> ('+esc(s.type||'?')+') — '+(s.ok?s.results+' results, '+s.ms+'ms':esc(s.error||'failed'))+'<br>';}r.innerHTML=h;}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 async function loadFreeApis(){var el=$('freeApiList');if(!el)return;try{var r=await fetch('/admin/free-apis');var d=await r.json();var h='';for(var i=0;i<d.apis.length;i++){var a=d.apis[i];h+='<div style="border-top:1px solid #21262d;padding:2px 0"><span style="color:#58a6ff">'+esc(a.name)+'</span> <span style="color:#8b949e">['+esc(a.category)+']</span> <span style="color:#3fb950">'+esc(a.limit)+'</span></div>';}el.innerHTML=h||'none';}catch(e){el.innerHTML='<span style="color:#f85149">failed</span>';}}
-async function testFreeApis(){var r=$('freeApiResult');r.innerHTML='<span style="color:#d29922">Pinging all free APIs…</span>';try{var r1=await fetch('/admin/free-apis');var d=await r1.json();var h='';var ok=0;for(var i=0;i<d.apis.length;i++){var a=d.apis[i];try{var t0=Date.now();await fetch(a.url,{mode:'no-cors',signal:AbortSignal.timeout(5000)});var ms=Date.now()-t0;h+='<span style="color:#3fb950">✅</span> '+esc(a.name)+' ('+ms+'ms)<br>';ok++;}catch(e){h+='<span style="color:#f85149">❌</span> '+esc(a.name)+' — '+esc(e.message||'timeout')+'<br>';}}r.innerHTML='<b>Free API Test: '+ok+'/'+d.apis.length+' reachable</b><br>'+h;}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
+async function testFreeApis(){var r=$('freeApiResult');r.innerHTML='<span style="color:#d29922">Running REAL validated API calls from the bot… ~12s</span>';try{var r1=await fetch('/admin/free-apis/test',{method:'POST'});var d=await r1.json();var h='';for(var i=0;i<d.results.length;i++){var a=d.results[i];var icon=a.ok?'<span style="color:#3fb950">✅</span>':(a.status?'<span style="color:#d29922">⚠️</span>':'<span style="color:#f85149">❌</span>');h+=icon+' '+esc(a.name)+' — HTTP '+(a.status||'—')+' ('+a.ms+'ms)'+(a.note?' <span style="color:#8b949e">'+esc(a.note)+'</span>':'')+'<br>';}r.innerHTML='<b>Free API Test: '+d.live+'/'+d.total+' fully live (real calls, validated shapes)</b><br>'+h;}catch(e){r.innerHTML='<span style="color:#f85149">Error: '+esc(e.message)+'</span>';}}
 
 
 /* ═══ v82: Scraper Browser — per-site test with navigation ═══ */
@@ -11113,14 +11234,14 @@ app.get('/admin/free-apis', function(req,res){
     apis: [
       {name:'Open-Meteo',url:'https://api.open-meteo.com/v1/forecast',category:'weather',keyNeeded:false,limit:'10K/day'},
       {name:'MyMemory Translation',url:'https://api.mymemory.translated.net/get',category:'translation',keyNeeded:false,limit:'5K chars/day'},
-      {name:'Jina Reader',url:'https://r.jina.ai/',category:'web-to-markdown',keyNeeded:false,limit:'20 RPM'},
+      {name:'Jina Reader',url:'https://r.jina.ai/',category:'web-to-markdown',keyNeeded:true,limit:'key now required (was 20 RPM free)',note:'Jina added an API-key wall — no longer keyless'},
       {name:'iTunes Search',url:'https://itunes.apple.com/search',category:'music',keyNeeded:false,limit:'20/min'},
       {name:'CoinGecko',url:'https://api.coingecko.com/api/v3/',category:'crypto',keyNeeded:false,limit:'30/min'},
       {name:'Hacker News',url:'https://hacker-news.firebaseio.com/v0/',category:'tech-news',keyNeeded:false,limit:'unlimited'},
       {name:'Dog CEO',url:'https://dog.ceo/api/',category:'images',keyNeeded:false,limit:'unlimited'},
       {name:'Cat Facts',url:'https://catfact.ninja/',category:'fun',keyNeeded:false,limit:'unlimited'},
       {name:'GitHub API',url:'https://api.github.com/',category:'developer',keyNeeded:false,limit:'60/hr'},
-      {name:'REST Countries',url:'https://restcountries.com/v5/',category:'geo',keyNeeded:false,limit:'unlimited'},
+      {name:'REST Countries',url:'https://restcountries.com/v3.1/',category:'geo',keyNeeded:false,limit:'unlimited',note:'v3.1 deprecated by upstream — kept listed until the new v5 shape is confirmed'},
       {name:'Lorem Picsum',url:'https://picsum.photos/',category:'placeholder-images',keyNeeded:false,limit:'unlimited'},
       {name:'IP-API',url:'http://ip-api.com/json/',category:'geolocation',keyNeeded:false,limit:'45/min'},
       {name:'Agify',url:'https://api.agify.io/',category:'nlp',keyNeeded:false,limit:'1K/day'},
@@ -11132,11 +11253,59 @@ app.get('/admin/free-apis', function(req,res){
       {name:'RandomUser',url:'https://randomuser.me/api/',category:'mock-data',keyNeeded:false,limit:'unlimited'},
       {name:'Bored API',url:'https://bored-api.appbrewery.com/',category:'activities',keyNeeded:false,limit:'100/15min'},
       {name:'Rick & Morty',url:'https://rickandmortyapi.com/api/',category:'entertainment',keyNeeded:false,limit:'unlimited'},
-      {name:'JSONPlaceholder',url:'https://jsonplaceholder.typicode.com/',category:'mock-data',keyNeeded:false,limit:'unlimited'}
+      {name:'JSONPlaceholder',url:'https://jsonplaceholder.typicode.com/',category:'mock-data',keyNeeded:false,limit:'unlimited'},
+      {name:'Wikipedia',url:'https://en.wikipedia.org/w/api.php',category:'knowledge',keyNeeded:false,limit:'unlimited (fair use)',note:'feeds !wiki lookups + AI factual answers — NEVER the NSFW/media side'}
     ],
-    total: 24,
-    note: 'All verified free with NO signup or API key required. Use directly from your code.'
+    total: 23,
+    note: 'Free with NO signup or API key required (Jina Reader now wants a key — flagged). The Test button runs REAL validated API calls server-side, not just pings.'
   });
+});
+
+/* ═══ v92.9.7 FREE-API LIVE TEST — REAL calls, REAL validation ═══
+ * The old panel Test was a browser no-cors ping: a 500 error still
+ * "resolved" green. This endpoint fires each API's actual query from the
+ * BOT'S network and checks the response shape — what it reports is what
+ * a real feature would get. Runs all 23 in parallel, ~12s worst case. */
+const FREE_API_TESTS = [
+  ['Open-Meteo', 'https://api.open-meteo.com/v1/forecast?latitude=-17.8&longitude=31.05&current=temperature_2m', d => !!(d && d.current)],
+  ['MyMemory Translation', 'https://api.mymemory.translated.net/get?q=good%20morning&langpair=en|sn', d => !!(d && d.responseData && d.responseData.translatedText)],
+  ['Jina Reader', 'https://r.jina.ai/https://example.com', () => false, 'needs an API key now'],
+  ['iTunes Search', 'https://itunes.apple.com/search?term=jerusalema&limit=1', d => !!(d && typeof d.resultCount === 'number')],
+  ['CoinGecko', 'https://api.coingecko.com/api/v3/ping', d => !!(d && d.gecko_says), '429 here just means the shared audit IP was rate-limited — the bot itself stays under 30/min'],
+  ['Hacker News', 'https://hacker-news.firebaseio.com/v0/topstories.json', d => Array.isArray(d) && d.length > 5],
+  ['Dog CEO', 'https://dog.ceo/api/breeds/image/random', d => !!(d && d.message)],
+  ['Cat Facts', 'https://catfact.ninja/fact', d => !!(d && d.fact)],
+  ['GitHub API', 'https://api.github.com/zen', (d, s) => s === 200 && String(d).length > 5],
+  ['REST Countries', 'https://restcountries.com/v3.1/all?fields=name', () => false, 'v3.1 deprecated by upstream — see the note in the list'],
+  ['Lorem Picsum', 'https://picsum.photos/200', (d, s) => s === 200],
+  ['IP-API', 'http://ip-api.com/json/', d => !!(d && d.status === 'success')],
+  ['Agify', 'https://api.agify.io/?name=michael', d => !!(d && typeof d.age === 'number')],
+  ['Genderize', 'https://api.genderize.io/?name=michael', d => !!(d && d.gender)],
+  ['Nationalize', 'https://api.nationalize.io/?name=michael', d => !!(d && Array.isArray(d.country))],
+  ['Advice Slip', 'https://api.adviceslip.com/advice', d => !!(d && d.slip && d.slip.advice)],
+  ['SWAPI', 'https://swapi.dev/api/', d => !!(d && d.people)],
+  ['PokeAPI', 'https://pokeapi.co/api/v2/pokemon/pikachu', d => !!(d && d.name === 'pikachu')],
+  ['RandomUser', 'https://randomuser.me/api/', d => !!(d && d.results && d.results[0].name)],
+  ['Bored API', 'https://bored-api.appbrewery.com/random', d => !!(d && d.activity)],
+  ['Rick & Morty', 'https://rickandmortyapi.com/api/character/1', d => !!(d && d.name === 'Rick Sanchez')],
+  ['JSONPlaceholder', 'https://jsonplaceholder.typicode.com/todos/1', d => !!(d && d.id === 1)],
+  ['Wikipedia', 'https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=Harare&srlimit=1&format=json', d => !!(d && d.query && d.query.search && d.query.search.length), 'uses the browser-grade UA; some datacenter IP ranges are blocked by Wikimedia — the bot fails safe to no-context when blocked']
+];
+app.post('/admin/free-apis/test', async function(req,res){
+  const rows = await Promise.all(FREE_API_TESTS.map(async ([name, url, validate, note]) => {
+    const t0 = Date.now();
+    try {
+      const r = await axios.get(url, { timeout: 12000, headers: { 'User-Agent': WIKI_UA, 'Accept': 'application/json, text/plain, */*' }, maxRedirects: 5 });
+      let d; try { d = (typeof r.data === 'string') ? JSON.parse(r.data) : r.data; } catch(e){ d = r.data; }
+      const ok = !!(r.status >= 200 && r.status < 300 && validate(d, r.status));
+      return { name, ok, status: r.status, ms: Date.now() - t0, note: ok ? '' : (note || 'answered but unexpected response shape') };
+    } catch(e){
+      const st = e.response && e.response.status;
+      return { name, ok: false, status: st || 0, ms: Date.now() - t0, note: note || (st ? 'HTTP ' + st : String(e.message).slice(0, 60)) };
+    }
+  }));
+  const okCount = rows.filter(x => x.ok).length;
+  res.json({ ok: true, live: okCount, total: rows.length, results: rows, testedAt: new Date().toISOString() });
 });
 
 app.get('/admin/stats', function(req,res){

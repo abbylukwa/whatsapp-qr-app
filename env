@@ -34,8 +34,10 @@ MYLINKS=
 # Your scraper deployment (the bot sends MYLINKS to it automatically)
 SCRAPER=https://intelligent-scraper.onrender.com
 
-# ── AI POOL SLOTS — v92: THE ONE KEY (boss request: this key ONLY) ──
-API_1=sk-rewind-8dd05bd5d3d74e805a5199364a274f67
+# ── AI POOL SLOTS — v92.9.7: rewind REMOVED by boss order (sk-rewind keys
+# are ignored by the code). The pool runs on the two keyless free AI
+# providers. A real OpenAI/OpenRouter key can still be added as API_1.
+# API_1=
 API_2=
 API_3=
 API_4=

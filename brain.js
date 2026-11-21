@@ -191,6 +191,14 @@ function sanitizeDec(raw, mode){
  *  HARD DEADLINE across the whole failover walk.
  * ══════════════════════════════════════════════════════════════ */
 async function callProvider(p, system, prompt, timeoutMs){
+  /* v92.9.7: prefer the host's askProvider — it speaks the keyless free
+   * dialects (unlimitedai SSE / fiction) and strips upstream preambles.
+   * The inline OpenAI call stays as the fallback for bare embeddings of
+   * this module in tests. */
+  if (DEPS && typeof DEPS.askProvider === 'function'){
+    const r = await DEPS.askProvider(p, system, prompt, 220, 0.15, Math.max(3000, timeoutMs));
+    return r && r.reply;
+  }
   const r = await axios.post(p.url, {
     model: p.model,
     messages: [

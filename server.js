@@ -4920,7 +4920,7 @@ async function localizedHelpBlock(chatJid, lang){
 /* ══════════════════════════════════════════════════════════════
  *  ADMIN COMMANDS
  * ══════════════════════════════════════════════════════════════ */
-const COMMAND_LIST = `BreadBot v92.9.1 — Admin (manager — school buddy removed)
+const COMMAND_LIST = `BreadBot v92.9.2 — Admin (manager — school buddy removed)
 
 MAIN GROUP
 !setmain <invite-link>  — resolve link, set as main group
@@ -5789,6 +5789,19 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const arg = args.slice(1).join(' ').trim();
       if (!arg){ await reply('Usage: !download <url>\n       !download <query>  (in the group you want activated)'); return; }
       if (/^https?:\/\//i.test(arg)){
+        /* v92.9.2: X/Twitter status links resolve via fxtwitter — the
+         * generic /download path can never get an mp4 out of twitter */
+        if (/(twitter\.com|x\.com)\/[A-Za-z0-9_]+\/status\/\d+/i.test(arg)){
+          await reply('Fetching the X/Twitter video…');
+          const rt = await scraperVideoResolve(arg);
+          if (!rt.ok){ await reply('Err: ' + rt.error); return; }
+          await sendMediaUrl(chatJid, rt.mediaUrl, {
+            kind: 'video', mimetype: rt.mimetype || 'video/mp4', caption: '🎬 ' + (rt.title || 'X video').slice(0, 90),
+            priority: 0, lane: 'fast', taskType: 'admin', typing: false
+          });
+          await reply('Sent.');
+          break;
+        }
         await reply('Resolving via scrapper...');
         const rd = await scraperDownloadMedia(arg, 'auto');
         if (!rd.ok){ await reply('Err: '+rd.error); return; }
@@ -6807,6 +6820,31 @@ async function handleMessage(msg){
       ensureAllowedGroupJids(false).catch(function(){});   /* retry unresolved invite codes */
     }
     return;
+  }
+
+  /* ═══ v92.9.2 ADMIN SEARCH ACTIVATES A GROUP ═══
+   * The boss: "as an admin I can set the groups to interact with by
+   * sending a search in a group then the bot will be active in that
+   * group." Any admin media request (search / short command / next /
+   * !download) in a non-whitelisted group ADDS that group to the
+   * whitelist on the spot — an NSFW request additionally designates
+   * it as THE NSFW group (explicit media goes there only). Non-admin
+   * chatter in unknown groups still gets the silent treatment above. */
+  if (isGroup && isAdmin && !accessCtl.isAllowedGroup(chatJid) && text
+      && (parseShortMediaCommand(text) || detectMediaIntent(text) || isNextRequest(text))){
+    const nsfwQ = detectNsfw(text);
+    accessCtl.addGroup(chatJid);
+    if (nsfwQ){
+      accessCtl.setDesignated(chatJid);
+      accessCtl.setNsfwActivated(true);
+      videoScheduler.setQueries(NSFW_QUERIES);
+      videoScheduler.setGroup(chatJid);
+      videoScheduler.enable();
+    }
+    pushLog('success','access','group ACTIVATED via admin search: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ ? ' (NSFW designated)' : ''));
+    await reply('🔥 ACTIVATED: ' + (getGroupName(chatJid) || chatJid) + (nsfwQ
+      ? '\n🞊 NSFW media group — explicit content goes HERE only'
+      : '') + '\nMembers can search in this chat now.');
   }
 
   if (botPaused && !isAdmin) return;

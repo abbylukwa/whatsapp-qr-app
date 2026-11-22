@@ -6398,6 +6398,31 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         '\n\nUse: play <song> site:<name|#>');
       break;
     }
+    case 'sites': case 'mediasites': {
+      /* v92.9.9f: ONE grouped list — pics / gifs / videos / music, each
+       * numbered with its own pick syntax. Leaks sit inside the categories
+       * (e.g. AfroPornLeaks under videos+images). */
+      const kinds = [
+        ['🖼 PICS', 'image', 'image-sites', 'pic <name> site:<#>'],
+        ['🎞 GIFS', 'gif', 'gif-sites', 'nsfw.gif <name> site:<#>'],
+        ['🎬 VIDEOS', 'video', 'video-sites', 'nsfwvideo <name> site:<#>'],
+        ['🎵 MUSIC', 'music', 'music-sites', 'play <song> site:<#>']
+      ];
+      const out = [];
+      for (const [label, , ep, usage] of kinds){
+        try {
+          const r = await axios.get(`${SCRAPER_URL}/${ep}`, { timeout: 20000 });
+          const sites = (r.data && r.data.sites) || [];
+          if (sites.length){
+            out.push(label + ':\n' + sites.slice(0, 12).map(s => '  ' + s.pick + '. ' + s.name).join('\n') +
+              (sites.length > 12 ? '\n  … +' + (sites.length - 12) + ' more (!' + ep.replace('-sites', 'sites') + ')' : '') +
+              '\n  → ' + usage);
+          }
+        } catch (e) { out.push(label + ': scraper unreachable'); }
+      }
+      await reply('🌐 SITES BY TYPE\n\n' + out.join('\n\n') + '\n\nSave one for your chat: !site <name>');
+      break;
+    }
     case 'vidsites': {
       /* v73.1: list the configured video sites — user picks with
        * !nsfwvideo <query> site:<name or number>. */

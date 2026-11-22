@@ -484,7 +484,10 @@ loadSiteRegistry();
 const HARD_LINKS = [
 ];
 
-const FAST_LANE_MAX = 5000, SLOW_LANE_MAX = 5000;
+/* v92.9.9g FLOODPROOF: 5000-deep send lanes held hours of paced backlog
+ * on a 512MB box at flood (each job = content object + closures). 300/400
+ * still holds ~30-60 min of human-paced sends; drops are counted in stats. */
+const FAST_LANE_MAX = 300, SLOW_LANE_MAX = 400;
 
 /* ─── DM AI batch settings ───────────────────────────────────
  * v68.2: FOCUSED like a person with one phone — open ONE chat, reply,
@@ -1994,10 +1997,16 @@ const NEXT_TTL_MS = 30 * 60 * 1000;       /* "next" forgets a search after 30 mi
 const RELEVANT_BATCH_CAP = 5;             /* the boss's number */
 /* "send 5 pics of mbira" → count 5, query "mbira". A standalone number
  * token 2-99 riding with the media words is the requested batch size
- * (capped at 5). Guards: "50 cent songs" / "2 pac songs" / "99 red
- * balloons" keep their numbers (bare number >10, or artist-name guard). */
+ * (capped at 10). Guards: "50 cent songs" / "2 pac songs" / "99 red
+ * balloons" keep their numbers (bare number >10, or artist-name guard).
+ * v92.9.9g COUNT FIX — the "missing count" bug: this used to return
+ * count=1 when the query had NO number, and every caller used that as the
+ * batch size — so "pics of mbira" sent ONE pic instead of the boss's 5,
+ * and "10 pics of x" was silently capped to 5. Now: 0 = "no explicit
+ * count" (callers fall back to RELEVANT_BATCH_CAP = 5), explicit numbers
+ * are honoured up to 10 — '10 pics of x' sends 10, as promised in 9e. */
 function extractCountFromQuery(q){
-  let count = 1;
+  let count = 0;
   const MEDIA_RE = /^(pics?|pictures?|images?|photos?|gifs?|videos?|songs?|tracks?|mapics?|mifananidzo|items?|more)\b/i;
   const toks = String(q || '').trim().split(/\s+/).filter(Boolean);
   for (let i = 0; i < toks.length; i++){
@@ -2008,12 +2017,12 @@ function extractCountFromQuery(q){
     const next = toks[i + 1] || '';
     if (MEDIA_RE.test(next)){
       /* "5 songs by X" / "12 pics of cats" — number + media noun = count */
-      count = Math.min(n, RELEVANT_BATCH_CAP);
+      count = Math.min(n, 10);
       toks.splice(i, 2);
     } else {
       if (n > 10) break;                            /* "99 red balloons" */
       if (/^(cent|pac|pack)$/i.test(next)) break;   /* "50 cent", "2 pac" */
-      count = Math.min(n, RELEVANT_BATCH_CAP);
+      count = Math.min(n, 10);
       toks.splice(i, 1);
     }
     break;                                          /* one count per query */
@@ -2044,10 +2053,11 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
   const st = lastSearchByChat.get(chatJid);
   if (!st || !st.results.length) return 0;
   /* v92.9.9e: explicit asks are honoured — "10 pics of x" sends 10.
-   * Default stays the boss's 5; explicit counts raise the cap to 10. */
+   * v92.9.9g: 0/absent = the boss's default 5 (extractCountFromQuery
+   * returns 0 when no number was said — the old `count || 1` sent ONE). */
   const explicit = Math.min(10, Math.max(0, parseInt(opts.explicitCount || 0, 10)));
   const cap = Math.max(RELEVANT_BATCH_CAP, explicit);
-  const n = Math.max(1, Math.min(count || 1, cap));
+  const n = Math.max(1, Math.min(count || RELEVANT_BATCH_CAP, cap));
   let sent = 0;
   for (let i = 0; i < n; i++){
     if (st.idx >= st.results.length) break;
@@ -5788,6 +5798,15 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       L.push('— GATES —');
       L.push('NSFW: ' + describeNsfw() + ' | DM AI: ' + describeDm());
       L.push('Paused: ' + (botPaused ? 'YES' : 'no') + ' | Flood gate: ' + MESSAGE_FLOOD_THRESHOLD + '/s');
+      /* v92.9.9g FLOODPROOF visibility — gate buckets, queue room, memory */
+      try {
+        const gs = gateStats(); const qs = mediaQueue.stats();
+        L.push('Floodproof: ' + gs.cmdsPerSec + ' cmds/s | media tokens ' + gs.media.tokens + '/' + gs.media.cap + (gs.media.open ? '' : ' GATE CLOSED')
+          + ' | text tokens ' + gs.text.tokens + '/' + gs.text.cap
+          + ' | queue ' + qs.pending + '/' + qs.maxPending + ' (active ' + qs.active + ', refused ' + qs.refused + ', ttl-expired ' + qs.ttlExpired + ')'
+          + ' | handlers ' + handlerInflight.size + '/' + HANDLER_CONCURRENCY
+          + ' | mem guard ' + (gs.mem.critical ? 'CRITICAL' : gs.mem.high ? 'HIGH' : 'ok') + ' @' + gs.mem.guardMB + 'MB');
+      } catch(e){}
       L.push('Human mode: ' + (HUMAN_READ ? 'reads ' + (READ_DELAY_MIN_MS/1000) + '-' + (READ_DELAY_MAX_MS/1000) + 's delay · night hold ' + Math.round(READ_NIGHT_HOLD_PCT*100) + '% after ' + READ_NIGHT_START_HOUR + ':00' : 'reads instant') + ' · AI quiet ' + (AI_QUIET_HOURS ? AI_QUIET_START_HOUR + ':00-' + AI_QUIET_END_HOUR + ':00' : 'off'));
       L.push('DM pool: ' + dmPool.size + ' · join queue: ' + joinQueue.length + ' · recipients today: ' + Object.keys(policyState.dailyRecipients).length);
       await reply(L.join('\n'));
@@ -6067,7 +6086,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
       /* v91: the boss's number — top 5 MOST RELEVANT (was top 3), and
        * "nextpic" walks the rest. "!pic 5 mbira" sets the batch size. */
-      const topN = r.images.slice(0, cnt.count === 1 ? 5 : cnt.count);
+      const topN = r.images.slice(0, cnt.count || 5);
       await sendImageSafe(chatJid, topN[0], 'Result 1/' + topN.length + ' — “' + q + '”', 0, 'fast', 'admin', false);
       for (let i = 1; i < topN.length; i++){
         setTimeout(function(j, n){ sendImageSafe(chatJid, topN[j], 'Result ' + (n) + '/' + topN.length, 1, 'fast', 'admin', false); }, i * 1500, i, i + 1);
@@ -6864,6 +6883,12 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
  *  FLOOD
  * ══════════════════════════════════════════════════════════════ */
 let msgCountInWindow=0, windowStart=Date.now(), floodIgnoreUntil=0;
+/* v92.9.9g FLOODPROOF intake — bounded handler pool (see messages.upsert).
+ * Before: one `await handleMessage` at a time, so a single 40-150s media
+ * hunt FROZE the intake loop — at 12 cmds/s Baileys buffered ~1800 events
+ * and the box OOMed. Now slow hunts park in parallel, fast gates fly. */
+const HANDLER_CONCURRENCY = Math.max(4, parseInt(process.env.HANDLER_CONCURRENCY || '16', 10));
+const handlerInflight = new Set();
 /* v67: GRACEFUL flood gate. v66 hard-ignored EVERYTHING for 5s once the
  * rate crossed the threshold — and because the window re-armed every
  * second, a sustained 500 msg/s feed latched the bot silent forever
@@ -7697,7 +7722,12 @@ async function handleMessage(msg){
          * text (and an admin-"ignore" could still become a group media
          * send). Admin media requests are handled by the deterministic
          * chain below (admins bypass the NSFW window anyway). */
-        try {
+        /* v92.9.9g: at flood ("12 cmds/s") the LLM calls are the second
+         * memory spike — the brain goes quiet, commands and media keep
+         * working. Recovers on its own as the rate drops under 6/s. */
+        if (aiShedded() && !gateState.memCritical){
+          pushLog('info','brain','AI shed — flood mode (' + Math.round(cmdsPerSec()*10)/10 + ' cmds/s), brain quiet, commands still served');
+        } else try {
           const dec = await brain.aiDecide(gText, {
             mode:'group', senderName:pushName, isAdmin,
             groupName: getGroupName(chatJid) || 'main',
@@ -7716,6 +7746,18 @@ async function handleMessage(msg){
       if (isNsfw && !isAdmin && !nsfwOpen){ await sendBuffer(chatJid, { text: await t2(chatJid,'Not right now, try after 9pm') }, 3, 'slow', 'group', true); return; }
       const gIntent = detectMediaIntent(gText);
       if (gIntent && !isVague(gIntent.query)){
+        /* v92.9.9g FLOODPROOF — group media asks pass the same gate as DMs:
+         * token bucket + memory guard. Refusal is an instant honest note
+         * (1 per 20s per chat), NOT a queued job that eats 512MB. */
+        if (!isAdmin){
+          const gGate = gateAllow('media', chatJid, false);
+          const gateClosed = !gateMediaOpen();
+          if (!gGate.ok || gateClosed){
+            const note = gateBusyNote(chatJid, 'media', gateClosed ? 0 : gGate.waitS);
+            if (note) await sendBuffer(chatJid, { text: note }, 3, 'fast', 'group', false);
+            return;
+          }
+        }
         if (gIntent.type === 'music'){
           try {
             /* v90: through the queue — two members asking the same song
@@ -8113,8 +8155,25 @@ async function connectBot(){
     sock.ev.on('group-participants.update', async (u)=>{ try { await handleParticipants(u); } catch(e){ pushLog('error','group',e.message); } });
     sock.ev.on('messages.upsert', async function(data){
       const messages = data.messages || [];
+      /* v92.9.9g FLOODPROOF intake — handlers run in a BOUNDED pool, never
+       * one-at-a-time. A media hunt parks its handler for 40-150s; with 16
+       * slots the intake keeps draining chats/gates at 12 cmds/s while the
+       * hunts run in parallel. Slots full → non-admin messages are shed
+       * (counted); the admin's messages always get a slot. */
       for (const msg of messages){
-        try { await handleMessage(msg); } catch(e){ pushLog('error','handler',e.message); }
+        if (handlerInflight.size >= HANDLER_CONCURRENCY){
+          const chatJidEarly = msg.key?.remoteJid;
+          const sEarly = chatJidEarly?.endsWith('@g.us') ? (msg.key.participant || chatJidEarly) : chatJidEarly;
+          if (!isAdminSender(msg, sEarly)){
+            resetDailyStats(); dailyStats.messagesDropped++;
+            pushLog('warn','intake', handlerInflight.size + '/' + HANDLER_CONCURRENCY + ' handler slots busy — shedding non-admin message (flood guard)');
+            continue;
+          }
+          await Promise.race(handlerInflight);
+        }
+        const hp = handleMessage(msg).catch(e => pushLog('error','handler',e.message));
+        handlerInflight.add(hp);
+        hp.finally(() => handlerInflight.delete(hp));
       }
     });
   } catch(err){
@@ -8297,6 +8356,125 @@ mediaQueue.run = function(chatJid, kind, query, fn){
   return _mqRun(chatJid, kind, query, fn);
 };
 mediaQueue.init(pushLog);
+
+/* ══════════════════════════════════════════════════════════════
+ *  v92.9.9g FLOODPROOF — the 12-commands-per-second contract
+ *  The boss: "handle 12 commands per second so that it won't crash."
+ *  On a 512MB free-tier box a media command costs a 40-150s scraper hunt
+ *  and the service rate is ~1.5 jobs/min — naively accepting 720 media
+ *  cmds/min means an infinite queue, an OOM, and a dead socket. This
+ *  gate turns that flood into a busy signal BEFORE any memory is spent:
+ *
+ *   · token buckets        — 'media' (cap 10, refill 1/4s) admits ~15/min
+ *                            (what the queue can actually serve); 'text'
+ *                            (cap 24, refill 3/s) absorbs chat bursts
+ *   · dup-flood shield     — same chat + same text within 12s = one job,
+ *                            the repeat gets silence (bounded map)
+ *   · busy-reply throttle  — max 1 busy note per chat per 20s (never
+ *                            flood back the very people flooding in)
+ *   · memory watchdog      — RSS ≥ 400MB closes the media gate; ≥ 445MB
+ *                            also sheds conversational AI (the brain's
+ *                            LLM calls are the second memory spike);
+ *                            hysteresis reopens at 370/410MB
+ *   · intake decoupling    — messages.upsert no longer awaits a 150s
+ *                            hunt inline (see HANDLER_CONCURRENCY below)
+ *  Admin messages bypass every bucket — the boss is never throttled.
+ * ══════════════════════════════════════════════════════════════ */
+const GATE_MEDIA = {
+  cap: Math.max(2, parseInt(process.env.GATE_MEDIA_BURST || '10', 10)),
+  refillMs: Math.max(500, parseInt(process.env.GATE_MEDIA_REFILL_MS || '4000', 10))
+};
+const GATE_TEXT = {
+  cap: Math.max(6, parseInt(process.env.GATE_TEXT_BURST || '24', 10)),
+  refillMs: Math.max(100, parseInt(process.env.GATE_TEXT_REFILL_MS || '333', 10))
+};
+const MEM_GUARD_MB    = Math.max(300, parseInt(process.env.MEM_GUARD_MB || '400', 10));
+const MEM_CRITICAL_MB = Math.max(MEM_GUARD_MB, parseInt(process.env.MEM_CRITICAL_MB || '445', 10));
+const gateState = {
+  mediaTokens: GATE_MEDIA.cap, mediaLast: Date.now(),
+  textTokens: GATE_TEXT.cap, textLast: Date.now(),
+  recentCmds: [],                       /* timestamps — cmds/sec rolling window */
+  busyReplied: new Map(),               /* chatJid -> last busy note ts */
+  dupShield: new Map(),                 /* chat|text -> last ts (bounded) */
+  memHigh: false, memCritical: false
+};
+function gateRefill(bucket, cap, refillMs, now){
+  if (bucket.tokens >= cap) return;
+  const gained = Math.floor((now - bucket.last) / refillMs);
+  if (gained > 0){ bucket.tokens = Math.min(cap, bucket.tokens + gained); bucket.last = now; }
+}
+function gateAllow(kind, chatJid, isAdmin){
+  const now = Date.now();
+  /* rolling cmds/sec window for status + AI shedding (bounded) */
+  gateState.recentCmds.push(now);
+  if (gateState.recentCmds.length > 600) gateState.recentCmds.splice(0, gateState.recentCmds.length - 600);
+  if (isAdmin) return { ok: true, admin: true };
+  const bucket = kind === 'media' ? { tokens: gateState.mediaTokens, last: gateState.mediaLast } : { tokens: gateState.textTokens, last: gateState.textLast };
+  const cap = kind === 'media' ? GATE_MEDIA.cap : GATE_TEXT.cap;
+  const refillMs = kind === 'media' ? GATE_MEDIA.refillMs : GATE_TEXT.refillMs;
+  gateRefill(bucket, cap, refillMs, now);
+  if (bucket.tokens < 1){
+    const ahead = Math.ceil((refillMs - (now - bucket.last)) / 1000);
+    return { ok: false, reason: 'gate-' + kind, waitS: ahead };
+  }
+  bucket.tokens--;
+  if (kind === 'media'){ gateState.mediaTokens = bucket.tokens; gateState.mediaLast = bucket.last; }
+  else { gateState.textTokens = bucket.tokens; gateState.textLast = bucket.last; }
+  return { ok: true };
+}
+function cmdsPerSec(){
+  const cutoff = Date.now() - 10000;
+  while (gateState.recentCmds.length && gateState.recentCmds[0] < cutoff) gateState.recentCmds.shift();
+  return gateState.recentCmds.length / 10;
+}
+function aiShedded(){ return cmdsPerSec() > 6; }        /* 12/s flood → brain goes quiet, commands/media keep working */
+/* memory watchdog: 15s tick, transitions logged once */
+function memGuardTick(){
+  const rssMB = Math.round(process.memoryUsage().rss / 1048576);
+  if (rssMB >= MEM_CRITICAL_MB && !gateState.memCritical){
+    gateState.memCritical = true; gateState.memHigh = true;
+    pushLog('error', 'memguard', rssMB + 'MB ≥ ' + MEM_CRITICAL_MB + 'MB — media gate CLOSED, conversational AI shed, caches cleared');
+    try { lastSearchByChat.clear(); } catch(e){}
+  } else if (rssMB >= MEM_GUARD_MB && !gateState.memHigh){
+    gateState.memHigh = true;
+    pushLog('warn', 'memguard', rssMB + 'MB ≥ ' + MEM_GUARD_MB + 'MB — media gate CLOSED until back under 370MB');
+  } else if (rssMB < MEM_GUARD_MB - 30 && gateState.memHigh && rssMB < MEM_CRITICAL_MB - 35){
+    gateState.memHigh = false; gateState.memCritical = false;
+    pushLog('success', 'memguard', rssMB + 'MB — memory recovered, media gate reopened');
+  }
+}
+setInterval(memGuardTick, 15000);
+function gateMediaOpen(){ return !gateState.memHigh; }
+function gateBusyNote(chatJid, kind, waitS){
+  const last = gateState.busyReplied.get(chatJid) || 0;
+  const now = Date.now();
+  if (now - last < 20000) return null;                 /* throttle: 1 note / 20s / chat */
+  gateState.busyReplied.set(chatJid, now);
+  if (gateState.busyReplied.size > 500) gateState.busyReplied.delete(gateState.busyReplied.keys().next().value);
+  const kindTxt = kind === 'media'
+    ? 'Media queue is full (serves ~1-2/min on the free tier)'
+    : 'Too many commands right now (' + Math.round(cmdsPerSec() * 10) / 10 + '/s)';
+  return '⏳ ' + kindTxt + ' — try again' + (waitS ? ' in ~' + waitS + 's' : ' in a minute') + '.';
+}
+/* dup-flood shield: identical chat+text inside 12s = already handled */
+function dupRecent(chatJid, text){
+  const key = chatJid + '|' + String(text || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120);
+  const now = Date.now();
+  const last = gateState.dupShield.get(key) || 0;
+  gateState.dupShield.set(key, now);
+  if (gateState.dupShield.size > 500){
+    for (const [k, t] of gateState.dupShield){ if (now - t > 60000) gateState.dupShield.delete(k); }
+    if (gateState.dupShield.size > 500) gateState.dupShield.delete(gateState.dupShield.keys().next().value);
+  }
+  return (now - last) < 12000 && last !== 0;
+}
+function gateStats(){
+  return { cmdsPerSec: Math.round(cmdsPerSec() * 10) / 10,
+    media: { tokens: gateState.mediaTokens, cap: GATE_MEDIA.cap, open: gateMediaOpen() },
+    text: { tokens: gateState.textTokens, cap: GATE_TEXT.cap },
+    mem: { high: gateState.memHigh, critical: gateState.memCritical, guardMB: MEM_GUARD_MB },
+    busyNotes: gateState.busyReplied.size, dupShield: gateState.dupShield.size };
+}
 
 /* ══════════════════════════════════════════════════════════════
  *  v86 AUTO-TRANSLATE — the bot speaks EVERY language
@@ -8592,6 +8770,28 @@ async function resolveGroupLang(chatJid, text){
  *  gets silence, exactly as the boss asked.
  * ══════════════════════════════════════════════════════════════ */
 async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, isAdmin = false){
+  /* v92.9.9g FLOODPROOF — admission control BEFORE any work: media asks
+   * cost a 40-150s hunt each, so they draw from the media bucket (refill
+   * 1/4s ≈ what the queue serves); other text from the text bucket. The
+   * admin never waits. Identical text inside 12s = first one is already
+   * working on it (dup shield). Rejected asks get ONE busy note per 20s
+   * per chat — never a reply storm back into the flood. */
+  const dmIsMedia = !!(parseShortMediaCommand(text) || detectMediaIntent(text) || isNextRequest(text));
+  const dGate = gateAllow(dmIsMedia ? 'media' : 'text', chatJid, isAdmin);
+  if (!dGate.ok){
+    const note = gateBusyNote(chatJid, dmIsMedia ? 'media' : 'text', dGate.waitS);
+    if (note) await sendBuffer(chatJid, { text: note }, 2, 'fast', 'dmreply', false);
+    return;
+  }
+  if (!isAdmin && dmIsMedia && !gateMediaOpen()){
+    const note = gateBusyNote(chatJid, 'media');
+    if (note) await sendBuffer(chatJid, { text: note }, 2, 'fast', 'dmreply', false);
+    return;
+  }
+  if (!isAdmin && dmIsMedia && dupRecent(chatJid, text)){
+    pushLog('info','flood','dup shield — same ask inside 12s, first one is working on it (' + (getGroupName(chatJid) || chatJid) + ')');
+    return;
+  }
   if (await serveUniversalCommand(chatJid, senderJid, text, false, 'dm')) return;
   /* v91: "next / more" continues this chat's last search (before intent
    * detection — "next" alone is not a media intent) */

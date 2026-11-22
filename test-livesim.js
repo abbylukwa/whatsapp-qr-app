@@ -159,7 +159,7 @@ function startMockScraper(){
 
 /* ── config sandbox: swap the real lists for the sim's, restore after ── */
 const CONFIG_FILES = [
-  'config/allowed-numbers.txt', 'config/blocked-numbers.txt', 'config/ai-numbers.txt',
+  'config/allowed-numbers.txt', 'config/blocked-numbers.txt',
   'config/allowed-groups.txt', 'config/blocked-groups.txt',
   'data/access-state.json', 'data/dm_histories.json', 'data/pending.json',
   'data/media-stats.json', 'data/group_registry.json', 'data/joined_groups.json',
@@ -179,7 +179,6 @@ function writeConfigs(){
     '+263777123456', '+263777654321', '+263777888888', ''
   ].join('\n'));
   w('config/blocked-numbers.txt', '# sim\n+263777999999\n');
-  w('config/ai-numbers.txt', '# sim\n+93772553417\n+93765002356\n');
   w('config/allowed-groups.txt', '# sim\n' + GRP_MAIN + '\n');
   w('config/blocked-groups.txt', '# sim\nKCC Youth Fellowship\nKCC Bubble Study\n' + GRP_BLOCK + '\n');
   fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
@@ -301,7 +300,7 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
 
 (async function main(){
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║  BREADBOT v92.9.12 REAL-LIFE SIMULATION                  ║');
+  console.log('║  BREADBOT v92.9.13 REAL-LIFE SIMULATION                  ║');
   console.log('║  site picker · wrong-recipient guards · blocked silence  ║');
   console.log('╚══════════════════════════════════════════════════════════╝');
 

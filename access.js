@@ -37,11 +37,8 @@ const STATE_FILE   = path.join(__dirname, 'data', 'access-state.json');
  *     receipt, no media, no broadcast, no pending resolve — checked in
  *     handleMessage BEFORE the message is even opened, and AGAIN inside
  *     sendBuffer so no scheduler/broadcast/admin path can bypass.
- *   · config/ai-numbers.txt — whitelisted numbers that ALSO get AI
- *     replies in DM (allowed-numbers.txt is still required for commands).
- *     Listed numbers otherwise get COMMANDS-ONLY service. */
+ *     (v92.9.13: the ai-numbers.txt AI-DM role is REMOVED — no AI in DMs.) */
 const BLOCKED_NUMBERS_FILE = path.join(__dirname, 'config', 'blocked-numbers.txt');
-const AI_NUMBERS_FILE      = path.join(__dirname, 'config', 'ai-numbers.txt');
 
 /* ═══ v92.9.6 HARD GROUP BLACKLIST ═══
  * The boss: the bot "is sending messages to the wrong … groups — in the
@@ -86,16 +83,6 @@ const BLOCKED_NUMBERS_HEADER = [
   ''
 ].join('\n');
 
-/* v92.9.11 AI-ENABLED DM NUMBERS header */
-const AI_NUMBERS_HEADER = [
-  '# ═══ AI-REPLY NUMBERS (v92.9.11) ═══',
-  '# Numbers here get AI replies in DM (persona chat with memory), ON TOP',
-  '# of the command service every whitelisted number already has.',
-  '# The number must ALSO be in config/allowed-numbers.txt — commands',
-  '# always win over chat: media intents, .play, next, !commands are',
-  '# served first; only plain conversation reaches the AI.',
-  ''
-].join('\n');
 
 const GROUPS_HEADER = [
   '# ═══ ALLOWED GROUPS (v87) ═══',
@@ -201,9 +188,8 @@ function isAllowedNumber(phoneOrJid, adminPhone){
   return allowedNumbers.includes(p);
 }
 
-/* ── v92.9.11 BLOCKED NUMBERS + AI-REPLY NUMBERS ───────────────────── */
+/* ── v92.9.11 BLOCKED NUMBERS ──────────────────────────────────────── */
 let blockedNumbers = [];                                 /* normalized digits */
-let aiNumbers      = [];                                 /* normalized digits */
 function loadBlockedNumbers(adminPhone){
   const adm = normalizePhone(adminPhone);
   const raw = readLines(BLOCKED_NUMBERS_FILE);
@@ -216,19 +202,10 @@ function loadBlockedNumbers(adminPhone){
   }
   return blockedNumbers;
 }
-function loadAiNumbers(){
-  aiNumbers = [...new Set(readLines(AI_NUMBERS_FILE).map(normalizePhone).filter(Boolean))];
-  return aiNumbers;
-}
 function isBlockedNumber(phoneOrJid){
   const p = normalizePhone(phoneOrJid);
   if (!p) return false;
   return blockedNumbers.includes(p);
-}
-function isAiNumber(phoneOrJid){
-  const p = normalizePhone(phoneOrJid);
-  if (!p) return false;
-  return aiNumbers.includes(p);
 }
 function addBlockedNumber(input, adminPhone){
   const p = normalizePhone(input);
@@ -255,28 +232,7 @@ function removeBlockedNumber(input, adminPhone){
   loadBlockedNumbers(adminPhone);
   return { ok: true, removed: p, count: blockedNumbers.length };
 }
-function addAiNumber(input){
-  const p = normalizePhone(input);
-  if (!p) return { ok: false, error: 'not a phone number: ' + input };
-  const raw = readLines(AI_NUMBERS_FILE);
-  if (raw.map(normalizePhone).filter(Boolean).includes(p)) return { ok: true, added: false, number: p, count: aiNumbers.length };
-  if (!raw.length) writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, ['+' + p]);
-  else writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, [...raw, '+' + p]);
-  loadAiNumbers();
-  return { ok: true, added: true, number: p, count: aiNumbers.length };
-}
-function removeAiNumber(input){
-  const p = normalizePhone(input);
-  if (!p) return { ok: false, error: 'not a phone number: ' + input };
-  const raw = readLines(AI_NUMBERS_FILE);
-  const left = raw.filter(l => normalizePhone(l) !== p);
-  if (left.length === raw.length) return { ok: false, error: 'not in the list: +' + p };
-  writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, left);
-  loadAiNumbers();
-  return { ok: true, removed: p, count: aiNumbers.length };
-}
 function blockedNumberList(){ return blockedNumbers.slice(); }
-function aiNumberList(){ return aiNumbers.slice(); }
 
 /* ── groups ─────────────────────────────────────────────────────────── */
 let allowedGroupCodes = [];                              /* invite codes      */
@@ -502,19 +458,16 @@ function init(adminPhone){
   if (!fs.existsSync(BLOCKED_FILE)){
     writeLines(BLOCKED_FILE, BLOCKED_HEADER, PERMANENT_BLOCKED_LINES);
   }
-  /* v92.9.11: fresh blacklist/AI files with headers on first boot */
+  /* v92.9.11: fresh blacklist file with header on first boot
+   * v92.9.13: the ai-numbers.txt file is no longer created — role removed */
   if (!fs.existsSync(BLOCKED_NUMBERS_FILE)){
     writeLines(BLOCKED_NUMBERS_FILE, BLOCKED_NUMBERS_HEADER, []);
-  }
-  if (!fs.existsSync(AI_NUMBERS_FILE)){
-    writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, []);
   }
   loadNumbers(adminPhone);
   loadGroups();
   loadBlockedNumbers(adminPhone);
-  loadAiNumbers();
   return { numbers: allowedNumbers.length, groups: allowedGroupCodes.length + allowedGroupJids.length, blocked: blockedLines.length,
-           blockedNumbers: blockedNumbers.length, aiNumbers: aiNumbers.length };
+           blockedNumbers: blockedNumbers.length };
 }
 
 module.exports = {
@@ -525,9 +478,9 @@ module.exports = {
   allowedGroupCodes: () => allowedGroupCodes, allowedGroupJids: () => allowedGroupJids,
   /* v92.9.6 blacklist + request-activation */
   isBlockedChat, nameIsBlocked, addBlocked, removeBlocked, blockedEntries, BLOCKED_FILE,
-  /* v92.9.11 number blacklist + AI-reply numbers */
+  /* v92.9.11 number blacklist (v92.9.13: AI-reply numbers removed) */
   loadBlockedNumbers, isBlockedNumber, addBlockedNumber, removeBlockedNumber, blockedNumberList, BLOCKED_NUMBERS_FILE,
-  loadAiNumbers, isAiNumber, addAiNumber, removeAiNumber, aiNumberList, AI_NUMBERS_FILE,
+
   activateGroup, deactivateGroup, isGroupActive, activeGroupList,
   setDesignated, getDesignated, isDesignated, setNsfwActivated, isNsfwActivated,
   setGroupFeatures, getGroupFeatures, groupFeature,

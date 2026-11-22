@@ -205,21 +205,19 @@ async function main() {
   });
 
   /* ── 9a. v92.9.11: blocked numbers + AI numbers + group blacklist ── */
-  await test('access: blocked numbers never match admin, AI numbers resolve', () => {
+  await test('access: blocked numbers never match admin (v92.9.13: AI-DM role removed)', () => {
     const acc = require('./access');
     const ADMIN = '263777627210';
     /* read-only exercise of the real lists — nothing is written */
     assert(typeof acc.isBlockedNumber === 'function', 'isBlockedNumber missing');
-    assert(typeof acc.isAiNumber === 'function', 'isAiNumber missing');
     /* the admin number can never be blacklisted */
     const res = acc.addBlockedNumber('+' + ADMIN, ADMIN);
     assert(res.ok === false && /never be blocked/.test(res.error || ''), 'admin block must be refused');
     /* the real lists ship sane defaults */
     assert(acc.isBlockedNumber('+9990000000') === false, 'phantom number reported blocked');
-    /* AI list ships with the boss-approved number (committed config) */
-    acc.loadAiNumbers();
-    assert(acc.isAiNumber('+93772553417') === true, 'Afghan AI number missing from ai-numbers.txt');
-    assert(acc.isAiNumber('+263777000001') === false, 'phantom number reported AI-enabled');
+    /* v92.9.13: the AI-DM role is REMOVED — the AI list must not exist */
+    assert(typeof acc.isAiNumber === 'undefined', 'isAiNumber should be gone (role removed)');
+    assert(!fs.existsSync(path.join(__dirname, 'config', 'ai-numbers.txt')), 'ai-numbers.txt should be deleted');
   });
   await test('access: name blacklist matches KCC in any wording', () => {
     const acc = require('./access');

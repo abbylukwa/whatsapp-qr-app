@@ -2257,37 +2257,14 @@ async function runPickedHunt(chatJid, pick){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  v92.9.12 DEPLOY DROP — the boss: "on deploy send 20 videos to each
- *  and 10 images to each, one job at a time, all sites mostly from
- *  their country and few from Africa; if a video fails, replace it;
- *  ONLY those numbers — 2 numbers."
- *
- *  · Targets are HARDCODED to exactly the two Afghan numbers — nothing
- *    and nobody else receives this drop.
- *  · Strictly ONE file in flight at a time (download → send → next),
- *    with human pacing — the 512MB box and WhatsApp both stay calm.
- *  · Sites: mostly the targets' own country slots (Persian), plus a few
- *    African slots — rotation mixes ~4:1.
- *  · A failed video is REPLACED by the next ranked candidate until the
- *    quota is filled (bounded attempt caps keep the loop honest).
- *  · Runs ONCE per bot version (marker file survives reboots), never in
- *    LOADTEST sims, and DEPLOY_DROP=off kills it completely.
- * ══════════════════════════════════════════════════════════════ */
-const DROP_VERSION   = '92.9.12b';   /* b: deploydrop bypasses the cold-outreach policy gate + policy-wall early abort — run 1 was policy-walled to 0 deliveries */
-const DROP_FILE      = path.join(__dirname, 'data', 'deploy-drop.json');
-const DROP_TARGETS   = ['93772553417@s.whatsapp.net', '93765002356@s.whatsapp.net'];   /* ONLY these two */
-const DROP_VIDEOS    = 20;
-const DROP_IMAGES    = 10;
-const DROP_VIDEO_CAP = 60;    /* total replace attempts across all sites */
-const DROP_IMAGE_CAP = 40;
-const DROP_PAUSE_MS  = [7000, 13000];   /* human pace between sends */
-const DROP_TRY_PAUSE = [2500, 5000];    /* faster when replacing a failure */
-
-/* v92.9.12b — the boss: "after sending make sure to send the help message
- * in Persian for those numbers to later on know how to download".
- * Picker examples use ASCII digits on purpose — the menu parser only
- * accepts "2" / "2 5" (ASCII \d). */
-const DROP_HELP_FA = [
+ *  v92.9.13: DEPLOY DROP REMOVED — the boss ordered the whole campaign
+ *  ("20 videos + 10 images to each number, alternating") deleted. What
+ *  survives is the Persian download-help card, kept as a normal reply:
+ *  a whitelisted chat asking help/کمک/راهنما gets HELP_FA (Persian card
+ *  for Persian askers — see serveDmCommand).
+ *  Picker examples use ASCII digits on purpose — the menu parser only
+ *  accepts "2" / "2 5" (ASCII \d). */
+const HELP_FA = [
   '🤖 *سلام! این فایل‌ها برای تو فرستاده شد — دانلود رایگان است*',
   '',
   '🎬 *ویدیو* — بنویس:  ویدیو <نام> بفرست',
@@ -2307,134 +2284,6 @@ const DROP_HELP_FA = [
   '💬 *گپ:* فقط فارسی بنویس، جواب می‌دهم.',
   'هر بار یک درخواست — وقتی فایل آماده شد برایت می‌فرستم.'
 ].join('\n');
-async function dropAdminNote(text){
-  try { await sendBuffer(ADMIN_JID, { text }, 2, 'fast', 'deploydrop', false, { force: true }); }
-  catch(e){ pushLog('warn', 'drop', 'admin note failed: ' + e.message); }
-}
-let deployDropRunning = false;
-function dropSleep(range){
-  return new Promise(r => setTimeout(r, range[0] + Math.random() * (range[1] - range[0])));
-}
-function dropMarkerRead(){
-  try { return JSON.parse(fs.readFileSync(DROP_FILE, 'utf8')); } catch(e){ return null; }
-}
-function dropMarkerWrite(){
-  try {
-    fs.mkdirSync(path.dirname(DROP_FILE), { recursive: true });
-    fs.writeFileSync(DROP_FILE, JSON.stringify({ version: DROP_VERSION, doneAt: new Date().toISOString(),
-      targets: DROP_TARGETS, videos: DROP_VIDEOS, images: DROP_IMAGES }, null, 1));
-  } catch(e){}
-}
-function dropSitePool(kind){
-  /* mostly their country (persian), few African — healthy sites only */
-  const home = siteHealth.healthyLinks(kind, true, null, 'persian').slice(0, 5);
-  const africa = siteHealth.healthyLinks(kind, true, null, 'africa').slice(0, 2);
-  const pool = [];
-  /* 4:1 mix — home, home, africa, home, home, africa … */
-  const maxLen = Math.max(home.length, africa.length);
-  for (let i = 0; i < maxLen; i++){
-    if (home[i]) pool.push(home[i]);
-    if (home[i + 1]) pool.push(home[i + 1]);
-    if (africa[i]) pool.push(africa[i]);
-  }
-  return [...new Set(pool)];
-}
-async function runDeployDrop(){
-  if (LOADTEST){ pushLog('info', 'drop', 'LOADTEST — deploy drop skipped'); return; }
-  if (process.env.DEPLOY_DROP === 'off'){ pushLog('info', 'drop', 'DEPLOY_DROP=off — skipped'); return; }
-  if (deployDropRunning) return;
-  const marker = dropMarkerRead();
-  if (marker && marker.version === DROP_VERSION){ pushLog('info', 'drop', 'deploy drop v' + DROP_VERSION + ' already delivered — skipped'); return; }
-  deployDropRunning = true;
-  const queriesV = ['persian', 'iranian', 'afghan', 'arab'];
-  const queriesI = ['persian', 'iranian', 'afghan', 'arab'];
-  try {
-    pushLog('info', 'drop', 'DEPLOY DROP v' + DROP_VERSION + ' starting — 20 videos + 10 images → 2 numbers, one job at a time');
-    await dropAdminNote('📦 DEPLOY DROP v' + DROP_VERSION + ' starting — 20 videos + 10 images to ' + DROP_TARGETS.length + ' numbers, one file at a time. Progress reports come here; each number gets a Persian help card after its delivery.');
-    for (let ti = 0; ti < DROP_TARGETS.length; ti++){
-      const target = DROP_TARGETS[ti];
-      const targetPhone = target.split('@')[0];
-      await dropAdminNote('→ target ' + (ti + 1) + '/' + DROP_TARGETS.length + ': +' + targetPhone);
-      markMediaRequest(target);                    /* the drop IS a request — binding guard passes */
-      const vSites = dropSitePool('videos');
-      const iSites = dropSitePool('images');
-      /* ── 20 videos, one at a time, failures replaced ── */
-      let videos = 0, vTries = 0, vPolicyStreak = 0;
-      outerV:
-      for (let round = 0; round < 6 && videos < DROP_VIDEOS; round++){
-        for (const site of vSites){
-          if (videos >= DROP_VIDEOS || vTries >= DROP_VIDEO_CAP) break outerV;
-          const q = queriesV[(round + vSites.indexOf(site)) % queriesV.length];
-          const ranked = await scraperVideoRanked(q, { site, boostCat: 'persian' }).catch(() => []);
-          for (const cand of ranked){
-            if (videos >= DROP_VIDEOS || vTries >= DROP_VIDEO_CAP) break outerV;
-            vTries++;
-            try {
-              const r = await scraperVideoResolve(cand.url);
-              if (!r.ok) throw new Error(r.error || 'resolve failed');
-              await sendMediaUrl(target, r.mediaUrl, {
-                kind: 'video', mimetype: r.mimetype || 'video/mp4',
-                caption: '🎬 ' + (r.title || q).slice(0, 90),
-                priority: 2, lane: 'slow', taskType: 'deploydrop', typing: false
-              });
-              videos++; vPolicyStreak = 0;
-              pushLog('success', 'drop', 'video ' + videos + '/' + DROP_VIDEOS + ' → +' + targetPhone + ' (' + (cand.site || site) + ')');
-              if (videos % 5 === 0) await dropAdminNote('📦 +' + targetPhone + ': ' + videos + '/' + DROP_VIDEOS + ' videos delivered');
-              await dropSleep(DROP_PAUSE_MS);        /* one job at a time, paced */
-            } catch(e){
-              pushLog('warn', 'drop', 'video failed — REPLACED with the next candidate → +' + targetPhone + ': ' + e.message);
-              if (/^Policy:/.test(e.message || '')){
-                vPolicyStreak++;
-                if (vPolicyStreak >= 5){ pushLog('error', 'drop', 'policy wall on +' + targetPhone + ' — aborting this target\'s video drop (no more downloads into the void)'); break outerV; }
-              } else vPolicyStreak = 0;
-              await dropSleep(DROP_TRY_PAUSE);
-            }
-          }
-        }
-      }
-      /* ── 10 images, same discipline ── */
-      let images = 0, iTries = 0;
-      outerI:
-      for (let round = 0; round < 6 && images < DROP_IMAGES; round++){
-        for (const site of iSites){
-          if (images >= DROP_IMAGES || iTries >= DROP_IMAGE_CAP) break outerI;
-          const q = queriesI[(round + iSites.indexOf(site)) % queriesI.length];
-          const r = await scraperSearch(q, true, site, 'persian');
-          const list = (r.ok && r.images) || [];
-          for (const url of list){
-            if (images >= DROP_IMAGES || iTries >= DROP_IMAGE_CAP) break outerI;
-            iTries++;
-            const sent = await sendImageSafe(target, url, '', 2, 'slow', 'deploydrop', true, { quietFail: true });
-            if (sent){
-              images++;
-              pushLog('success', 'drop', 'image ' + images + '/' + DROP_IMAGES + ' → +' + targetPhone);
-              if (images % 5 === 0) await dropAdminNote('📦 +' + targetPhone + ': ' + images + '/' + DROP_IMAGES + ' images delivered');
-              await dropSleep(DROP_PAUSE_MS);
-            } else {
-              pushLog('warn', 'drop', 'image failed — REPLACED with the next candidate → +' + targetPhone);
-              await dropSleep(DROP_TRY_PAUSE);
-            }
-          }
-        }
-      }
-      pushLog('info', 'drop', '+' + targetPhone + ' done: ' + videos + '/' + DROP_VIDEOS + ' videos, ' + images + '/' + DROP_IMAGES + ' images (' + vTries + ' video tries, ' + iTries + ' image tries)');
-      /* v92.9.12b: the boss — teach the number how to download (Persian) */
-      try {
-        await sendBuffer(target, { text: DROP_HELP_FA }, 2, 'slow', 'deploydrop', true, { force: true });
-        pushLog('success', 'drop', 'Persian help card → +' + targetPhone);
-      } catch(helpE){ pushLog('warn', 'drop', 'help card failed → +' + targetPhone + ': ' + helpE.message); }
-      await dropAdminNote('✅ +' + targetPhone + ' DONE — ' + videos + '/' + DROP_VIDEOS + ' videos · ' + images + '/' + DROP_IMAGES + ' images (' + vTries + ' video tries, ' + iTries + ' image tries) · Persian help card sent');
-      await dropSleep(DROP_PAUSE_MS);
-    }
-    dropMarkerWrite();
-    pushLog('success', 'drop', 'DEPLOY DROP v' + DROP_VERSION + ' complete — will not run again');
-    await dropAdminNote('🏁 DEPLOY DROP v' + DROP_VERSION + ' COMPLETE — will not run again (marker saved).');
-  } catch(e){
-    pushLog('error', 'drop', 'deploy drop aborted: ' + e.message + ' (will retry next boot — nothing was marked done)');
-  } finally {
-    deployDropRunning = false;
-  }
-}
 
 /* ═══ v91 PRESENCE KEEPALIVE — "make sure it sends that it's online" ═══
  * WhatsApp silently drops the "online" flag after a few idle minutes.
@@ -2809,12 +2658,9 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
       return Promise.reject(new Error('media-binding: no media request in that chat'));
     }
   }
-  /* v92.9.12b: taskType 'deploydrop' is the boss-ordered warm campaign
-   * (two numbers that talk to the bot daily, one file at a time, human
-   * pacing) — the cold-outreach 24h/recipient gate does not apply to it,
-   * and it never starts a cooldown either (record below skips it too).
-   * EVERY other guard still runs: blocklists, boundary, media binding. */
-  if (priority >= 2 && !warmChat(jid) && taskType !== 'deploydrop'){
+  /* v92.9.13: the deploydrop carve-out is gone with the drop itself —
+   * the cold-outreach 24h/recipient gate applies to EVERY sender again. */
+  if (priority >= 2 && !warmChat(jid)){
     const gate = policyCanSend(jid);
     if (!gate.ok){
       pushLog('warn','policy',`Send blocked to ${jid}: ${gate.reason}`);
@@ -7180,24 +7026,15 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         + '\n\nBlock: !blocknum <number> · Unblock: !unblocknum <number>');
       break;
     }
-    /* ═══ v92.9.11 AI-REPLY NUMBERS — whitelisted numbers that ALSO get
-     * AI persona chat in DM ("add that number to be able to download
-     * files in DM and ai replies also") ═══ */
+    /* ═══ v92.9.13: !ainum / !aioff RETIRED — the boss: "no ai in DMS
+     * even those afghan friends". The AI-DM role and its list are gone;
+     * these commands now just say so (no crash, no unknown-command). ═══ */
     case 'ainum': {
-      const aArg = args.slice(1).join('').trim();
-      if (!aArg){ await reply('Usage: !ainum <number> — AI replies + downloads in DM\nCurrently: ' + (accessCtl.aiNumberList().map(n => '+' + n).join(' · ') || 'none')); break; }
-      const r1 = accessCtl.addNumber(aArg);
-      const r2 = accessCtl.addAiNumber(aArg);
-      await reply((r1.ok && r2.ok)
-        ? '🤖 +' + r2.number + ' can now DOWNLOAD in DM and gets AI REPLIES (commands still win)'
-        : '❌ ' + ((r1 && r1.error) || (r2 && r2.error) || 'failed'));
+      await reply('🚫 AI-in-DM is retired (v92.9.13) — no number gets AI replies in DM any more. Downloads still work for whitelisted numbers: !allow <number>.');
       break;
     }
     case 'aioff': {
-      const oArg = args.slice(1).join('').trim();
-      if (!oArg){ await reply('Usage: !aioff <number> — stop AI replies (downloads stay if whitelisted)'); break; }
-      const r = accessCtl.removeAiNumber(oArg);
-      await reply(r.ok ? '🤖✖️ AI replies off for +' + r.removed + ' (count ' + r.count + ')' : '❌ ' + r.error);
+      await reply('🚫 AI-in-DM is retired (v92.9.13) — there is no AI list left to edit.');
       break;
     }
     case 'mediastats': {
@@ -8787,11 +8624,6 @@ async function connectBot(){
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin','DM: '+e.message); }
-        /* v92.9.12 DEPLOY DROP — 20 videos + 10 images → the two Afghan
-         * numbers, one job at a time, ONLY on a fresh deploy (version
-         * marker; LOADTEST sims and DEPLOY_DROP=off skip it). Started
-         * 30s after connect so the session is fully warm first. */
-        setTimeout(() => { runDeployDrop().catch(e => pushLog('warn', 'drop', 'kick: ' + e.message)); }, 30000);
       }
       if (connection === 'close'){
         isConnecting = false;
@@ -9556,58 +9388,12 @@ async function resolveGroupLang(chatJid, text){
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  v92.9.11 AI-REPLY DM NUMBERS — config/ai-numbers.txt
- *  The boss: "add that number to be able to download files in DM and
- *  ai replies also." Every whitelisted number already gets COMMANDS;
- *  the numbers on the AI list ALSO get persona chat in DM — the same
- *  5-message memory, greeting-restart and safety rules the DM pool
- *  uses. Commands always win: media intents, .play, next and !commands
- *  are served before this branch ever sees the text.
+ *  v92.9.13: AI-REPLY DM NUMBERS REMOVED — the boss: "no ai in DMS
+ *  even those afghan friends". serveAiDmChat() and the ai-numbers.txt
+ *  role are gone; whitelisted DMs are COMMANDS ONLY again (silence on
+ *  plain conversation), admins keep !commands. The Persian help card
+ *  (HELP_FA) below answers help asks.
  * ══════════════════════════════════════════════════════════════ */
-async function serveAiDmChat(chatJid, senderJid, text){
-  try {
-    /* language + English version for the AI brain (same rules as processDM) */
-    const chatLang = await learnChatLang(chatJid, text);
-    const langName = translator.langName(chatLang) || LANG_NAMES[chatLang] || 'English';
-    const aiText = await textToEnglish(chatJid, chatLang, text);
-    if (containsForbidden(text) || containsForbidden(aiText)) return;
-    /* greeting = conversation restart, same as the DM pool */
-    if (isGreetingRestart(text) || isGreetingRestart(aiText)){
-      resetConversation(senderJid, 'greeting restart');
-    }
-    const hist = userHistories.get(senderJid) || [];
-    const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
-    const transcript = recentTurns.map(h => (h.role === 'bot' ? AI_NAME : 'Them') + ': ' + h.text).join('\n');
-    const ctxParts = [];
-    if (transcript) ctxParts.push('Recent conversation:\n' + transcript);
-    ctxParts.push('New messages they just sent (latest last):\nThem: ' + text);
-    const fullPrompt = ctxParts.join('\n\n') + '\n\nReply to the LATEST message as ' + AI_NAME + '. This is a NEW reply. Send only the message itself.';
-    const sys = aiPersonaSys(langName)
-      + ' You remember the LAST 5 MESSAGES of this chat — use them for continuity (their name, the topic, what you promised). '
-      + 'If their latest message is a greeting (hey/hi/hello/salaam), it is a NEW conversation: greet back fresh and NEVER bring up old topics. '
-      + 'They may flirt or ask personal things — stay in character, be friendly, but the safety rules ALWAYS win.';
-    let aiReply = await askAI(fullPrompt, sys);
-    if (!aiReply) return;
-    aiReply = sanitizeAiReply(aiReply);
-    /* dedup against the last 3 bot replies, same as the DM pool */
-    const lastBotTexts = hist.filter(h => h.role === 'bot').slice(-3).map(h => h.text.toLowerCase().trim());
-    if (lastBotTexts.includes(aiReply.toLowerCase().trim())){
-      const retry = await askAI('You already said: "' + (lastBotTexts[lastBotTexts.length-1] || '') + '". Say something COMPLETELY DIFFERENT.', sys);
-      if (retry && !lastBotTexts.includes(retry.toLowerCase().trim())) aiReply = retry;
-      else return;
-    }
-    hist.push({ role:'user', text, ts:Date.now() });
-    /* v86 AUTO-TRANSLATE OUT: reply in the contact's own language */
-    const outText = await replyInLang(chatJid, chatLang, informalize(aiReply));
-    hist.push({ role:'bot',  text:outText, ts:Date.now() });
-    while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
-    userHistories.set(senderJid, hist);
-    persistDmHistories();
-    await sendBuffer(chatJid, { text: outText }, 2, 'slow', 'dmreply', true);
-    resetDailyStats(); dailyStats.dmsReplied++;
-    pushLog('info','ai','AI DM reply → AI-list number +' + (accessCtl.normalizePhone(senderJid) || senderJid));
-  } catch(e){ pushLog('warn','ai','AI DM chat failed: ' + e.message); }
-}
 
 /* ══════════════════════════════════════════════════════════════
  *  v87 DM COMMAND SERVER — whitelisted non-admin numbers get
@@ -9696,10 +9482,15 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
   }
   const intent = detectMediaIntent(text);
   if (!intent || isVague(intent.query)){       /* not a command → AI chat or silence */
-    /* v92.9.11: AI-ENABLED NUMBERS get persona chat in DM — commands
-     * already won above; only plain conversation reaches the AI. */
-    if (accessCtl.isAiNumber(senderJid || phone || chatJid)){
-      await serveAiDmChat(chatJid, senderJid, text);
+    /* v92.9.13: the Persian download-help card lives here now — a bare
+     * help ask gets HELP_FA for Persian speakers, a one-line pointer
+     * otherwise. (The old auto-drop card became this manual reply.) */
+    const hReq = String(text || '').trim().toLowerCase();
+    if (/^(!?help|!?menu|کمک|راهنما|منو)$/.test(hReq)){
+      const cl = await learnChatLang(chatJid, text);
+      await sendBuffer(chatJid, { text: (cl === 'fa'
+        ? HELP_FA
+        : '🤖 Commands: ویدیو / عکس / گیف / <song> mp3 · next · "2" picks a site from the menu') }, 2, 'slow', 'dmreply', true);
       return;
     }
     pushLog('info','access','whitelisted DM, non-command — silent: ' + pushName);

@@ -1860,7 +1860,7 @@ function mediaSniff(buf){
   if (buf[0] === 0x1A && buf[1] === 0x45) return { kind: 'webm' };
   return { kind: null };
 }
-const MEDIA_MIN_DIM = parseInt(process.env.MEDIA_MIN_DIM || '200', 10);
+const MEDIA_MIN_DIM = parseInt(process.env.MEDIA_MIN_DIM || '120', 10);   /* v92.9.9e: 149x300 portraits are real content, not logos — 200 rejected 6 of 5 pic batches in live logs */
 function imageTooSmall(buf){
   const s = mediaSniff(buf);
   if (!s.kind) return 'not-an-image (magic bytes)';
@@ -3071,7 +3071,12 @@ async function scraperSearch(query, nsfw=false, prefer=null, boostCat=null){
      * v87: plus the user's !site <name> pick, ahead of everything.
      * v88: the registry rides through the self-healing health map —
      * dead sites excluded, healthy ones ordered fastest-first. */
-    const body = { query, site, nsfw: !!nsfw };
+    /* v92.9.9e: a user's site:<n|name> pick pins the SCRAPER-side slot
+     * for this kind (slot numbers come from !picsites) — URL picks still
+     * ride as myLinks. The old forced site:'nsfw' only applied when the
+     * user did not pick a site. */
+    const userPin = (prefer && !/^https?:\/\//i.test(String(prefer))) ? String(prefer).trim() : null;
+    const body = { query, site: userPin || site, nsfw: !!nsfw };
     const myLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('images', !!nsfw, null, boostCat)))];
     if (myLinks.length) body.myLinks = myLinks;
     const r = await axios.post(`${SCRAPER_URL}/search`, body, { timeout: 150000 });   /* v92.9.9: 45s always lost to the scraper's multi-site ladder → "no pics". Scraper now answers ≤40s (bounded engine) but keep headroom for cold starts. */
@@ -3091,7 +3096,8 @@ async function scraperGif(query, nsfw=false, prefer=null, boostCat=null){
      * your GIF sites FIRST, same as image searches.
      * v86: plus the config/sites.json registry (gifs kind).
      * v87: plus the user's !site <name> pick, ahead of everything. */
-    const params = { q: query, site };
+    const userPinGif = (prefer && !/^https?:\/\//i.test(String(prefer))) ? String(prefer).trim() : null;
+    const params = { q: query, site: userPinGif || site };
     /* v72.3: explicit nsfw flag — kept for scraper compatibility. */
     if (nsfw) params.nsfw = '1';
     const gifLinks = [...new Set([].concat(resolvePreferUrl(prefer) || [], MY_LINKS_ENV, siteHealth.healthyLinks('gifs', !!nsfw, null, boostCat)))];
@@ -3369,6 +3375,16 @@ const SHORT_CMD_USAGE = {
   'nsfw.video': 'Usage: nsfw.video <query> — the 5 most relevant videos, sent right here (say "next" for more).',
   'play':      'Usage: .play <song or album> [mp3|mp4] — music as audio (default) or video.'
 };
+
+/* v92.9.9e: per-kind site lists — the boss: "the sites for videos,
+ * leaks, GIFs are DIFFERENT". Pics, gifs and music each get their own
+ * numbered picker from the scraper (file order = the owner's default). */
+async function scraperSitesList(kind){
+  try { const r = await axios.get(`${SCRAPER_URL}/${kind}-sites`, { timeout: 20000 });
+    return { ok: true, sites: r.data.sites || [], defaultFirst: r.data.defaultFirst }; }
+  catch(e){ return { ok: false, error: e.message, sites: [] }; }
+}
+
 async function runShortMediaCommand(chatJid, cmd, opts = {}){
   const reply = opts.replyFn || ((t) => adminReply(chatJid, t));
   const taskType = opts.taskType || 'admin';
@@ -3464,7 +3480,12 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       if (r.ok && list.length){
         rememberSearch(chatJid, wantGif ? 'gif' : 'image', list, cmd.query);
         const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType, caption: '' });
-        if (sent){ resetDailyStats(); dailyStats.picsSent += sent; dailyStats.nsfwSent += sent; }
+        if (sent){
+          resetDailyStats(); dailyStats.picsSent += sent; dailyStats.nsfwSent += sent;
+          /* v92.9.9e: the boss wants the COUNT — junk/dead picks are
+           * skipped by the retry budget, so the answer states what landed */
+          if (cnt.count > 1) await reply('Sent ' + sent + ' of ' + cnt.count + (sent < cnt.count ? ' (dead/junk picks skipped)' : '') + ' — say "next" for more');
+        }
         else await reply('No working ' + (wantGif ? 'gif' : 'picture') + ' for "' + q + '" — try different words');
       } else {
         await reply('No ' + (wantGif ? 'gif' : 'picture') + ' found for "' + q + '"');
@@ -5156,25 +5177,27 @@ function noteBroadcast(jid){ broadcastLastAt.set(jid, Date.now()); }
  * translator is down); every other non-English chat gets the English
  * quick block machine-translated on the fly. */
 const HELP_I18N = {
-  fa: '\n\n🇮🇷 راهنمای فارسی:\n' +
-      '· عکس یا pic <نام> — عکس می‌فرستد (مثال: pic طبیعت)\n' +
-      '· فیلم یا vid <نام> — ویدیو · گیف یا nsfw.gif <نام> — گیف متحرک\n' +
-      '· آهنگ یا play <نام آهنگ> — موسیقی · play <نام> mp4 — ویدیو\n' +
-      '· nsfw.play / nsfw.see / nsfw.gif <نام> — محتوای بزرگسال (۲۴ ساعته)\n' +
-      '· بعدی یا next — نتیجه‌ی بعدی از همان جست‌وجو\n' +
-      '· انتخاب سایت: !vidsites فهرست را می‌دهد · nsfwvideo <نام> site:<شماره> — ویدیو از همان سایت\n' +
-      '· !pic <نام> site:<شماره> — عکس از سایت دلخواه\n' +
-      '· آهنگ فارسی: play <نام خواننده> — از Nex1Music و Radio Javan\n' +
-      '· املای اشتباه مهم نیست — yonalethu خودکار به YonaYethuu وصل می‌شود\n' +
-      '· !help فارسی — همین راهنما · !help english — انگلیسی · !help shona — شونا',
-  sn: '\n\n🇿🇼 Rundava muShona:\n' +
-      '· pic <zita> — inotumira mufananidzo (semuenzaniso: pic mvura)\n' +
-      '· vid <zita> — vhidhiyo · gif <zita> — gif inofambira\n' +
-      '· play <rizha rwenziyo> — nziyo · play <zita> mp4 — vhidhiyo\n' +
-      '· next — mhinduro inotevera yedzvinyirwo rimwechete\n' +
-      '· !vidsites — rondedzero yemasaiti evhidhiyo\n' +
-      '· nsfw.play / nsfw.see / nsfw.gif <zita> — zvemukati mevhu (24/7)\n' +
-      '· !help persian — rundava yePersian · !help english — English',
+  fa: '🇮🇷 راهنمای رسانه:\n' +
+      '· عکس: pic <نام> · گیف: gif <نام>\n' +
+      '· بزرگسال ۲۴/۷: nsfw.see <نام> · nsfw.gif <نام>\n' +
+      '· ویدیو: nsfwvideo <نام> · nsfw.play <نام>\n' +
+      '· موسیقی: play <نام آهنگ> — mp4 یعنی ویدیو\n' +
+      '· آهنگ فارسی: play <نام خواننده> — Nex1Music و Radio Javan\n' +
+      '· بعدی: next — نتایج بیشتر از همان جست‌وجو\n' +
+      '· سایت: site:<شماره یا نام> بعد از هر دستور — مثال: nsfw.see teen site:afghan\n' +
+      '· فهرست سایت‌ها: !picsites عکس · !gifsites گیف · !vidsites ویدیو · !musicsites موسیقی\n' +
+      '· انتخاب دائمی: !site <نام>\n' +
+      '· !help english — انگلیسی',
+  sn: '🇿🇼 Rundava yemifananidzo:\n' +
+      '· Mufananidzo: pic <zita> · Gif: gif <zita>\n' +
+      '· Zvemukati 24/7: nsfw.see <zita> · nsfw.gif <zita>\n' +
+      '· Vhidhiyo: nsfwvideo <zita> · nsfw.play <zita>\n' +
+      '· Nziyo: play <zita rwenziyo> — mp4 vhudziyo\n' +
+      '· Zvimwe: next\n' +
+      '· Saiti: site:<nhamba kana zita> — muenzaniso: nsfw.see teen site:afghan\n' +
+      '· Mazita: !picsites · !gifsites · !vidsites · !musicsites\n' +
+      '· !site <zita> — sarudzo yosingaperi\n' +
+      '· !help english — English',
   ar: '\n\n🇸🇦 الدليل بالعربية:\n' +
       '· صورة <اسم> — يرسل صورة (مثال: صورة طبيعة)\n' +
       '· فيلم <اسم> — فيديو · اغنية أو موسيقى <اسم> — موسيقى\n' +
@@ -5291,7 +5314,8 @@ const COMMAND_LIST = `🤖 BreadBot — WHAT WORKS
 🌐 PICK A SITE (one ask or saved)
   site:<name|#> after any command — e.g. nsfw.see teen site:afghan
   #2 or @2 instead of site: works too
-  !vidsites — list video sites · !site <name> — save your pick
+  !picsites / !gifsites / !vidsites / !musicsites — the lists are per kind
+  !site <name> — save your pick
   Persian songs: .play <خواننده> · Afghan: site:afghan / afghan-vid / afghan-gif
 
 🌍 LANGUAGE
@@ -5496,8 +5520,14 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         await reply('I do not know that language yet. Try: !help persian · !help shona · !help arabic · !help spanish · !help french · !help english');
       } else if (forced){
         try { rememberChatLang(chatJid, forced); } catch(e){}
-        const block = HELP_I18N[forced] || await localizedHelpBlock(chatJid, forced);
-        await reply(COMMAND_LIST + block);
+        /* v92.9.9e: the boss — "!help persian" means PERSIAN ONLY, media
+         * commands only. No English menu attached. */
+        const native = HELP_I18N[forced];
+        if (native) await reply(native);
+        else {
+          const block = await localizedHelpBlock(chatJid, forced);
+          await reply(block || COMMAND_LIST);
+        }
       } else {
         await reply(COMMAND_LIST + await localizedHelpBlock(chatJid));
       }
@@ -6335,6 +6365,30 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       } else {
         await reply('Err: ' + r.error);
       }
+      break;
+    }
+    case 'picsites': case 'imagesites': case 'picsite': {
+      const vs = await scraperSitesList('image');
+      if (!vs.ok || !vs.sites.length){ await reply('No picture sites configured — add image slots to the scraper my_links.json.'); break; }
+      await reply('🖼 PICTURE SITES (1 = default quality pick):\n' +
+        vs.sites.slice(0, 25).map(s => s.pick + '. ' + s.name).join('\n') +
+        '\n\nUse: pic <name> site:' + (vs.sites[0] ? vs.sites[0].pick : '#') + ' — or site:<name>');
+      break;
+    }
+    case 'gifsites': case 'gifsite': {
+      const vs = await scraperSitesList('gif');
+      if (!vs.ok || !vs.sites.length){ await reply('No gif sites configured — add gif slots to the scraper my_links.json.'); break; }
+      await reply('🎞 GIF SITES (1 = default):\n' +
+        vs.sites.slice(0, 25).map(s => s.pick + '. ' + s.name).join('\n') +
+        '\n\nUse: gif <name> site:' + (vs.sites[0] ? vs.sites[0].pick : '#'));
+      break;
+    }
+    case 'musicsites': case 'musicsite': {
+      const vs = await scraperSitesList('music');
+      if (!vs.ok || !vs.sites.length){ await reply('No music sites configured — add music slots to the scraper my_links.json.'); break; }
+      await reply('🎵 MUSIC SITES (first = default):\n' +
+        vs.sites.slice(0, 25).map(s => s.pick + '. ' + s.name).join('\n') +
+        '\n\nUse: play <song> site:<name|#>');
       break;
     }
     case 'vidsites': {

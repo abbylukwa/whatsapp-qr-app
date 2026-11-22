@@ -228,8 +228,13 @@ async function audius(query){
     title: ((t.user && t.user.name) ? t.user.name + ' - ' : '') + (t.title || ''),
     rawTitle: t.title || ''
   }));
+  /* v92.9.9e: the ARTIST token (first query word) must appear in the
+   * title — "nle depression" must never return a random "Depression"
+   * track by SubjectiveVisions (1-token flukes passed the old 0.5 floor). */
+  const firstTok = String(query || '').toLowerCase().split(/\s+/).filter(w => w.length > 1)[0];
+  const artistMatch = firstTok ? cand.filter(c => c.title.toLowerCase().includes(firstTok)) : cand;
   let t = null;
-  try { t = bestByTitle(cand, query, { max: 10, floor: 0.5 }); } catch (e) {
+  try { t = bestByTitle(artistMatch.length ? artistMatch : [], query, { max: 10, floor: 0.5 }); } catch (e) {
     throw new Error('audius: no close match for "' + query + '" — refusing a wrong song');
   }
   return { mediaUrl: H + '/v1/tracks/' + t.id + '/stream?app_name=breadbot',

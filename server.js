@@ -2043,7 +2043,11 @@ function rememberVideoSearch(chatJid, results, query){
 async function sendRelevantBatch(chatJid, count, opts = {}){
   const st = lastSearchByChat.get(chatJid);
   if (!st || !st.results.length) return 0;
-  const n = Math.max(1, Math.min(count || 1, RELEVANT_BATCH_CAP));
+  /* v92.9.9e: explicit asks are honoured — "10 pics of x" sends 10.
+   * Default stays the boss's 5; explicit counts raise the cap to 10. */
+  const explicit = Math.min(10, Math.max(0, parseInt(opts.explicitCount || 0, 10)));
+  const cap = Math.max(RELEVANT_BATCH_CAP, explicit);
+  const n = Math.max(1, Math.min(count || 1, cap));
   let sent = 0;
   for (let i = 0; i < n; i++){
     if (st.idx >= st.results.length) break;
@@ -3423,11 +3427,14 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       /* v92.9.9 — the boss's group flow: ONE ask, FIVE most-relevant
        * videos downloaded and sent straight into this chat. Works in
        * DM + activated groups; site: / #n picks ride the same parser. */
-      await reply('Searching "' + cmd.query + '" — 5 best videos coming up...');
-      const ranked = await scraperVideoRanked(cmd.query, { site: prefer || null });
+      const vcnt = extractCountFromQuery(cmd.query);
+      const vq = vcnt.query || cmd.query;
+      const want = vcnt.count || 5;
+      await reply('Searching "' + vq + '" — ' + want + ' best videos coming up...');
+      const ranked = await scraperVideoRanked(vq, { site: prefer || null });
       if (ranked.length){
-        rememberVideoSearch(chatJid, ranked, cmd.query);
-        const sent = await sendRelevantBatch(chatJid, 5, { taskType });
+        rememberVideoSearch(chatJid, ranked, vq);
+        const sent = await sendRelevantBatch(chatJid, want, { taskType, explicitCount: want > 5 ? want : 0 });
         if (sent){
           resetDailyStats(); dailyStats.nsfwSent += sent;
           await reply('Sent ' + sent + ' video(s) — say "next" for more from this search.');
@@ -3472,14 +3479,14 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       const wantGif = cmd.kind === 'nsfw.gif';
       const cnt = extractCountFromQuery(cmd.query);
       const q = cnt.query || cmd.query;
-      await reply('Searching "' + q + '" ' + (wantGif ? 'gifs' : 'pictures') + '...');
+      await reply('Searching "' + q + '" ' + (wantGif ? 'gifs' : 'pictures') + (cnt.count ? ' (' + cnt.count + ')' : '') + '...');
       const r = wantGif
         ? await scraperGif(q, true, prefer, cat)
         : await scraperSearch(q, true, prefer, cat);
       const list = (wantGif ? r.gifs : r.images) || [];
       if (r.ok && list.length){
         rememberSearch(chatJid, wantGif ? 'gif' : 'image', list, cmd.query);
-        const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType, caption: '' });
+        const sent = await sendRelevantBatch(chatJid, cnt.count || RELEVANT_BATCH_CAP, { taskType, caption: '', explicitCount: cnt.count || 0 });
         if (sent){
           resetDailyStats(); dailyStats.picsSent += sent; dailyStats.nsfwSent += sent;
           /* v92.9.9e: the boss wants the COUNT — junk/dead picks are

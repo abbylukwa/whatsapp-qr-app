@@ -204,6 +204,32 @@ async function main() {
     assert(s.myLinks.length === 2, 'myLinks parse failed');
   });
 
+  /* ── 9a. v92.9.11: blocked numbers + AI numbers + group blacklist ── */
+  await test('access: blocked numbers never match admin, AI numbers resolve', () => {
+    const acc = require('./access');
+    const ADMIN = '263777627210';
+    /* read-only exercise of the real lists — nothing is written */
+    assert(typeof acc.isBlockedNumber === 'function', 'isBlockedNumber missing');
+    assert(typeof acc.isAiNumber === 'function', 'isAiNumber missing');
+    /* the admin number can never be blacklisted */
+    const res = acc.addBlockedNumber('+' + ADMIN, ADMIN);
+    assert(res.ok === false && /never be blocked/.test(res.error || ''), 'admin block must be refused');
+    /* the real lists ship sane defaults */
+    assert(acc.isBlockedNumber('+9990000000') === false, 'phantom number reported blocked');
+    /* AI list ships with the boss-approved number (committed config) */
+    acc.loadAiNumbers();
+    assert(acc.isAiNumber('+93772553417') === true, 'Afghan AI number missing from ai-numbers.txt');
+    assert(acc.isAiNumber('+263777000001') === false, 'phantom number reported AI-enabled');
+  });
+  await test('access: name blacklist matches KCC in any wording', () => {
+    const acc = require('./access');
+    acc.loadGroups();          /* real blocked-groups.txt: KCC lines */
+    assert(acc.nameIsBlocked('KCC Youth Fellowship') === true, 'exact KCC Youth miss');
+    assert(acc.nameIsBlocked('kcc youth fellowship Zimbabwe 🙏') === true, 'wrapped KCC miss');
+    assert(acc.nameIsBlocked('KCC Bubble Study Group') === true, 'KCC Bubble miss');
+    assert(acc.nameIsBlocked('𝐆𝐑𝐎𝐔𝐏 𝐂𝐇𝐀𝐓🍷💖𓄹𓈒ᥱX̸𝚁︎𝗢︎𝚁︎ᯓ⁪4𝐊𓍼') === false, 'unrelated group flagged');
+  });
+
   /* ── 9b. v88/v89: site health + localization + registry ── */
   await test('site-health: registry integrity — 7 majors, all nsfw, share map', () => {
     const SH = require('./site-health');
@@ -260,6 +286,83 @@ async function main() {
     assert(!after.includes(target.url), 'dead site still in chain after markFail');
     SH.markOk(target.url, 100);
     assert(SH.healthyLinks('videos', true).includes(target.url), 'revived site not back in chain');
+  });
+  /* ═══ v92.9.12 SITE PICKER — the boss flow: test sites first, list them
+   * in the user's language, member picks a number (+ optional count) ═══ */
+  await test('site-picker: video menus default ARABIC when nothing else is known', () => {
+    const SP = require('./site-picker');
+    SP.init(function(){});
+    assert(SP.boostCategoryFor('video', {}) === 'arab', 'video with no locale must default to arab');
+    assert(SP.boostCategoryFor('video', { phone: '93772553417' }) === 'persian', 'afghan phone must boost persian over the arab default');
+    assert(SP.boostCategoryFor('video', { phone: '201001234567' }) === 'arab', 'egypt phone must boost arab');
+    assert(SP.boostCategoryFor('video', { lang: 'ar' }) === 'arab', 'arabic chat language must boost arab');
+    assert(SP.boostCategoryFor('image', {}) === null, 'pics get NO fabricated default');
+    assert(SP.boostCategoryFor('gif', { phone: '263771234567' }) === 'zimbabwe', 'zim phone must boost zimbabwe');
+    assert(SP.boostCategoryFor('gif', { lang: 'fa' }) === 'persian', 'farsi language must boost persian');
+  });
+  await test('site-picker: menu lists ONLY live-tested sites, numbered 1..N', async () => {
+    const SP = require('./site-picker');
+    const SH = require('./site-health');
+    SH.loadRegistry(); SH.loadHealth();
+    const chat = '263777123456@s.whatsapp.net';
+    const ranked = SH.healthyLinks('videos', true, null, 'arab');
+    assert(ranked.length >= 4, 'need video candidates to test, got ' + ranked.length);
+    const dead = new Set(ranked.slice(0, 2));            /* the 2 first candidates "die" */
+    const orig = SH.probeSite;
+    SH.probeSite = async (u) => dead.has(u) ? { ok:false, why:'test-dead' } : { ok:true, ms:40 };
+    try {
+      const mp = await SP.buildMenu(chat, 'video', false, { query: 'kabul' });
+      assert(mp.ok === true, 'menu failed: ' + JSON.stringify(mp).slice(0, 120));
+      assert(mp.sites.length >= 1 && mp.sites.length <= SP.MENU_SITES, 'menu size wrong: ' + mp.sites.length);
+      assert(mp.sites[0].n === 1, 'sites must be numbered from 1');
+      for (let i = 1; i < mp.sites.length; i++) assert(mp.sites[i].n === mp.sites[i-1].n + 1, 'numbering broken');
+      assert(!mp.sites.some(s => dead.has(s.url)), 'a DEAD site was listed — sites were NOT tested first');
+      const p = SP.getPending(chat);
+      assert(p && p.kind === 'video' && p.query === 'kabul' && p.cat === 'arab', 'pending pick not stored for this chat');
+    } finally { SH.probeSite = orig; SP.clearPending(chat); }
+  });
+  await test('site-picker: pick parsing — "2", "2 5", "2,5", caps, invalid, no-menu', () => {
+    const SP = require('./site-picker');
+    SP.init(function(){});
+    const chat = '263777654321@s.whatsapp.net';
+    const two = [{ n:1, url:'http://a', name:'A' }, { n:2, url:'http://b', name:'B' }];
+    SP.setPending(chat, { kind:'image', nsfw:false, query:'mbira', sites: two, lang:null, cat:null, taskType:'dmreply', senderJid:null });
+    let p = SP.parsePick(chat, '2');
+    assert(p && p.valid && p.site.url === 'http://b', 'bare number must pick site 2');
+    assert(p.count === 5 && p.defaultCount === true, 'image default count must be 5, got ' + p.count);
+    SP.setPending(chat, { kind:'image', nsfw:false, query:'mbira', sites: two, lang:null, cat:null, taskType:'dmreply', senderJid:null });
+    p = SP.parsePick(chat, '2x25');
+    assert(p.valid && p.count === 10, 'image count must cap at 10, got ' + p.count);
+    SP.setPending(chat, { kind:'video', nsfw:false, query:'kabul', sites: two, lang:null, cat:null, taskType:'dmreply', senderJid:null });
+    p = SP.parsePick(chat, '2 9');
+    assert(p.valid && p.count === 3, 'video count must cap at 3, got ' + p.count);
+    SP.setPending(chat, { kind:'gif', nsfw:false, query:'dance', sites: two, lang:null, cat:null, taskType:'group', senderJid:null });
+    p = SP.parsePick(chat, '2,5');
+    assert(p.valid && p.count === 5, 'comma form "2,5" must work, got ' + p.count);
+    SP.setPending(chat, { kind:'gif', nsfw:false, query:'dance', sites: two, lang:null, cat:null, taskType:'group', senderJid:null });
+    p = SP.parsePick(chat, '7');
+    assert(p && p.invalid === true, 'a number outside the menu must be flagged invalid');
+    assert(SP.parsePick(chat, 'hello') === null, 'non-number text is not a pick');
+    assert(SP.parsePick('stranger@s.whatsapp.net', '1') === null, 'no pending menu in this chat → null');
+  });
+  await test('site-picker: probeAlive bounded — stops at MENU_SITES alive, ≤6 in flight', async () => {
+    const SP = require('./site-picker');
+    const SH = require('./site-health');
+    const orig = SH.probeSite;
+    let inFlight = 0, maxInFlight = 0, calls = 0;
+    SH.probeSite = async () => {
+      calls++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise(r => setTimeout(r, 12));
+      inFlight--;
+      return { ok:true, ms:12 };
+    };
+    try {
+      const urls = Array.from({ length: 20 }, (_, i) => 'http://probe-s' + i);
+      const alive = await SP.probeAlive(urls);
+      assert(alive.length === SP.MENU_SITES, 'must stop at MENU_SITES alive, got ' + alive.length);
+      assert(calls <= SP.MENU_SITES, 'must not probe past the first full alive round, called ' + calls);
+      assert(maxInFlight <= 6, 'probe concurrency above 6: ' + maxInFlight);
+    } finally { SH.probeSite = orig; }
   });
   await test('server: junk/dummy URL filter kills 1px + logos + sprites', () => {
     const src = fs.readFileSync('./server.js', 'utf8');

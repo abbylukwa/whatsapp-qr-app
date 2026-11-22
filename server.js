@@ -2013,10 +2013,10 @@ async function sendFirstWorking(jid, candidates, kind, caption, opts = {}){
     tried.push(url);
     let ok = false;
     try {
-      if (kind === 'image')      ok = await sendImageSafe(jid, url, caption, 2, 'slow', opts.taskType || 'dmreply', true, { quietFail: true });
-      else if (kind === 'gif')   ok = await sendGifSafe(jid, url, caption, 2, 'slow', opts.taskType || 'dmreply', true, { quietFail: true });
-      else if (kind === 'video') { await sendMediaUrl(jid, url, { kind: 'video', mimetype: 'video/mp4', caption, priority: 2, lane: 'slow', taskType: opts.taskType || 'dmreply' }); ok = true; }
-      else                       { await sendMediaUrl(jid, url, { kind: 'audio', mimetype: 'audio/mpeg', caption, priority: 2, lane: 'slow', taskType: opts.taskType || 'dmreply' }); ok = true; }
+      if (kind === 'image')      ok = await sendImageSafe(jid, url, caption, 2, 'slow', opts.taskType || 'dmreply', true, { quietFail: true, nsfw: opts.nsfw === true });
+      else if (kind === 'gif')   ok = await sendGifSafe(jid, url, caption, 2, 'slow', opts.taskType || 'dmreply', true, { quietFail: true, nsfw: opts.nsfw === true });
+      else if (kind === 'video') { await sendMediaUrl(jid, url, { kind: 'video', mimetype: 'video/mp4', caption, priority: 2, lane: 'slow', taskType: opts.taskType || 'dmreply', nsfw: opts.nsfw === true }); ok = true; }
+      else                       { await sendMediaUrl(jid, url, { kind: 'audio', mimetype: 'audio/mpeg', caption, priority: 2, lane: 'slow', taskType: opts.taskType || 'dmreply', nsfw: opts.nsfw === true }); ok = true; }
     } catch (e) { pushLog('warn', 'media', 'candidate failed (' + kind + '): ' + e.message); ok = false; }
     if (ok) return { ok: true, url, tried: tried.length };
     forgetMedia(jid, url);
@@ -2066,20 +2066,22 @@ function extractCountFromQuery(q){
   }
   return { count, query: toks.join(' ').trim() };
 }
-function rememberSearch(chatJid, kind, results, query){
+function rememberSearch(chatJid, kind, results, query, nsfw){
   markMediaRequest(chatJid);
   const list = (results || []).filter(u => typeof u === 'string' && u);
-  lastSearchByChat.set(chatJid, { kind, results: list, idx: 0, query: String(query || ''), at: Date.now() });
+  /* v92.9.11: remember the NSFW verdict of the search — the send boundary
+   * needs it to tell NSFW batches apart from safe ones (kill vs block) */
+  lastSearchByChat.set(chatJid, { kind, results: list, idx: 0, query: String(query || ''), nsfw: nsfw === true, at: Date.now() });
   if (lastSearchByChat.size > 500){        /* bound the map */
     lastSearchByChat.delete(lastSearchByChat.keys().next().value);
   }
 }
 /* v92: video searches remember ranked PAGE candidates (objects), not
  * plain urls — "next" resolves each into a real file as it walks. */
-function rememberVideoSearch(chatJid, results, query){
+function rememberVideoSearch(chatJid, results, query, nsfw){
   markMediaRequest(chatJid);
   const list = (results || []).filter(r => r && typeof r === 'object' && r.url);
-  lastSearchByChat.set(chatJid, { kind: 'video', results: list, idx: 0, query: String(query || ''), at: Date.now() });
+  lastSearchByChat.set(chatJid, { kind: 'video', results: list, idx: 0, query: String(query || ''), nsfw: nsfw === true, at: Date.now() });
   if (lastSearchByChat.size > 500){
     lastSearchByChat.delete(lastSearchByChat.keys().next().value);
   }
@@ -2129,7 +2131,8 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
       await sendMediaUrl(chatJid, r.mediaUrl, {
         kind: 'video', mimetype: r.mimetype || 'video/mp4',
         caption: '🎬 ' + ((cand.title && cand.title !== 'video' ? cand.title : r.title) + (cand.site ? '  [' + cand.site + ']' : '')).trim().slice(0, 110),   /* v92.9.9d: ranked title first — CDN slugs like "480p.h264" read as broken */
-        priority: 3, lane: 'slow', taskType: opts.taskType || 'group', typing: false
+        priority: 3, lane: 'slow', taskType: opts.taskType || 'group', typing: false,
+        nsfw: st.nsfw === true || opts.nsfw === true
       });
       sent++;
       if (i < n - 1) await sleepMs(1500 + Math.random() * 1000);   /* human pace */
@@ -2147,7 +2150,7 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
       const url = st.results[st.idx];
       st.idx++;
       const label = st.idx + '/' + st.results.length;
-      const res = await sendFirstWorking(chatJid, [url], st.kind, opts.caption || label, { taskType: opts.taskType || 'group' });
+      const res = await sendFirstWorking(chatJid, [url], st.kind, opts.caption || label, { taskType: opts.taskType || 'group', nsfw: st.nsfw === true || opts.nsfw === true });
       if (res.ok){
         sent++;
         if (sent < n) await sleepMs(1200 + Math.random() * 800);   /* human pace between sends */
@@ -2180,6 +2183,214 @@ function isNextRequest(text){
     .test(String(text || '').trim());
 }
 
+/* ══════════════════════════════════════════════════════════════
+ *  v92.9.12 SITE PICKER — menu + picked hunt (DMs and groups)
+ *  The boss: "nsfw.play returns a list of websites in the users
+ *  language and user selects number and sends the number, so first
+ *  test the sites before listing them … this happens to both gif
+ *  pics n vids and also select number of results they want sent."
+ * ══════════════════════════════════════════════════════════════ */
+const SITE_MENU_KIND_WORD = { image: 'pictures', gif: 'gifs', video: 'videos' };
+async function sendSiteMenu(chatJid, kind, nsfw, opts){
+  try {
+    const mp = await sitePicker.buildMenu(chatJid, kind, nsfw, opts);
+    if (!mp.ok) return false;                       /* caller falls back to the direct hunt */
+    const lines = mp.sites.map(s => s.n + '. ' + s.name);
+    const header = await t2(chatJid, (nsfw ? 'NSFW ' : '') + SITE_MENU_KIND_WORD[kind] + ' — sites tested just now, alive:');
+    const qline = mp.query ? (await t2(chatJid, 'For:') + ' "' + String(mp.query).slice(0, 60) + '"') : '';
+    const instr = await t2(chatJid, 'Reply with the NUMBER — optionally + how many results (e.g. "2 5"):');
+    await sendBuffer(chatJid, { text: [header, qline, lines.join('\n'), instr].filter(Boolean).join('\n') },
+      2, 'slow', (opts && opts.taskType) || 'dmreply', true);
+    return true;
+  } catch(e){
+    pushLog('warn', 'picker', 'menu failed: ' + e.message);
+    return false;
+  }
+}
+async function runPickedHunt(chatJid, pick){
+  const q = String(pick.query || '').trim();
+  const taskType = pick.taskType || 'dmreply';
+  const cat = localCat(pick.senderJid, chatJid, pick.lang);
+  markMediaRequest(chatJid);
+  try {
+    const note = await t2(chatJid, 'Searching "' + q + '" on ' + pick.site.name + (pick.count > 1 ? ' — ' + pick.count + ' results' : '') + '...');
+    await sendBuffer(chatJid, { text: note }, 2, 'slow', taskType, true);
+  } catch(e){}
+  if (pick.kind === 'video'){
+    /* ranked flow pinned to the picked site — one queued hunt */
+    const qr = await mediaQueue.run(chatJid, 'video', q + '|' + pick.site.name, async () => {
+      const ranked = await scraperVideoRanked(q, { site: pick.site.name, boostCat: cat });
+      return { ok: ranked.length > 0, ranked };
+    });
+    const rs = qr.result;
+    if (rs.ok && rs.ranked.length){
+      rememberVideoSearch(chatJid, rs.ranked, q, pick.nsfw);
+      const sent = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw });
+      if (sent) return true;
+    }
+    /* ranked dead on that site → the site's classic single-shot */
+    const r = await mediaQueue.run(chatJid, 'video', q + '|' + pick.site.name + '|v2', async () =>
+      scraperVideo(q, null, pick.site.name, cat));
+    const rr = r.result;
+    if (rr.ok){
+      await sendMediaUrl(chatJid, rr.mediaUrl, { kind: 'video', mimetype: rr.mimetype || 'video/mp4',
+        caption: '🎬 ' + (rr.title || q).slice(0, 90), priority: 3, lane: 'slow', taskType, typing: false, nsfw: pick.nsfw });
+      return true;
+    }
+  } else {
+    const isGif = pick.kind === 'gif';
+    const qr = await mediaQueue.run(chatJid, isGif ? 'gif' : 'image', q + '|' + pick.site.name, async () =>
+      isGif ? scraperGif(q, pick.nsfw, pick.site.name, cat) : scraperSearch(q, pick.nsfw, pick.site.name, cat));
+    const r = qr.result;
+    const list = r.ok ? (isGif ? r.gifs : r.images) : [];
+    if (r.ok && list.length){
+      rememberSearch(chatJid, isGif ? 'gif' : 'image', list, q, pick.nsfw);
+      const sent = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw });
+      if (sent) return true;
+    }
+  }
+  try {
+    await sendBuffer(chatJid, { text: await t2(chatJid, '❌ Nothing came from that site — ask again (e.g. "' + q + '") to see the site menu.') },
+      2, 'slow', taskType, true);
+  } catch(e){}
+  return false;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  v92.9.12 DEPLOY DROP — the boss: "on deploy send 20 videos to each
+ *  and 10 images to each, one job at a time, all sites mostly from
+ *  their country and few from Africa; if a video fails, replace it;
+ *  ONLY those numbers — 2 numbers."
+ *
+ *  · Targets are HARDCODED to exactly the two Afghan numbers — nothing
+ *    and nobody else receives this drop.
+ *  · Strictly ONE file in flight at a time (download → send → next),
+ *    with human pacing — the 512MB box and WhatsApp both stay calm.
+ *  · Sites: mostly the targets' own country slots (Persian), plus a few
+ *    African slots — rotation mixes ~4:1.
+ *  · A failed video is REPLACED by the next ranked candidate until the
+ *    quota is filled (bounded attempt caps keep the loop honest).
+ *  · Runs ONCE per bot version (marker file survives reboots), never in
+ *    LOADTEST sims, and DEPLOY_DROP=off kills it completely.
+ * ══════════════════════════════════════════════════════════════ */
+const DROP_VERSION   = '92.9.12';
+const DROP_FILE      = path.join(__dirname, 'data', 'deploy-drop.json');
+const DROP_TARGETS   = ['93772553417@s.whatsapp.net', '93765002356@s.whatsapp.net'];   /* ONLY these two */
+const DROP_VIDEOS    = 20;
+const DROP_IMAGES    = 10;
+const DROP_VIDEO_CAP = 60;    /* total replace attempts across all sites */
+const DROP_IMAGE_CAP = 40;
+const DROP_PAUSE_MS  = [7000, 13000];   /* human pace between sends */
+const DROP_TRY_PAUSE = [2500, 5000];    /* faster when replacing a failure */
+let deployDropRunning = false;
+function dropSleep(range){
+  return new Promise(r => setTimeout(r, range[0] + Math.random() * (range[1] - range[0])));
+}
+function dropMarkerRead(){
+  try { return JSON.parse(fs.readFileSync(DROP_FILE, 'utf8')); } catch(e){ return null; }
+}
+function dropMarkerWrite(){
+  try {
+    fs.mkdirSync(path.dirname(DROP_FILE), { recursive: true });
+    fs.writeFileSync(DROP_FILE, JSON.stringify({ version: DROP_VERSION, doneAt: new Date().toISOString(),
+      targets: DROP_TARGETS, videos: DROP_VIDEOS, images: DROP_IMAGES }, null, 1));
+  } catch(e){}
+}
+function dropSitePool(kind){
+  /* mostly their country (persian), few African — healthy sites only */
+  const home = siteHealth.healthyLinks(kind, true, null, 'persian').slice(0, 5);
+  const africa = siteHealth.healthyLinks(kind, true, null, 'africa').slice(0, 2);
+  const pool = [];
+  /* 4:1 mix — home, home, africa, home, home, africa … */
+  const maxLen = Math.max(home.length, africa.length);
+  for (let i = 0; i < maxLen; i++){
+    if (home[i]) pool.push(home[i]);
+    if (home[i + 1]) pool.push(home[i + 1]);
+    if (africa[i]) pool.push(africa[i]);
+  }
+  return [...new Set(pool)];
+}
+async function runDeployDrop(){
+  if (LOADTEST){ pushLog('info', 'drop', 'LOADTEST — deploy drop skipped'); return; }
+  if (process.env.DEPLOY_DROP === 'off'){ pushLog('info', 'drop', 'DEPLOY_DROP=off — skipped'); return; }
+  if (deployDropRunning) return;
+  const marker = dropMarkerRead();
+  if (marker && marker.version === DROP_VERSION){ pushLog('info', 'drop', 'deploy drop v' + DROP_VERSION + ' already delivered — skipped'); return; }
+  deployDropRunning = true;
+  const queriesV = ['persian', 'iranian', 'afghan', 'arab'];
+  const queriesI = ['persian', 'iranian', 'afghan', 'arab'];
+  try {
+    pushLog('info', 'drop', 'DEPLOY DROP v' + DROP_VERSION + ' starting — 20 videos + 10 images → 2 numbers, one job at a time');
+    for (const target of DROP_TARGETS){
+      const targetPhone = target.split('@')[0];
+      markMediaRequest(target);                    /* the drop IS a request — binding guard passes */
+      const vSites = dropSitePool('videos');
+      const iSites = dropSitePool('images');
+      /* ── 20 videos, one at a time, failures replaced ── */
+      let videos = 0, vTries = 0;
+      outerV:
+      for (let round = 0; round < 6 && videos < DROP_VIDEOS; round++){
+        for (const site of vSites){
+          if (videos >= DROP_VIDEOS || vTries >= DROP_VIDEO_CAP) break outerV;
+          const q = queriesV[(round + vSites.indexOf(site)) % queriesV.length];
+          const ranked = await scraperVideoRanked(q, { site, boostCat: 'persian' }).catch(() => []);
+          for (const cand of ranked){
+            if (videos >= DROP_VIDEOS || vTries >= DROP_VIDEO_CAP) break outerV;
+            vTries++;
+            try {
+              const r = await scraperVideoResolve(cand.url);
+              if (!r.ok) throw new Error(r.error || 'resolve failed');
+              await sendMediaUrl(target, r.mediaUrl, {
+                kind: 'video', mimetype: r.mimetype || 'video/mp4',
+                caption: '🎬 ' + (r.title || q).slice(0, 90),
+                priority: 2, lane: 'slow', taskType: 'dmreply', typing: false
+              });
+              videos++;
+              pushLog('success', 'drop', 'video ' + videos + '/' + DROP_VIDEOS + ' → +' + targetPhone + ' (' + (cand.site || site) + ')');
+              await dropSleep(DROP_PAUSE_MS);        /* one job at a time, paced */
+            } catch(e){
+              pushLog('warn', 'drop', 'video failed — REPLACED with the next candidate → +' + targetPhone + ': ' + e.message);
+              await dropSleep(DROP_TRY_PAUSE);
+            }
+          }
+        }
+      }
+      /* ── 10 images, same discipline ── */
+      let images = 0, iTries = 0;
+      outerI:
+      for (let round = 0; round < 6 && images < DROP_IMAGES; round++){
+        for (const site of iSites){
+          if (images >= DROP_IMAGES || iTries >= DROP_IMAGE_CAP) break outerI;
+          const q = queriesI[(round + iSites.indexOf(site)) % queriesI.length];
+          const r = await scraperSearch(q, true, site, 'persian');
+          const list = (r.ok && r.images) || [];
+          for (const url of list){
+            if (images >= DROP_IMAGES || iTries >= DROP_IMAGE_CAP) break outerI;
+            iTries++;
+            const sent = await sendImageSafe(target, url, '', 2, 'slow', 'dmreply', true, { quietFail: true });
+            if (sent){
+              images++;
+              pushLog('success', 'drop', 'image ' + images + '/' + DROP_IMAGES + ' → +' + targetPhone);
+              await dropSleep(DROP_PAUSE_MS);
+            } else {
+              pushLog('warn', 'drop', 'image failed — REPLACED with the next candidate → +' + targetPhone);
+              await dropSleep(DROP_TRY_PAUSE);
+            }
+          }
+        }
+      }
+      pushLog('info', 'drop', '+' + targetPhone + ' done: ' + videos + '/' + DROP_VIDEOS + ' videos, ' + images + '/' + DROP_IMAGES + ' images (' + vTries + ' video tries, ' + iTries + ' image tries)');
+      await dropSleep(DROP_PAUSE_MS);
+    }
+    dropMarkerWrite();
+    pushLog('success', 'drop', 'DEPLOY DROP v' + DROP_VERSION + ' complete — will not run again');
+  } catch(e){
+    pushLog('error', 'drop', 'deploy drop aborted: ' + e.message + ' (will retry next boot — nothing was marked done)');
+  } finally {
+    deployDropRunning = false;
+  }
+}
+
 /* ═══ v91 PRESENCE KEEPALIVE — "make sure it sends that it's online" ═══
  * WhatsApp silently drops the "online" flag after a few idle minutes.
  * 'available' is asserted once on connect; this timer re-asserts it
@@ -2204,7 +2415,8 @@ function armPresenceKeepalive(name, getSock){
 async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
-    await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing, opts && opts.account ? { account: opts.account } : undefined);
+    await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing,
+      { nsfw: opts && opts.nsfw === true, account: opts && opts.account });
     return true;
   } catch(e){
     pushLog('warn','media',`image skip: ${e.message}`);
@@ -2218,7 +2430,8 @@ async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', task
 async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
     const { buffer } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'gif');
-    await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType, typing, opts && opts.account ? { account: opts.account } : undefined);
+    await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType, typing,
+      { nsfw: opts && opts.nsfw === true, account: opts && opts.account });
     return true;
   } catch(e){
     pushLog('warn','media',`gif skip: ${e.message}`);
@@ -2258,7 +2471,8 @@ async function sendMediaUrl(jid, mediaUrl, opts = {}){
          * delivery cache: once the message is out, the bytes are dead
          * weight on a free-tier box. Delete immediately; keep the file
          * if the send failed so retries still work. */
-        const sentP = sendBuffer(jid, contentB, priority, lane, taskType, typing, account ? { account } : undefined);
+        const sentP = sendBuffer(jid, contentB, priority, lane, taskType, typing,
+          { account, nsfw: opts.nsfw === true });
         Promise.resolve(sentP).then(() => {
           fs.unlink(selfPath, () => {});
         }).catch(() => { /* send failed — keep for retry */ });
@@ -2277,7 +2491,7 @@ async function sendMediaUrl(jid, mediaUrl, opts = {}){
   else if (isImage) content = { image:  { url: mediaUrl }, mimetype: mimetype || 'image/jpeg', caption };
   else              content = { document:{ url: mediaUrl }, mimetype: mimetype || 'application/octet-stream', caption, fileName: 'media' };
 
-  return sendBuffer(jid, content, priority, lane, taskType, typing, account ? { account } : undefined);
+  return sendBuffer(jid, content, priority, lane, taskType, typing, { account, nsfw: opts.nsfw === true });
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2371,6 +2585,68 @@ function chatWantsMedia(chatJid){
   return !!t && (Date.now() - t) < MEDIA_REQUEST_TTL_MS;
 }
 
+/* ═══ v92.9.11 KILL SWITCH — the boss: "I don't want it to send any
+ * message to wrong people … no matter what it rather kill it self."
+ * A confirmed wrong-recipient send attempt (NSFW media to a chat that
+ * never asked, or ANYTHING to a blacklisted group/number) no longer
+ * just blocks — the process TERMINATES itself before the send leaves
+ * the wire. Render restarts it clean; the wrong message never exists.
+ * killSwitchHandler is a LOADTEST hook: the sim replaces process death
+ * with a recorded reason so assertions stay fast. */
+let killSwitchHandler = null;      /* set only via POST /loadtest/killhook */
+let lastKillSwitch   = null;       /* panel/inspection: the kill that fired */
+function breadKillSwitch(reason, detail){
+  if (lastKillSwitch) return;      /* one kill per process — die clean */
+  lastKillSwitch = { reason, detail: String(detail || '').slice(0, 200), ts: new Date().toISOString() };
+  pushLog('error','killswitch','SELF-TERMINATE — refusing a wrong-recipient send: ' + reason + ' | ' + detail);
+  resetDailyStats(); dailyStats.policyBlocks++;
+  try {
+    pushLiveMessage({ id:'kill-'+Date.now(), ts:new Date().toISOString(),
+      chatJid: ADMIN_JID, chatType:'system', senderJid: botJid, senderName:'KILL-SWITCH',
+      phone: ADMIN_PHONE, mediaType:'system', isAdmin:true,
+      text:'KILL SWITCH: refused ' + detail + ' — ' + reason + ' (v92.9.11: rather die than misdeliver)' });
+  } catch(_e){}
+  if (typeof killSwitchHandler === 'function'){
+    try { killSwitchHandler(reason, detail); } catch(_e){}
+    return;
+  }
+  /* production: one last honest note to the boss (the admin chat is a
+   * legal target BY DEFINITION), 1.5s to flush, then die BEFORE the
+   * wrong send can leave the wire. */
+  try { if (sock && typeof sock.sendMessage === 'function') sock.sendMessage(ADMIN_JID, { text: 'KILL SWITCH — refused a wrong-recipient send (' + reason + '): ' + detail }).catch(function(){}); } catch(_e){}
+  setTimeout(function(){ try { process.exit(66); } catch(e){ process.exit(66); } }, 1500);
+}
+
+/* ═══ v92.9.11 FINAL SEND BOUNDARY — one decision for every send.
+ * Runs TWICE: at sendBuffer call time (pre-queue) and inside the lane
+ * job right before S.sendMessage (the wire). The second run closes the
+ * TOCTOU gap: a job queued minutes ago is re-verified against the state
+ * AS IT IS NOW. Returns {ok:true} or {ok:false, error, killed}. */
+function sendBoundaryCheck(jid, content, opts, taskType){
+  const isMedia = !!content && !!(content.image || content.video || content.audio || content.document || content.sticker);
+  /* 1. HARD BLACKLIST — groups and numbers. No taskType bypasses this. */
+  if (typeof jid === 'string' && jid.endsWith('@g.us') && accessCtl.isBlockedChat(jid, getGroupName(jid))){
+    breadKillSwitch('blocked-group', 'boundary send → ' + (getGroupName(jid) || jid) + ' [' + taskType + ']');
+    return { ok:false, error:'kill-switch: blocked group', killed:true };
+  }
+  if (typeof jid === 'string' && !jid.endsWith('@g.us') && jid.includes('@') && accessCtl.isBlockedNumber(jid)){
+    breadKillSwitch('blocked-number', 'boundary send → +' + accessCtl.normalizePhone(jid) + ' [' + taskType + ']');
+    return { ok:false, error:'kill-switch: blocked number', killed:true };
+  }
+  /* 2. MEDIA-CHAT BINDING at the wire — the 15-min request window is
+   * re-verified NOW, not when the job was queued. NSFW misroutes kill. */
+  if (isMedia && (taskType === 'group' || taskType === 'dmreply') && !chatWantsMedia(jid)){
+    const mKind = content.audio ? 'audio' : content.video ? 'video' : content.image ? 'image' : content.sticker ? 'sticker' : 'document';
+    if ((opts && opts.nsfw === true) || detectNsfw(String(content.caption || ''))){
+      breadKillSwitch('nsfw-to-chat-that-never-asked',
+        'boundary ' + mKind + ' → ' + (getGroupName(jid) || jid) + ' caption: ' + String(content.caption || '').slice(0, 60));
+      return { ok:false, error:'kill-switch: nsfw to chat that never asked', killed:true };
+    }
+    return { ok:false, error:'media-binding: no media request in that chat (final boundary)' };
+  }
+  return { ok:true };
+}
+
 /* ═══ v92.9.6 SENT-MEDIA COUNTERS — "keep count of photos or videos sent".
  * Counted at the single choke point AFTER a successful send; per chat +
  * totals, persisted to data/media-stats.json (debounced). */
@@ -2408,15 +2684,29 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
    * pushes — so the rule holds no matter which code path tried to talk.
    * Admin-initiated sends (opts.adminTrigger) still work in silent
    * groups: the boss's own command is itself a trigger. */
-  if (!LOADTEST && typeof jid === 'string' && jid.endsWith('@g.us')){
+  if (typeof jid === 'string' && jid.endsWith('@g.us')){
+    /* v92.9.11: the blacklist check now runs in LOADTEST too — the sim
+     * proves blocked groups receive NOTHING, so the check must be real. */
     if (accessCtl.isBlockedChat(jid, getGroupName(jid))){
       pushLog('warn','guard','BLOCKHOLE send refused → ' + (getGroupName(jid) || jid) + ' (taskType ' + taskType + ')');
+      breadKillSwitch('blocked-group', 'send → ' + (getGroupName(jid) || jid) + ' [' + taskType + ']');
       return Promise.reject(new Error('group-blacklisted'));
     }
     if (!accessCtl.isGroupActive(jid) && !(opts && (opts.adminTrigger || opts.activationConfirm))){
       pushLog('warn','guard','Send refused — group not activated by the boss → ' + (getGroupName(jid) || jid) + ' (taskType ' + taskType + ')');
       return Promise.reject(new Error('group-not-activated'));
     }
+  }
+  /* ═══ v92.9.11 HARD NUMBER BLACKLIST (send side) — a number in
+   * config/blocked-numbers.txt never receives ANYTHING from ANY path:
+   * replies, media, broadcasts, scheduler drops, pending resolves,
+   * admin echoes. No taskType bypasses this — the boss: "shall not and
+   * will not receive any message". */
+  if (typeof jid === 'string' && !jid.endsWith('@g.us') && jid.includes('@') &&
+      accessCtl.isBlockedNumber(jid)){
+    pushLog('warn','guard','BLOCKHOLE send refused → +' + accessCtl.normalizePhone(jid) + ' (blocked number, taskType ' + taskType + ')');
+    breadKillSwitch('blocked-number', 'send → +' + accessCtl.normalizePhone(jid) + ' [' + taskType + ']');
+    return Promise.reject(new Error('number-blacklisted'));
   }
   /* v67: main-group lock for conversational group sends. Broadcasts,
    * admin !send and media pushes to other groups stay allowed.
@@ -2437,19 +2727,28 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
    * a 'group'/'dmreply' chat that never requested media (15-min window)
    * is the exact wrong-recipient bug the boss reported; block it here,
    * loudly, so it can never happen silently again. Broadcasts, admin
-   * sends, scheduled drops and LOADTEST bypass by taskType. */
-  if (!LOADTEST && (taskType === 'group' || taskType === 'dmreply') && content &&
+   * sends, scheduled drops and LOADTEST bypass by taskType.
+   * v92.9.11: NSFW media to a chat that never asked now trips the KILL
+   * SWITCH ("rather kill it self") — the process dies before the send;
+   * non-NSFW media stays a block + admin report. Runs in LOADTEST too —
+   * the sim asserts this guard is real. */
+  if ((taskType === 'group' || taskType === 'dmreply') && content &&
       (content.image || content.video || content.audio || content.document)){
     if (!chatWantsMedia(jid)){
       const mKind = content.audio ? 'audio' : content.video ? 'video' : content.image ? 'image' : 'document';
       const mCap = String(content.caption || '').replace(/\n/g,' ').slice(0, 70);
+      if ((opts && opts.nsfw === true) || detectNsfw(String(content.caption || ''))){
+        breadKillSwitch('nsfw-to-chat-that-never-asked',
+          mKind + ' → "' + (getGroupName(jid) || jid) + '" caption: ' + mCap);
+        return Promise.reject(new Error('kill-switch: nsfw to chat that never asked'));
+      }
       pushLog('warn','guard','MEDIA-BINDING blocked ' + mKind + ' → "' + (getGroupName(jid) || jid) + '" — no media request in that chat (15-min window). caption: ' + mCap);
       resetDailyStats(); dailyStats.policyBlocks++;
       try {
         pushLiveMessage({ id:'bind-'+Date.now(), ts:new Date().toISOString(),
           chatJid: ADMIN_JID, chatType: 'system', senderJid: botJid, senderName: 'MEDIA-BINDING',
           phone: ADMIN_PHONE, mediaType: 'system', isAdmin: true,
-          text: '🛡 MEDIA-BINDING: blocked a ' + mKind + ' send to "' + (getGroupName(jid) || jid) + '" — that chat never requested media (v92.9 wrong-recipient guard). caption: ' + mCap });
+          text: 'MEDIA-BINDING: blocked a ' + mKind + ' send to "' + (getGroupName(jid) || jid) + '" — that chat never requested media (v92.9 wrong-recipient guard). caption: ' + mCap });
       } catch(_e){}
       return Promise.reject(new Error('media-binding: no media request in that chat'));
     }
@@ -2498,6 +2797,18 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
         if (botPaused && priority > 0){ if (LOADTEST) lt.sendsFailed++; reject(new Error('Bot paused')); return; }
         if (Date.now() < botOfflineUntil && priority > 0){ if (LOADTEST) lt.sendsFailed++; reject(new Error('Bot offline')); return; }
         return withJidLock(jid, async ()=>{
+          /* ═══ v92.9.11 FINAL SEND BOUNDARY — the wire is the LAST place
+           * a wrong send can be stopped. Every check above ran when
+           * sendBuffer was CALLED; this job may have waited minutes in a
+           * lane while state changed (request window expired, chat got
+           * blocked mid-queue, a stale redelivery resurfaced). Nothing
+           * crosses to WhatsApp without passing the boundary again. */
+          const _bd = sendBoundaryCheck(jid, content, opts, taskType);
+          if (!_bd.ok){
+            if (LOADTEST) lt.sendsFailed++;
+            reject(new Error(_bd.error));
+            return;
+          }
           if (showTyping_){
             await withTypingLock(async ()=>{
               try { await S.sendPresenceUpdate('composing', jid); } catch(e){}
@@ -3522,10 +3833,21 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
     }
     if (cmd.kind === 'nsfw.play'){
       await reply('Searching "' + cmd.query + '" — best match first...');
+      /* v92.9.12 SITE PICKER — the boss: nsfw.play returns a list of TESTED
+       * websites in the user's language; the user replies with the number.
+       * A pinned site (site:<name|#>) skips the menu. */
+      if (!prefer){
+        const menuSent = await sendSiteMenu(chatJid, 'video', true, {
+          query: cmd.query, lang: opts.lang || null, phone: opts.phone || null,
+          taskType, senderJid: opts.senderJid || null
+        });
+        if (menuSent) return true;
+        await reply('No site answered the test right now — hunting the normal chain instead...');
+      }
       const ranked = await scraperVideoRanked(cmd.query, { site: prefer || null });
       if (ranked.length){
-        rememberVideoSearch(chatJid, ranked, cmd.query);
-        const sent = await sendRelevantBatch(chatJid, 1, { taskType, caption: '' });
+        rememberVideoSearch(chatJid, ranked, cmd.query, true);
+        const sent = await sendRelevantBatch(chatJid, 1, { taskType, caption: '', nsfw: true });
         if (sent){
           resetDailyStats(); dailyStats.nsfwSent++;
           await reply('Sent — say "next" for the next match (' + ranked.length + ' ranked).');
@@ -3535,7 +3857,7 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       const r = await scraperVideo(cmd.query, null, prefer || null);
       if (r.ok){
         await sendMediaUrl(chatJid, r.mediaUrl, { kind:'video', mimetype:r.mimetype||'video/mp4',
-          caption:'\uD83C\uDFAC ' + (r.title||cmd.query).slice(0,90), priority:0, lane:'fast', taskType, typing:false });
+          caption:'\uD83C\uDFAC ' + (r.title||cmd.query).slice(0,90), priority:0, lane:'fast', taskType, typing:false, nsfw:true });
         resetDailyStats(); dailyStats.nsfwSent++;
         await reply('Sent.');
       } else {
@@ -3548,13 +3870,24 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       const cnt = extractCountFromQuery(cmd.query);
       const q = cnt.query || cmd.query;
       await reply('Searching "' + q + '" ' + (wantGif ? 'gifs' : 'pictures') + (cnt.count ? ' (' + cnt.count + ')' : '') + '...');
+      /* v92.9.12 SITE PICKER — TESTED site menu first (boss flow); a
+       * pinned site skips it; if nothing answers the probe, the direct
+       * hunt below still runs so the member is never left hanging. */
+      if (!prefer){
+        const menuSent = await sendSiteMenu(chatJid, wantGif ? 'gif' : 'image', true, {
+          query: q, lang: opts.lang || null, phone: opts.phone || null,
+          taskType, senderJid: opts.senderJid || null
+        });
+        if (menuSent) return true;
+        await reply('No site answered the test right now — hunting the normal chain instead...');
+      }
       const r = wantGif
         ? await scraperGif(q, true, prefer, cat)
         : await scraperSearch(q, true, prefer, cat);
       const list = (wantGif ? r.gifs : r.images) || [];
       if (r.ok && list.length){
-        rememberSearch(chatJid, wantGif ? 'gif' : 'image', list, cmd.query);
-        const sent = await sendRelevantBatch(chatJid, cnt.count || RELEVANT_BATCH_CAP, { taskType, caption: '', explicitCount: cnt.count || 0 });
+        rememberSearch(chatJid, wantGif ? 'gif' : 'image', list, cmd.query, true);
+        const sent = await sendRelevantBatch(chatJid, cnt.count || RELEVANT_BATCH_CAP, { taskType, caption: '', explicitCount: cnt.count || 0, nsfw: true });
         if (sent){
           resetDailyStats(); dailyStats.picsSent += sent; dailyStats.nsfwSent += sent;
           /* v92.9.9e: the boss wants the COUNT — junk/dead picks are
@@ -4990,6 +5323,9 @@ async function resolvePending(id, action, payload, adminChatJid){
     }
     const query = payload || p.intent.query;
     const pCat = localCat(p.userJid, p.userJid);
+    /* v92.9.11: NSFW verdict rides with the resolve — the send boundary
+     * needs it to kill (not just block) a misrouted NSFW delivery */
+    const pNsfw = detectNsfw(String(query || '')) || p.intent.nsfw === true;
     markMediaRequest(p.userJid);   /* v92.9: fulfilling the user's own request */
     if (p.intent.type === 'video'){
       /* v72.2: pending video requests resolve to a REAL video (was gif). */
@@ -4998,20 +5334,20 @@ async function resolvePending(id, action, payload, adminChatJid){
       await sendMediaUrl(p.userJid, r.mediaUrl, {
         kind: 'video', mimetype: r.mimetype || 'video/mp4',
         caption: '🎬 ' + (r.title || query).slice(0, 90),
-        priority: 2, lane: 'slow', taskType: 'dmreply', typing: false
+        priority: 2, lane: 'slow', taskType: 'dmreply', typing: false, nsfw: pNsfw
       });
     } else if (p.intent.type === 'gif'){
-      const r = await scraperGif(query, false, null, pCat);
+      const r = await scraperGif(query, pNsfw, null, pCat);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
-      await sendGifSafe(p.userJid, pickFresh(r.gifs, p.userJid), '', 2, 'slow', 'dmreply', true);
+      await sendGifSafe(p.userJid, pickFresh(r.gifs, p.userJid), '', 2, 'slow', 'dmreply', true, { nsfw: pNsfw });
     } else if (p.intent.type === 'music'){
       const r = await musicDownload(query, 'audio');
       if (!r.ok){ adminReply(adminChatJid, 'Music failed.'); return { ok:false }; }
       await sendMediaUrl(p.userJid, r.mediaUrl, { kind:'audio', mimetype:r.mimetype, caption:r.title, priority:2, lane:'slow', taskType:'dmreply', typing:true });
     } else {
-      const r = await scraperSearch(query, false, null, pCat);
+      const r = await scraperSearch(query, pNsfw, null, pCat);
       if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
-      await sendImageSafe(p.userJid, pickFresh(r.images, p.userJid), '', 2, 'slow', 'dmreply', true);
+      await sendImageSafe(p.userJid, pickFresh(r.images, p.userJid), '', 2, 'slow', 'dmreply', true, { nsfw: pNsfw });
     }
     pendingRequests.delete(id); savePending(); resetDailyStats(); dailyStats.pendingResolved++;
     adminReply(adminChatJid, `Sent to ${p.userName}.`);
@@ -6758,6 +7094,50 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       await reply(r.ok ? ('✖️ Removed +' + r.removed + ' (' + r.count + ' left)') : '❌ ' + r.error);
       break;
     }
+    /* ═══ v92.9.11 NUMBER BLOCKLIST — "any blocked number shall not and
+     * will not receive any message". The admin can never be blocked. ═══ */
+    case 'blocknum': {
+      const bArg = args.slice(1).join('').trim();
+      if (!bArg){ await reply('Usage: !blocknum <number>\nCurrently blocked: ' + (accessCtl.blockedNumberList().map(n => '+' + n).join(' · ') || 'none')); break; }
+      const r = accessCtl.addBlockedNumber(bArg, ADMIN_PHONE);
+      await reply(r.ok
+        ? (r.added ? '🚫 BLOCKED +' + r.number + ' — they will NEVER receive anything from me again (count ' + r.count + ')' : 'ℹ️ +' + r.number + ' was already blocked')
+        : '❌ ' + r.error);
+      break;
+    }
+    case 'unblocknum': {
+      const uArg = args.slice(1).join('').trim();
+      if (!uArg){ await reply('Usage: !unblocknum <number>\nCurrently blocked: ' + (accessCtl.blockedNumberList().map(n => '+' + n).join(' · ') || 'none')); break; }
+      const r = accessCtl.removeBlockedNumber(uArg, ADMIN_PHONE);
+      await reply(r.ok ? '✅ Unblocked +' + r.removed + ' (count ' + r.count + ')' : '❌ ' + r.error);
+      break;
+    }
+    case 'blockednums': {
+      const list = accessCtl.blockedNumberList();
+      await reply('🚫 *Blocked numbers* (' + list.length + ')\n' + (list.length ? list.map((n, i) => (i + 1) + '. +' + n).join('\n') : 'None — everyone whitelisted can be talked to.')
+        + '\n\nBlock: !blocknum <number> · Unblock: !unblocknum <number>');
+      break;
+    }
+    /* ═══ v92.9.11 AI-REPLY NUMBERS — whitelisted numbers that ALSO get
+     * AI persona chat in DM ("add that number to be able to download
+     * files in DM and ai replies also") ═══ */
+    case 'ainum': {
+      const aArg = args.slice(1).join('').trim();
+      if (!aArg){ await reply('Usage: !ainum <number> — AI replies + downloads in DM\nCurrently: ' + (accessCtl.aiNumberList().map(n => '+' + n).join(' · ') || 'none')); break; }
+      const r1 = accessCtl.addNumber(aArg);
+      const r2 = accessCtl.addAiNumber(aArg);
+      await reply((r1.ok && r2.ok)
+        ? '🤖 +' + r2.number + ' can now DOWNLOAD in DM and gets AI REPLIES (commands still win)'
+        : '❌ ' + ((r1 && r1.error) || (r2 && r2.error) || 'failed'));
+      break;
+    }
+    case 'aioff': {
+      const oArg = args.slice(1).join('').trim();
+      if (!oArg){ await reply('Usage: !aioff <number> — stop AI replies (downloads stay if whitelisted)'); break; }
+      const r = accessCtl.removeAiNumber(oArg);
+      await reply(r.ok ? '🤖✖️ AI replies off for +' + r.removed + ' (count ' + r.count + ')' : '❌ ' + r.error);
+      break;
+    }
     case 'mediastats': {
       /* v92.9.6 — "keep count of photos or videos sent": per chat + total */
       const t = mediaStats.total;
@@ -7107,7 +7487,7 @@ async function brainHandleGroup(chatJid, dec, opts){
         scraperGif(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang)));
       const r = qr.result;
       if (r.ok && r.gifs.length){
-        await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true);
+        await sendGifSafe(chatJid, r.gifs[0], '', 3, 'slow', 'group', true, { nsfw: nsfw === true });
         resetDailyStats(); dailyStats.picsSent++;
         if (nsfw) dailyStats.nsfwSent++;
         return true;
@@ -7135,7 +7515,7 @@ async function brainHandleGroup(chatJid, dec, opts){
         await sendMediaUrl(chatJid, r.mediaUrl, {
           kind: 'video', mimetype: r.mimetype || 'video/mp4',
           caption: '🎬 ' + (r.title || q).slice(0, 90),
-          priority: 3, lane: 'slow', taskType: 'group', typing: false
+          priority: 3, lane: 'slow', taskType: 'group', typing: false, nsfw: nsfw === true
         });
         resetDailyStats(); dailyStats.videosSent++;
         if (nsfw) dailyStats.nsfwSent++;
@@ -7154,7 +7534,7 @@ async function brainHandleGroup(chatJid, dec, opts){
         scraperSearch(q, nsfw, null, localCat(senderJid, chatJid, opts && opts.lang)));
       const r = qr.result;
       if (r.ok && r.images.length){
-        await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true);
+        await sendImageSafe(chatJid, r.images[0], '', 3, 'slow', 'group', true, { nsfw: nsfw === true });
         resetDailyStats(); dailyStats.picsSent++;
         if (nsfw) dailyStats.nsfwSent++;
         return true;
@@ -7340,6 +7720,15 @@ async function handleMessage(msg){
    * get COMMANDS-ONLY service further down. */
   if (!isGroup && !isAdmin){
     const realPhone = phone || accessCtl.phoneFromJid(senderJid);
+    /* v92.9.11 HARD NUMBER BLACKLIST — checked FIRST, before even the
+     * read receipt. A number in config/blocked-numbers.txt gets NOTHING:
+     * no reply, no receipt, no media, no AI chat, no broadcast. The send
+     * side re-checks every outgoing message (sendBuffer boundary), so no
+     * scheduler/broadcast/pending path can bypass it either. */
+    if (accessCtl.isBlockedNumber(realPhone || senderJid)){
+      pushLog('warn','access','BLOCKED number — message dropped unseen: ' + (realPhone ? '+' + accessCtl.normalizePhone(realPhone) : senderJid));
+      return;
+    }
     if (!accessCtl.isAllowedNumber(realPhone || senderJid, ADMIN_PHONE)){
       pushLog('info','access','DM from unknown number ignored (not opened): ' + (realPhone ? '+' + accessCtl.normalizePhone(realPhone) : senderJid));
       return;
@@ -7806,6 +8195,27 @@ async function handleMessage(msg){
       if (detectGroupLinkRequest(gText)){ await sendBuffer(chatJid, { text: await t2(chatJid,'Join: '+ADMIN_GROUP_LINK) }, 3, 'slow', 'group', true); return; }
       const isNsfw = detectNsfw(text) || detectNsfw(gText);
       if (isNsfw && !isAdmin && !nsfwOpen){ await sendBuffer(chatJid, { text: await t2(chatJid,'Not right now, try after 9pm') }, 3, 'slow', 'group', true); return; }
+      /* v92.9.12 SITE PICKER — a bare number right after a menu resolves
+       * the pick ("2" = site 2 · "2 5" = site 2, five results). The same
+       * media gate + fuse apply, so group floods stay well-calculated. */
+      const gPick = sitePicker.parsePick(chatJid, text);
+      if (gPick && gPick.valid){
+        if (gPick.nsfw && !isAdmin && !nsfwOpen){
+          await sendBuffer(chatJid, { text: await t2(chatJid, 'Not right now, try after 9pm') }, 3, 'slow', 'group', true);
+          return;
+        }
+        if (!isAdmin){
+          if (senderMediaFuseTripped(senderJid || chatJid, chatJid)) return;
+          const pGate = gateAllow('media', chatJid, false);
+          if (!pGate.ok || !gateMediaOpen()){
+            const note = gateBusyNote(chatJid, 'media', !gateMediaOpen() ? 0 : pGate.waitS);
+            if (note) await sendBuffer(chatJid, { text: note }, 3, 'fast', 'group', false);
+            return;
+          }
+        }
+        await runPickedHunt(chatJid, gPick);
+        return;
+      }
       const gIntent = detectMediaIntent(gText);
       if (gIntent && !isVague(gIntent.query)){
         /* v92.9.10 stale-redelivery + per-sender fuse — media intents only,
@@ -7823,6 +8233,16 @@ async function handleMessage(msg){
             if (note) await sendBuffer(chatJid, { text: note }, 3, 'fast', 'group', false);
             return;
           }
+        }
+        /* v92.9.12 SITE PICKER — pics/gifs/videos in groups get the TESTED
+         * site menu in the group's language (boss flow). NSFW menus ride
+         * the already-checked window; music stays direct. If nothing
+         * probed alive the classic direct hunts below still run. */
+        if (gIntent.type === 'image' || gIntent.type === 'gif' || gIntent.type === 'video'){
+          const menuSent = await sendSiteMenu(chatJid, gIntent.type, isNsfw === true, {
+            query: gIntent.query, lang: gLang, phone, taskType: 'group', senderJid
+          });
+          if (menuSent) return;
         }
         if (gIntent.type === 'music'){
           try {
@@ -7851,8 +8271,8 @@ async function handleMessage(msg){
           const r = qr.result;
           if (r.ok && r.gifs.length){
             /* v91: MOST RELEVANT batch (up to 5) + "next" pagination */
-            rememberSearch(chatJid, 'gif', r.gifs, cnt.query || gIntent.query);
-            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '' });
+            rememberSearch(chatJid, 'gif', r.gifs, cnt.query || gIntent.query, isNsfw);
+            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '', nsfw: isNsfw === true });
             if (sent){
               resetDailyStats();
               dailyStats.picsSent += sent;
@@ -7882,9 +8302,9 @@ async function handleMessage(msg){
             const rs = qr.result;
             if (rs.ok){
               if (!isAdmin) videoScheduler.recordRequest(senderJid);
-              rememberVideoSearch(chatJid, rs.ranked, vq);
+              rememberVideoSearch(chatJid, rs.ranked, vq, isNsfw);
               const st = lastSearchByChat.get(chatJid);
-              const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group' });
+              const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', nsfw: isNsfw === true });
               if (sent){
                 resetDailyStats(); dailyStats.videosSent += sent;
                 if (isNsfw) dailyStats.nsfwSent += sent;
@@ -7903,7 +8323,7 @@ async function handleMessage(msg){
               await sendMediaUrl(chatJid, rr.mediaUrl, {
                 kind: 'video', mimetype: rr.mimetype || 'video/mp4',
                 caption: '🎬 ' + (rr.title || vq).slice(0, 90),
-                priority: 3, lane: 'slow', taskType: 'group', typing: false
+                priority: 3, lane: 'slow', taskType: 'group', typing: false, nsfw: isNsfw === true
               });
               resetDailyStats(); dailyStats.videosSent++;
               if (isNsfw) dailyStats.nsfwSent++;
@@ -7919,8 +8339,8 @@ async function handleMessage(msg){
           const r = qr.result;
           if (r.ok && r.images.length){
             /* v91: MOST RELEVANT batch (up to 5) + "next" pagination */
-            rememberSearch(chatJid, 'image', r.images, cnt.query || gIntent.query);
-            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '' });
+            rememberSearch(chatJid, 'image', r.images, cnt.query || gIntent.query, isNsfw);
+            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '', nsfw: isNsfw === true });
             if (sent){
               resetDailyStats(); dailyStats.picsSent += sent;
               if (isNsfw) dailyStats.nsfwSent += sent;
@@ -8078,7 +8498,7 @@ async function connectBot(){
         try { const vs = await scraperVideoSites(); if (vs.ok){ vsCount = vs.sites.length; vsDefault = vs.sites[0] ? vs.sites[0].name.split(' ')[0] : ''; } } catch(e){}
         try {
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v92.9.6b ONLINE\n' +
+            'BreadBot v92.9.12 ONLINE\n' +
             'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
@@ -8100,6 +8520,11 @@ async function connectBot(){
           });
           if (sent?.key?.id) markBotSent(sent.key.id);
         } catch(e){ pushLog('warn','admin','DM: '+e.message); }
+        /* v92.9.12 DEPLOY DROP — 20 videos + 10 images → the two Afghan
+         * numbers, one job at a time, ONLY on a fresh deploy (version
+         * marker; LOADTEST sims and DEPLOY_DROP=off skip it). Started
+         * 30s after connect so the session is fully warm first. */
+        setTimeout(() => { runDeployDrop().catch(e => pushLog('warn', 'drop', 'kick: ' + e.message)); }, 30000);
       }
       if (connection === 'close'){
         isConnecting = false;
@@ -8396,6 +8821,14 @@ applyNsfwActivation();
  * every media chain, healthy ones ride first (see site-health.js) */
 const siteHealth = require('./site-health');
 siteHealth.init(pushLog);
+/* v92.9.12 SITE PICKER — "nsfw.play returns a list of websites in the
+ * users language and user selects number and sends the number, so first
+ * test the sites before listing them. This happens to both gif pics n
+ * vids." Pics/gifs/videos present a TESTED, numbered site menu in the
+ * chat's language; the member replies with the number (optionally +
+ * result count) and the bot hunts that exact site. */
+const sitePicker = require('./site-picker');
+sitePicker.init(pushLog);
 /* v88 MUSIC ENGINE — MP3/MP4 via online downloader sites (y2mate style),
  * self-healing provider chain, 32MB pre-send cap (see music.js) */
 const musicEngine = require('./music');
@@ -8856,10 +9289,65 @@ async function resolveGroupLang(chatJid, text){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  v92.9.11 AI-REPLY DM NUMBERS — config/ai-numbers.txt
+ *  The boss: "add that number to be able to download files in DM and
+ *  ai replies also." Every whitelisted number already gets COMMANDS;
+ *  the numbers on the AI list ALSO get persona chat in DM — the same
+ *  5-message memory, greeting-restart and safety rules the DM pool
+ *  uses. Commands always win: media intents, .play, next and !commands
+ *  are served before this branch ever sees the text.
+ * ══════════════════════════════════════════════════════════════ */
+async function serveAiDmChat(chatJid, senderJid, text){
+  try {
+    /* language + English version for the AI brain (same rules as processDM) */
+    const chatLang = await learnChatLang(chatJid, text);
+    const langName = translator.langName(chatLang) || LANG_NAMES[chatLang] || 'English';
+    const aiText = await textToEnglish(chatJid, chatLang, text);
+    if (containsForbidden(text) || containsForbidden(aiText)) return;
+    /* greeting = conversation restart, same as the DM pool */
+    if (isGreetingRestart(text) || isGreetingRestart(aiText)){
+      resetConversation(senderJid, 'greeting restart');
+    }
+    const hist = userHistories.get(senderJid) || [];
+    const recentTurns = hist.slice(-USER_HISTORY_SIZE * 2);
+    const transcript = recentTurns.map(h => (h.role === 'bot' ? AI_NAME : 'Them') + ': ' + h.text).join('\n');
+    const ctxParts = [];
+    if (transcript) ctxParts.push('Recent conversation:\n' + transcript);
+    ctxParts.push('New messages they just sent (latest last):\nThem: ' + text);
+    const fullPrompt = ctxParts.join('\n\n') + '\n\nReply to the LATEST message as ' + AI_NAME + '. This is a NEW reply. Send only the message itself.';
+    const sys = aiPersonaSys(langName)
+      + ' You remember the LAST 5 MESSAGES of this chat — use them for continuity (their name, the topic, what you promised). '
+      + 'If their latest message is a greeting (hey/hi/hello/salaam), it is a NEW conversation: greet back fresh and NEVER bring up old topics. '
+      + 'They may flirt or ask personal things — stay in character, be friendly, but the safety rules ALWAYS win.';
+    let aiReply = await askAI(fullPrompt, sys);
+    if (!aiReply) return;
+    aiReply = sanitizeAiReply(aiReply);
+    /* dedup against the last 3 bot replies, same as the DM pool */
+    const lastBotTexts = hist.filter(h => h.role === 'bot').slice(-3).map(h => h.text.toLowerCase().trim());
+    if (lastBotTexts.includes(aiReply.toLowerCase().trim())){
+      const retry = await askAI('You already said: "' + (lastBotTexts[lastBotTexts.length-1] || '') + '". Say something COMPLETELY DIFFERENT.', sys);
+      if (retry && !lastBotTexts.includes(retry.toLowerCase().trim())) aiReply = retry;
+      else return;
+    }
+    hist.push({ role:'user', text, ts:Date.now() });
+    /* v86 AUTO-TRANSLATE OUT: reply in the contact's own language */
+    const outText = await replyInLang(chatJid, chatLang, informalize(aiReply));
+    hist.push({ role:'bot',  text:outText, ts:Date.now() });
+    while (hist.length > USER_HISTORY_SIZE * 2) hist.shift();
+    userHistories.set(senderJid, hist);
+    persistDmHistories();
+    await sendBuffer(chatJid, { text: outText }, 2, 'slow', 'dmreply', true);
+    resetDailyStats(); dailyStats.dmsReplied++;
+    pushLog('info','ai','AI DM reply → AI-list number +' + (accessCtl.normalizePhone(senderJid) || senderJid));
+  } catch(e){ pushLog('warn','ai','AI DM chat failed: ' + e.message); }
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  v87 DM COMMAND SERVER — whitelisted non-admin numbers get
  *  COMMANDS ONLY (media downloads, translate, sites, fetch/dl).
  *  No persona chat, no greetings — anything that is not a command
  *  gets silence, exactly as the boss asked.
+ *  v92.9.11: numbers on config/ai-numbers.txt get AI chat on top.
  * ══════════════════════════════════════════════════════════════ */
 async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, isAdmin = false){
   /* v92.9.9g FLOODPROOF — admission control BEFORE any work: media asks
@@ -8892,6 +9380,28 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
     return;
   }
   if (await serveUniversalCommand(chatJid, senderJid, text, false, 'dm')) return;
+  /* v92.9.12 SITE PICKER — a bare number right after a menu resolves the
+   * pick ("2" = site 2 · "2 5" = site 2, five results). NSFW picks stay
+   * admin-only in DMs; everyone passes the same media gate + fuse as any
+   * other download so the jobs stay well-calculated. */
+  const dmPick = sitePicker.parsePick(chatJid, text);
+  if (dmPick && dmPick.valid){
+    if (dmPick.nsfw && !isAdmin){
+      await sendBuffer(chatJid, { text: 'NSFW picks work for the admin in DMs — use .play <song> here, or ask in the activated group.' }, 2, 'slow', 'dmreply', true);
+      return;
+    }
+    if (!isAdmin){
+      if (senderMediaFuseTripped(senderJid || chatJid, chatJid)) return;
+      const pGate = gateAllow('media', chatJid, false);
+      if (!pGate.ok || !gateMediaOpen()){
+        const note = gateBusyNote(chatJid, 'media', !gateMediaOpen() ? 0 : pGate.waitS);
+        if (note) await sendBuffer(chatJid, { text: note }, 2, 'fast', 'dmreply', false);
+        return;
+      }
+    }
+    await runPickedHunt(chatJid, dmPick);
+    return;
+  }
   /* v91: "next / more" continues this chat's last search (before intent
    * detection — "next" alone is not a media intent) */
   if (isNextRequest(text)){
@@ -8912,13 +9422,19 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
     }
     const handled = await runShortMediaCommand(chatJid, dmShort, {
       replyFn: (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true),
-      taskType: 'dmreply', senderJid,
+      taskType: 'dmreply', senderJid, phone,
       cat: localCat(senderJid, chatJid)
     });
     if (handled) return;
   }
   const intent = detectMediaIntent(text);
-  if (!intent || isVague(intent.query)){       /* not a command → silence */
+  if (!intent || isVague(intent.query)){       /* not a command → AI chat or silence */
+    /* v92.9.11: AI-ENABLED NUMBERS get persona chat in DM — commands
+     * already won above; only plain conversation reaches the AI. */
+    if (accessCtl.isAiNumber(senderJid || phone || chatJid)){
+      await serveAiDmChat(chatJid, senderJid, text);
+      return;
+    }
     pushLog('info','access','whitelisted DM, non-command — silent: ' + pushName);
     return;
   }
@@ -8928,6 +9444,18 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
   const searchQ = await dmEnglishQuery(chatJid, intent.query);
   const prefer = getUserSitePref(senderJid);
   pushLog('info','access','whitelisted DM command: ' + intent.type + ' "' + intent.query + '"' + (prefer ? ' [' + prefer + ']' : ''));
+  /* ═══ v92.9.12 SITE PICKER — pics/gifs/videos present the TESTED site
+   * menu in the member's language (the boss's flow). A user-pinned site
+   * (!site <name>) skips the menu; music stays direct. Videos boost the
+   * chat's region — ARABIC by default when nothing else is known. If
+   * nothing probed alive, the classic direct hunt continues below. ═══ */
+  if ((intent.type === 'image' || intent.type === 'gif' || intent.type === 'video') && !prefer){
+    const menuNsfw = isAdmin && detectNsfw(intent.query);
+    const menuSent = await sendSiteMenu(chatJid, intent.type, menuNsfw, {
+      query: searchQ, lang: getChatLang(chatJid), phone, taskType: 'dmreply', senderJid
+    });
+    if (menuSent) return;
+  }
   if (intent.type === 'music'){
     try {
       /* v88: online downloader chain (y2mate style) first — MP3
@@ -10386,6 +10914,36 @@ app.get('/loadtest/stats', function(req,res){
     floodThreshold: MESSAGE_FLOOD_THRESHOLD
   });
 });
+
+/* ═══ v92.9.11 LOADTEST KILL-SWITCH + BOUNDARY HOOKS — the real-life sim
+ * proves the guards without dying: 'killhook' replaces process.exit with
+ * a recorded reason; 'boundary-check' drives the EXACT function the send
+ * lane runs at the wire. LOADTEST only — production keeps process.exit. */
+if (LOADTEST){
+  app.post('/loadtest/killhook', function(req,res){
+    const mode = String((req.body || {}).mode || 'record');
+    if (mode === 'record'){
+      killSwitchHandler = function(reason, detail){ lt.kill = { reason, detail: String(detail||'').slice(0,200), ts: Date.now() }; };
+      res.json({ ok:true, mode:'record' });
+    } else {
+      killSwitchHandler = null;
+      res.json({ ok:true, mode:'production' });
+    }
+  });
+  app.get('/loadtest/killstate', function(req,res){
+    res.json({ recorded: lt.kill || null, lastKillSwitch });
+  });
+  app.post('/loadtest/boundary-check', function(req,res){
+    const b = req.body || {};
+    const cap = String(b.caption || '');
+    const content = b.media === 'audio' ? { audio: Buffer.alloc(64), caption: cap }
+      : b.media === 'video' ? { video: Buffer.alloc(64), caption: cap }
+      : b.media === 'document' ? { document: Buffer.alloc(64), caption: cap }
+      : { image: Buffer.alloc(64), caption: cap };
+    const r = sendBoundaryCheck(String(b.jid || ''), content, { nsfw: b.nsfw === true }, String(b.taskType || 'dmreply'));
+    res.json(r);
+  });
+}
 
 /* v68.5 REALISTIC SIM — inject ONE exact message into ONE account.
  * This is how the sim feeds vague / misspelt / incomplete human texts

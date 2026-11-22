@@ -5,3 +5,4 @@ downloads/
 .env
 __pycache__/
 .DS_Store
+dm_histories.json

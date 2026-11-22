@@ -1,0 +1,8 @@
+# ═══ AI-REPLY NUMBERS (v92.9.11) ═══
+# Numbers here get AI replies in DM (persona chat with memory), ON TOP
+# of the command service every whitelisted number already has.
+# The number must ALSO be in config/allowed-numbers.txt — commands
+# always win over chat: media intents, .play, next, !commands are
+# served first; only plain conversation reaches the AI.
++93772553417
++93765002356

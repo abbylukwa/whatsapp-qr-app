@@ -30,6 +30,18 @@ const NUMBERS_FILE = path.join(__dirname, 'config', 'allowed-numbers.txt');
 const GROUPS_FILE  = path.join(__dirname, 'config', 'allowed-groups.txt');
 const BLOCKED_FILE = path.join(__dirname, 'config', 'blocked-groups.txt');
 const STATE_FILE   = path.join(__dirname, 'data', 'access-state.json');
+/* v92.9.11 — the boss: "any blocked number shall not and will not receive
+ * any message especially groups" and "add that number to be able to
+ * download files in DM and ai replies also". Two new lists:
+ *   · config/blocked-numbers.txt — HARD blacklist. No reply, no read
+ *     receipt, no media, no broadcast, no pending resolve — checked in
+ *     handleMessage BEFORE the message is even opened, and AGAIN inside
+ *     sendBuffer so no scheduler/broadcast/admin path can bypass.
+ *   · config/ai-numbers.txt — whitelisted numbers that ALSO get AI
+ *     replies in DM (allowed-numbers.txt is still required for commands).
+ *     Listed numbers otherwise get COMMANDS-ONLY service. */
+const BLOCKED_NUMBERS_FILE = path.join(__dirname, 'config', 'blocked-numbers.txt');
+const AI_NUMBERS_FILE      = path.join(__dirname, 'config', 'ai-numbers.txt');
 
 /* ═══ v92.9.6 HARD GROUP BLACKLIST ═══
  * The boss: the bot "is sending messages to the wrong … groups — in the
@@ -59,6 +71,29 @@ const NUMBERS_HEADER = [
   '# Formats: +27614159817 · 27614159817 · 0771122334 (Zimbabwe local)',
   '# The admin number is added automatically at every boot (do not remove).',
   '# Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).',
+  ''
+].join('\n');
+
+/* v92.9.11 HARD NUMBER BLACKLIST header */
+const BLOCKED_NUMBERS_HEADER = [
+  '# ═══ BLOCKED NUMBERS (v92.9.11) ═══',
+  '# The bot NEVER sends anything to these numbers — no reply, no read',
+  '# receipt, no media, no broadcast, no admin echo. One number per line:',
+  '# Formats: +263771234567 · 263771234567 (any spacing is fine).',
+  '# The check runs BEFORE the message is even opened, and again at the',
+  '# final send boundary — no path can bypass it. The admin number is',
+  '# refused here on purpose (you cannot block yourself by mistake).',
+  ''
+].join('\n');
+
+/* v92.9.11 AI-ENABLED DM NUMBERS header */
+const AI_NUMBERS_HEADER = [
+  '# ═══ AI-REPLY NUMBERS (v92.9.11) ═══',
+  '# Numbers here get AI replies in DM (persona chat with memory), ON TOP',
+  '# of the command service every whitelisted number already has.',
+  '# The number must ALSO be in config/allowed-numbers.txt — commands',
+  '# always win over chat: media intents, .play, next, !commands are',
+  '# served first; only plain conversation reaches the AI.',
   ''
 ].join('\n');
 
@@ -165,6 +200,83 @@ function isAllowedNumber(phoneOrJid, adminPhone){
   if (adm && p === adm) return true;                     /* admin always allowed */
   return allowedNumbers.includes(p);
 }
+
+/* ── v92.9.11 BLOCKED NUMBERS + AI-REPLY NUMBERS ───────────────────── */
+let blockedNumbers = [];                                 /* normalized digits */
+let aiNumbers      = [];                                 /* normalized digits */
+function loadBlockedNumbers(adminPhone){
+  const adm = normalizePhone(adminPhone);
+  const raw = readLines(BLOCKED_NUMBERS_FILE);
+  /* the admin can never be blacklisted — a self-block would make the bot
+   * mute its own boss and look like a wrong-recipient bug */
+  blockedNumbers = [...new Set(raw.map(normalizePhone).filter(Boolean))].filter(p => p !== adm);
+  if (adm && raw.some(l => normalizePhone(l) === adm)){
+    writeLines(BLOCKED_NUMBERS_FILE, BLOCKED_NUMBERS_HEADER,
+      raw.filter(l => normalizePhone(l) !== adm));       /* silently strip */
+  }
+  return blockedNumbers;
+}
+function loadAiNumbers(){
+  aiNumbers = [...new Set(readLines(AI_NUMBERS_FILE).map(normalizePhone).filter(Boolean))];
+  return aiNumbers;
+}
+function isBlockedNumber(phoneOrJid){
+  const p = normalizePhone(phoneOrJid);
+  if (!p) return false;
+  return blockedNumbers.includes(p);
+}
+function isAiNumber(phoneOrJid){
+  const p = normalizePhone(phoneOrJid);
+  if (!p) return false;
+  return aiNumbers.includes(p);
+}
+function addBlockedNumber(input, adminPhone){
+  const p = normalizePhone(input);
+  if (!p) return { ok: false, error: 'not a phone number: ' + input };
+  const adm = normalizePhone(adminPhone);
+  if (adm && p === adm) return { ok: false, error: 'that is the admin number — it can never be blocked' };
+  if (!readLines(BLOCKED_NUMBERS_FILE).length){
+    writeLines(BLOCKED_NUMBERS_FILE, BLOCKED_NUMBERS_HEADER, ['+' + p]);
+  } else {
+    const raw = readLines(BLOCKED_NUMBERS_FILE);
+    if (raw.map(normalizePhone).filter(Boolean).includes(p)) return { ok: true, added: false, number: p, count: blockedNumbers.length };
+    writeLines(BLOCKED_NUMBERS_FILE, BLOCKED_NUMBERS_HEADER, [...raw, '+' + p]);
+  }
+  loadBlockedNumbers(adminPhone);
+  return { ok: true, added: true, number: p, count: blockedNumbers.length };
+}
+function removeBlockedNumber(input, adminPhone){
+  const p = normalizePhone(input);
+  if (!p) return { ok: false, error: 'not a phone number: ' + input };
+  const raw = readLines(BLOCKED_NUMBERS_FILE);
+  const left = raw.filter(l => normalizePhone(l) !== p);
+  if (left.length === raw.length) return { ok: false, error: 'not in the list: +' + p };
+  writeLines(BLOCKED_NUMBERS_FILE, BLOCKED_NUMBERS_HEADER, left);
+  loadBlockedNumbers(adminPhone);
+  return { ok: true, removed: p, count: blockedNumbers.length };
+}
+function addAiNumber(input){
+  const p = normalizePhone(input);
+  if (!p) return { ok: false, error: 'not a phone number: ' + input };
+  const raw = readLines(AI_NUMBERS_FILE);
+  if (raw.map(normalizePhone).filter(Boolean).includes(p)) return { ok: true, added: false, number: p, count: aiNumbers.length };
+  if (!raw.length) writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, ['+' + p]);
+  else writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, [...raw, '+' + p]);
+  loadAiNumbers();
+  return { ok: true, added: true, number: p, count: aiNumbers.length };
+}
+function removeAiNumber(input){
+  const p = normalizePhone(input);
+  if (!p) return { ok: false, error: 'not a phone number: ' + input };
+  const raw = readLines(AI_NUMBERS_FILE);
+  const left = raw.filter(l => normalizePhone(l) !== p);
+  if (left.length === raw.length) return { ok: false, error: 'not in the list: +' + p };
+  writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, left);
+  loadAiNumbers();
+  return { ok: true, removed: p, count: aiNumbers.length };
+}
+function blockedNumberList(){ return blockedNumbers.slice(); }
+function aiNumberList(){ return aiNumbers.slice(); }
 
 /* ── groups ─────────────────────────────────────────────────────────── */
 let allowedGroupCodes = [];                              /* invite codes      */
@@ -362,9 +474,19 @@ function init(adminPhone){
   if (!fs.existsSync(BLOCKED_FILE)){
     writeLines(BLOCKED_FILE, BLOCKED_HEADER, PERMANENT_BLOCKED_LINES);
   }
+  /* v92.9.11: fresh blacklist/AI files with headers on first boot */
+  if (!fs.existsSync(BLOCKED_NUMBERS_FILE)){
+    writeLines(BLOCKED_NUMBERS_FILE, BLOCKED_NUMBERS_HEADER, []);
+  }
+  if (!fs.existsSync(AI_NUMBERS_FILE)){
+    writeLines(AI_NUMBERS_FILE, AI_NUMBERS_HEADER, []);
+  }
   loadNumbers(adminPhone);
   loadGroups();
-  return { numbers: allowedNumbers.length, groups: allowedGroupCodes.length + allowedGroupJids.length, blocked: blockedLines.length };
+  loadBlockedNumbers(adminPhone);
+  loadAiNumbers();
+  return { numbers: allowedNumbers.length, groups: allowedGroupCodes.length + allowedGroupJids.length, blocked: blockedLines.length,
+           blockedNumbers: blockedNumbers.length, aiNumbers: aiNumbers.length };
 }
 
 module.exports = {
@@ -375,6 +497,9 @@ module.exports = {
   allowedGroupCodes: () => allowedGroupCodes, allowedGroupJids: () => allowedGroupJids,
   /* v92.9.6 blacklist + request-activation */
   isBlockedChat, nameIsBlocked, addBlocked, removeBlocked, blockedEntries, BLOCKED_FILE,
+  /* v92.9.11 number blacklist + AI-reply numbers */
+  loadBlockedNumbers, isBlockedNumber, addBlockedNumber, removeBlockedNumber, blockedNumberList, BLOCKED_NUMBERS_FILE,
+  loadAiNumbers, isAiNumber, addAiNumber, removeAiNumber, aiNumberList, AI_NUMBERS_FILE,
   activateGroup, deactivateGroup, isGroupActive, activeGroupList,
   setDesignated, getDesignated, isDesignated, setNsfwActivated, isNsfwActivated,
   dmPolicy, shouldReplyGroup, groupDecision, HOME_LANGS,

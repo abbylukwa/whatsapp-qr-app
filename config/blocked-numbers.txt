@@ -1,0 +1,7 @@
+# ═══ BLOCKED NUMBERS (v92.9.11) ═══
+# The bot NEVER sends anything to these numbers — no reply, no read
+# receipt, no media, no broadcast, no admin echo. One number per line:
+# Formats: +263771234567 · 263771234567 (any spacing is fine).
+# The check runs BEFORE the message is even opened, and again at the
+# final send boundary — no path can bypass it. The admin number is
+# refused here on purpose (you cannot block yourself by mistake).

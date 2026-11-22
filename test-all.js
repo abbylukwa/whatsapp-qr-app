@@ -377,13 +377,31 @@ async function main() {
     ]);
     assert(a.result === 'RESULT' && b.result === 'RESULT', 'both callers must get the result');
     assert(runs === 1, 'duplicate was fetched twice (' + runs + ' runs)');
-    /* different queries run for real, never more than MAX_ACTIVE at once */
+    /* different queries from DIFFERENT chats run for real, never more than
+     * MAX_ACTIVE at once (v92.9.9g per-chat cap: one chat holds max 2) */
     const many = [];
-    for (let i = 0; i < 6; i++) many.push(MQ.run('cap@x', 'image', 'query ' + i, job(30, 'ok' + i)));
+    for (let i = 0; i < 6; i++) many.push(MQ.run('cap' + i + '@x', 'image', 'query ' + i, job(30, 'ok' + i)));
     const all = await Promise.all(many);
     assert(all.every(r => typeof r.result === 'string'), 'results lost');
     assert(maxConcurrent <= MQ.MAX_ACTIVE, 'concurrency cap blown: ' + maxConcurrent);
     assert(runs >= 2, 'different queries must actually run');
+    /* v92.9.9g: a chat holding 2 WAITING jobs gets an honest per-chat
+     * refusal — the third request from the SAME chat never queues.
+     * First pin BOTH download slots with other chats' slow jobs, so the
+     * same chat's queue can fill to its cap while nothing drains. */
+    const slow = job(250, 'slow');
+    const o1 = MQ.run('pin1@x', 'image', 'q pin 1', slow);
+    const o2 = MQ.run('pin2@x', 'image', 'q pin 2', slow);
+    await new Promise(r => setTimeout(r, 10));          /* both slots now active */
+    const hold = [
+      MQ.run('busy@x', 'image', 'q hold 1', job(30, 'h1')),
+      MQ.run('busy@x', 'image', 'q hold 2', job(30, 'h2'))
+    ];
+    await new Promise(r => setTimeout(r, 10));          /* busy@x queue now holds 2 */
+    const rb = await MQ.run('busy@x', 'image', 'q third', job(30, 'should-not-run'));
+    assert(rb.result && rb.result.ok === false && /waiting/.test(rb.result.error || ''),
+      'third same-chat request must be refused honestly, got ' + JSON.stringify(rb.result));
+    await Promise.all(hold); await Promise.all([o1, o2]);
   });
 
   /* ── 10. videoScheduler config-driven queries ──────────── */

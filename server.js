@@ -1873,7 +1873,44 @@ function imageTooSmall(buf){
   }
   return null;
 }
+/* ═══ v92.9.10 DOWNLOAD SEMAPHORE — the OOM guard ═══
+ * Render kills the box the moment RSS crosses 512MB. The old chain ran every
+ * media hunt's download in its own handler slot: HANDLER_CONCURRENCY=16 × a
+ * 34MB arraybuffer + Buffer copy + Baileys base64 (~100MB peak each) meant up
+ * to ~1.6GB of concurrent bytes on a 512MB box. Every media flood was an OOM
+ * kill, and every OOM kill wiped the dedup/binding maps — the restart then
+ * re-served stale redelivered requests (the "my download landed in the wrong
+ * chat" reruns). Now ALL bot-side media downloads — images, gifs, relevant
+ * batches, admin previews, pending resolves — share ONE global semaphore
+ * (default 2 slots) and refuse to START while the memory guard is high
+ * (gateMediaOpen() = RSS below MEM_GUARD_MB). In-flight downloads finish;
+ * nothing new begins until the gate reopens. Music/video send phase rides
+ * the slow lane (one Baileys URL fetch at a time) — already serialized. */
+const DL_CONCURRENCY = Math.max(1, parseInt(process.env.MEDIA_DL_CONCURRENCY || '2', 10));
+let dlActive = 0;
+const dlWaiters = [];
+function withDlSlot(fn){
+  return new Promise((resolve, reject) => {
+    dlWaiters.push({ fn, resolve, reject });
+    pumpDlSlots();
+  });
+}
+function pumpDlSlots(){
+  while (dlActive < DL_CONCURRENCY && dlWaiters.length){
+    const w = dlWaiters.shift();
+    dlActive++;
+    Promise.resolve().then(w.fn).then(w.resolve, w.reject).finally(() => { dlActive--; pumpDlSlots(); });
+  }
+}
 async function downloadAndCheck(url, maxBytes = MEDIA_MAX_BYTES, expectType = 'image'){
+  /* v92.9.10: no NEW downloads while the memory guard is closed — the ones
+   * already running still finish; fresh media waits for the gate to reopen. */
+  if (typeof gateMediaOpen === 'function' && !gateMediaOpen()){
+    throw new Error('memory guard — media is paused for a minute, resend shortly');
+  }
+  return withDlSlot(() => downloadAndCheckInner(url, maxBytes, expectType));
+}
+async function downloadAndCheckInner(url, maxBytes, expectType){
   async function grab(u){
     const resp = await axios.get(u, {
       responseType: 'arraybuffer', timeout: 60000,
@@ -2046,6 +2083,27 @@ function rememberVideoSearch(chatJid, results, query){
   if (lastSearchByChat.size > 500){
     lastSearchByChat.delete(lastSearchByChat.keys().next().value);
   }
+}
+
+/* ═══ v92.9.10 STALE-REDELIVERY GUARD — the wrong-recipient rerun ═══
+ * When Render OOM-kills the box, WhatsApp re-delivers every message the dead
+ * process never acked. Serving those OLD media intents re-opens hunts for
+ * requests from half an hour ago — and with several chats' stale asks
+ * interleaving across parallel handlers, downloads land in chats that did
+ * not ask THIS time (exactly the misbehaviour reported after the last
+ * memory kill). Media intents older than STALE_MEDIA_MS are dropped with
+ * ONE honest note per chat per minute — a redelivery storm stays quiet. */
+const STALE_MEDIA_MS = 10 * 60 * 1000;
+const staleDropNoteAt = new Map();      /* chatJid -> last note ts */
+function staleRedeliveryDrop(chatJid, msgTsMs){
+  const ageMin = msgTsMs ? Math.max(1, Math.round((Date.now() - msgTsMs) / 60000)) : 0;
+  pushLog('warn','guard','stale media request dropped (message ' + ageMin + 'min old — sent while I was down): ' + (getGroupName(chatJid) || chatJid));
+  const now = Date.now();
+  if (now - (staleDropNoteAt.get(chatJid) || 0) < 60000) return;
+  staleDropNoteAt.set(chatJid, now);
+  if (staleDropNoteAt.size > 500) staleDropNoteAt.delete(staleDropNoteAt.keys().next().value);
+  sendBuffer(chatJid, { text: '⚠️ That request was sent while I was down (' + ageMin + 'min old) and is dropped on purpose — resend it fresh.' },
+    3, 'fast', (typeof chatJid === 'string' && chatJid.endsWith('@g.us')) ? 'group' : 'dmreply', false).catch(() => {});
 }
 /* Send the next `count` still-unsent results of THIS chat's remembered
  * search. Returns how many actually went out. */
@@ -7131,6 +7189,10 @@ async function handleMessage(msg){
 
   const chatJid = msg.key?.remoteJid;
   if (!chatJid) return;
+  /* v92.9.10: message age — stale-redelivery detection (see staleRedeliveryDrop) */
+  const _msgTsRaw = Number(msg.messageTimestamp || 0);
+  const redelivTsMs = _msgTsRaw > 1e12 ? _msgTsRaw : _msgTsRaw * 1000;
+  const redelivStale = redelivTsMs > 0 && (Date.now() - redelivTsMs) > STALE_MEDIA_MS;
   /* v67: bound the chat sets — a runaway 500 msg/s feed must never
    * grow memory without limits */
   if (activeChats.size < ACTIVE_SET_CAP) activeChats.add(chatJid);
@@ -7746,6 +7808,10 @@ async function handleMessage(msg){
       if (isNsfw && !isAdmin && !nsfwOpen){ await sendBuffer(chatJid, { text: await t2(chatJid,'Not right now, try after 9pm') }, 3, 'slow', 'group', true); return; }
       const gIntent = detectMediaIntent(gText);
       if (gIntent && !isVague(gIntent.query)){
+        /* v92.9.10 stale-redelivery + per-sender fuse — media intents only,
+         * admins exempt; both guards note at most once per 20-60s per chat. */
+        if (redelivStale && !isAdmin){ staleRedeliveryDrop(chatJid, redelivTsMs); return; }
+        if (!isAdmin && senderMediaFuseTripped(senderJid || chatJid, chatJid)) return;
         /* v92.9.9g FLOODPROOF — group media asks pass the same gate as DMs:
          * token bucket + memory guard. Refusal is an instant honest note
          * (1 per 20s per chat), NOT a queued job that eats 512MB. */
@@ -8380,6 +8446,32 @@ mediaQueue.init(pushLog);
  *                            hunt inline (see HANDLER_CONCURRENCY below)
  *  Admin messages bypass every bucket — the boss is never throttled.
  * ══════════════════════════════════════════════════════════════ */
+/* ═══ v92.9.10 PER-SENDER MEDIA FUSE — flood kills, part 2 ═══
+ * One member firing 12 media commands per second used to pin both download
+ * slots and both queue slots for minutes, starving every other chat and
+ * walking RSS to the 512MB wire. Now: max MEDIA_FUSE_MAX media intents per
+ * MEDIA_FUSE_MS per sender (admins exempt). The refusal note is throttled
+ * 1/20s per chat so a command flood never becomes a reply flood. */
+const MEDIA_FUSE_MAX = Math.max(1, parseInt(process.env.MEDIA_FUSE_MAX || '3', 10));
+const MEDIA_FUSE_MS  = Math.max(10, parseInt(process.env.MEDIA_FUSE_S || '30', 10)) * 1000;
+const mediaFuseHits   = new Map();    /* senderKey -> [ts] */
+const mediaFuseNoteAt = new Map();    /* chatJid  -> last note ts */
+function senderMediaFuseTripped(senderKey, chatJid){
+  if (!senderKey) return false;
+  const now = Date.now();
+  const arr = (mediaFuseHits.get(senderKey) || []).filter(t => now - t < MEDIA_FUSE_MS);
+  const tripped = arr.length >= MEDIA_FUSE_MAX;
+  arr.push(now);
+  mediaFuseHits.set(senderKey, arr);
+  if (mediaFuseHits.size > 2000) mediaFuseHits.delete(mediaFuseHits.keys().next().value);
+  if (tripped && now - (mediaFuseNoteAt.get(chatJid) || 0) > 20000){
+    mediaFuseNoteAt.set(chatJid, now);
+    if (mediaFuseNoteAt.size > 500) mediaFuseNoteAt.delete(mediaFuseNoteAt.keys().next().value);
+    sendBuffer(chatJid, { text: '⏳ ' + MEDIA_FUSE_MAX + ' downloads per 30s per person — wait a moment and resend your last one.' },
+      3, 'fast', (typeof chatJid === 'string' && chatJid.endsWith('@g.us')) ? 'group' : 'dmreply', false).catch(() => {});
+  }
+  return tripped;
+}
 const GATE_MEDIA = {
   cap: Math.max(2, parseInt(process.env.GATE_MEDIA_BURST || '10', 10)),
   refillMs: Math.max(500, parseInt(process.env.GATE_MEDIA_REFILL_MS || '4000', 10))
@@ -8777,6 +8869,13 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
    * working on it (dup shield). Rejected asks get ONE busy note per 20s
    * per chat — never a reply storm back into the flood. */
   const dmIsMedia = !!(parseShortMediaCommand(text) || detectMediaIntent(text) || isNextRequest(text));
+  /* v92.9.10 stale-redelivery + per-sender fuse (mirror of the group branch) */
+  const _dmTsRaw = Number(msg.messageTimestamp || 0);
+  const dmTsMs = _dmTsRaw > 1e12 ? _dmTsRaw : _dmTsRaw * 1000;
+  if (dmIsMedia && !isAdmin){
+    if (dmTsMs > 0 && (Date.now() - dmTsMs) > STALE_MEDIA_MS){ staleRedeliveryDrop(chatJid, dmTsMs); return; }
+    if (senderMediaFuseTripped(senderJid || chatJid, chatJid)) return;
+  }
   const dGate = gateAllow(dmIsMedia ? 'media' : 'text', chatJid, isAdmin);
   if (!dGate.ok){
     const note = gateBusyNote(chatJid, dmIsMedia ? 'media' : 'text', dGate.waitS);

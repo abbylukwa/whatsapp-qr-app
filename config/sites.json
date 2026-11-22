@@ -1289,22 +1289,25 @@
       "category": "zimbabwe"
     },
     {
-      "name": "afghan",
-      "url": "https://xhamster.com/search/afghan",
+      "name": "afghan-xhamster-img",
+      "url": "https://xhamster.com/search/afghan {query}",
       "kind": "images",
-      "nsfw": true
+      "nsfw": true,
+      "category": "afghan"
     },
     {
-      "name": "afghan-vid",
-      "url": "https://xhamster.com/search/afghan",
+      "name": "afghan-xhamster-vid",
+      "url": "https://xhamster.com/search/afghan {query}",
       "kind": "videos",
-      "nsfw": true
+      "nsfw": true,
+      "category": "afghan"
     },
     {
-      "name": "afghan-gif",
-      "url": "https://www.xvideos.com/?k=afghan",
+      "name": "afghan-xvideos-gif",
+      "url": "https://www.xvideos.com/?k=afghan {query}",
       "kind": "gifs",
-      "nsfw": true
+      "nsfw": true,
+      "category": "afghan"
     }
   ],
   "categoryShares": {

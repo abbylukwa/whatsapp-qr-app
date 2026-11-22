@@ -2282,6 +2282,35 @@ const DROP_VIDEO_CAP = 60;    /* total replace attempts across all sites */
 const DROP_IMAGE_CAP = 40;
 const DROP_PAUSE_MS  = [7000, 13000];   /* human pace between sends */
 const DROP_TRY_PAUSE = [2500, 5000];    /* faster when replacing a failure */
+
+/* v92.9.12b — the boss: "after sending make sure to send the help message
+ * in Persian for those numbers to later on know how to download".
+ * Picker examples use ASCII digits on purpose — the menu parser only
+ * accepts "2" / "2 5" (ASCII \d). */
+const DROP_HELP_FA = [
+  '🤖 *سلام! این فایل‌ها برای تو فرستاده شد — دانلود رایگان است*',
+  '',
+  '🎬 *ویدیو* — بنویس:  ویدیو <نام> بفرست',
+  '     مثال:  ویدیو کابل بفرست',
+  '🖼 *عکس* — بنویس:  عکس <نام> بفرست',
+  '     مثال:  عکس هرات بفرست',
+  '🎞 *گیف* — بنویس:  گیف <نام> بفرست',
+  '🎵 *آهنگ* — بنویس:  .play <نام آهنگ> mp3',
+  '⏭ *بیشتر* — فقط بنویس:  next',
+  '',
+  '🌐 *انتخاب سایت:* وقتی عکس/ویدیو بخواهی، اول لیست سایت‌ها را می‌فرستم —',
+  'سایت‌ها همان لحظه تست می‌شوند و فقط سایت‌های سالم در لیست می‌آیند.',
+  'با شماره جواب بده:',
+  '     «2» → از سایت شماره 2',
+  '     «2 5» → از سایت شماره 2، ۵ نتیجه',
+  '',
+  '💬 *گپ:* فقط فارسی بنویس، جواب می‌دهم.',
+  'هر بار یک درخواست — وقتی فایل آماده شد برایت می‌فرستم.'
+].join('\n');
+async function dropAdminNote(text){
+  try { await sendBuffer(ADMIN_JID, { text }, 2, 'fast', 'deploydrop', false, { force: true }); }
+  catch(e){ pushLog('warn', 'drop', 'admin note failed: ' + e.message); }
+}
 let deployDropRunning = false;
 function dropSleep(range){
   return new Promise(r => setTimeout(r, range[0] + Math.random() * (range[1] - range[0])));
@@ -2321,8 +2350,11 @@ async function runDeployDrop(){
   const queriesI = ['persian', 'iranian', 'afghan', 'arab'];
   try {
     pushLog('info', 'drop', 'DEPLOY DROP v' + DROP_VERSION + ' starting — 20 videos + 10 images → 2 numbers, one job at a time');
-    for (const target of DROP_TARGETS){
+    await dropAdminNote('📦 DEPLOY DROP v' + DROP_VERSION + ' starting — 20 videos + 10 images to ' + DROP_TARGETS.length + ' numbers, one file at a time. Progress reports come here; each number gets a Persian help card after its delivery.');
+    for (let ti = 0; ti < DROP_TARGETS.length; ti++){
+      const target = DROP_TARGETS[ti];
       const targetPhone = target.split('@')[0];
+      await dropAdminNote('→ target ' + (ti + 1) + '/' + DROP_TARGETS.length + ': +' + targetPhone);
       markMediaRequest(target);                    /* the drop IS a request — binding guard passes */
       const vSites = dropSitePool('videos');
       const iSites = dropSitePool('images');
@@ -2347,6 +2379,7 @@ async function runDeployDrop(){
               });
               videos++; vPolicyStreak = 0;
               pushLog('success', 'drop', 'video ' + videos + '/' + DROP_VIDEOS + ' → +' + targetPhone + ' (' + (cand.site || site) + ')');
+              if (videos % 5 === 0) await dropAdminNote('📦 +' + targetPhone + ': ' + videos + '/' + DROP_VIDEOS + ' videos delivered');
               await dropSleep(DROP_PAUSE_MS);        /* one job at a time, paced */
             } catch(e){
               pushLog('warn', 'drop', 'video failed — REPLACED with the next candidate → +' + targetPhone + ': ' + e.message);
@@ -2375,6 +2408,7 @@ async function runDeployDrop(){
             if (sent){
               images++;
               pushLog('success', 'drop', 'image ' + images + '/' + DROP_IMAGES + ' → +' + targetPhone);
+              if (images % 5 === 0) await dropAdminNote('📦 +' + targetPhone + ': ' + images + '/' + DROP_IMAGES + ' images delivered');
               await dropSleep(DROP_PAUSE_MS);
             } else {
               pushLog('warn', 'drop', 'image failed — REPLACED with the next candidate → +' + targetPhone);
@@ -2384,10 +2418,17 @@ async function runDeployDrop(){
         }
       }
       pushLog('info', 'drop', '+' + targetPhone + ' done: ' + videos + '/' + DROP_VIDEOS + ' videos, ' + images + '/' + DROP_IMAGES + ' images (' + vTries + ' video tries, ' + iTries + ' image tries)');
+      /* v92.9.12b: the boss — teach the number how to download (Persian) */
+      try {
+        await sendBuffer(target, { text: DROP_HELP_FA }, 2, 'slow', 'deploydrop', true, { force: true });
+        pushLog('success', 'drop', 'Persian help card → +' + targetPhone);
+      } catch(helpE){ pushLog('warn', 'drop', 'help card failed → +' + targetPhone + ': ' + helpE.message); }
+      await dropAdminNote('✅ +' + targetPhone + ' DONE — ' + videos + '/' + DROP_VIDEOS + ' videos · ' + images + '/' + DROP_IMAGES + ' images (' + vTries + ' video tries, ' + iTries + ' image tries) · Persian help card sent');
       await dropSleep(DROP_PAUSE_MS);
     }
     dropMarkerWrite();
     pushLog('success', 'drop', 'DEPLOY DROP v' + DROP_VERSION + ' complete — will not run again');
+    await dropAdminNote('🏁 DEPLOY DROP v' + DROP_VERSION + ' COMPLETE — will not run again (marker saved).');
   } catch(e){
     pushLog('error', 'drop', 'deploy drop aborted: ' + e.message + ' (will retry next boot — nothing was marked done)');
   } finally {

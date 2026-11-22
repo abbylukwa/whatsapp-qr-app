@@ -121,7 +121,11 @@ function captureFolder(folder){
     const raw = fs.readFileSync(p, 'utf8');
     const creds = JSON.parse(raw);
     if (!creds || !creds.noiseKey) return null;
-    if (creds.registered === false) return null;   /* QR shown but not scanned yet — nothing to back up */
+    /* v92.9.10: Baileys 7 can leave `registered` false while `me.id` IS set
+     * (pairing complete, device registered) — the old gate silently kept
+     * pushes at 0 through a whole WORKING session, so a 401 logout left
+     * nothing to restore. me.id is proof of a finished pairing. */
+    if (creds.registered === false && !(creds.me && creds.me.id)) return null;   /* QR shown but not scanned yet — nothing to back up */
     return JSON.stringify({ v: 1, files: { 'creds.json': raw } });
   } catch (e) { return null; }
 }

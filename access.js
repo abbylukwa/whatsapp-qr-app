@@ -432,6 +432,34 @@ function isDesignated(chatJid){ return !!state.designated && chatJid === state.d
 function setNsfwActivated(v){ state.activated = !!v; saveState(); return state.activated; }
 function isNsfwActivated(){ return !!state.activated; }
 
+/* ═══ v92.9.10 PER-GROUP CAPABILITIES — the boss approves AI / NSFW /
+ * music per group from the discovery DM ("yes" = allow all three, or
+ * pick with "ai yes" / "music no"). Defaults keep the old service up:
+ * AI chatter OFF and NSFW OFF until the admin allows them, music ON
+ * (media requests were always the core service in activated groups). ═══ */
+function setGroupFeatures(chatJid, feats){
+  if (!isGroupJid(chatJid)) return null;
+  state.groupFeatures = state.groupFeatures || {};
+  const prev = state.groupFeatures[chatJid] || {};
+  state.groupFeatures[chatJid] = {
+    ai:    feats.ai    !== undefined ? !!feats.ai    : !!prev.ai,
+    nsfw:  feats.nsfw  !== undefined ? !!feats.nsfw  : !!prev.nsfw,
+    music: feats.music !== undefined ? !!feats.music : (prev.music !== false),
+    by:    feats.by    || prev.by || 'admin',
+    ts: Date.now()
+  };
+  saveState();
+  return state.groupFeatures[chatJid];
+}
+function getGroupFeatures(chatJid){
+  if (state.groupFeatures && state.groupFeatures[chatJid]) return state.groupFeatures[chatJid];
+  return { ai: false, nsfw: false, music: true };   /* default: silent on chatter, media works */
+}
+function groupFeature(chatJid, key){
+  const f = getGroupFeatures(chatJid);
+  return !!f[key];
+}
+
 /* ── policies (pure — the crash tests exercise these directly) ──────── */
 /* DM: 'full' (admin) · 'commands' (listed number) · 'ignore' (everyone else) */
 function dmPolicy(senderJid, isAdmin){
@@ -502,6 +530,7 @@ module.exports = {
   loadAiNumbers, isAiNumber, addAiNumber, removeAiNumber, aiNumberList, AI_NUMBERS_FILE,
   activateGroup, deactivateGroup, isGroupActive, activeGroupList,
   setDesignated, getDesignated, isDesignated, setNsfwActivated, isNsfwActivated,
+  setGroupFeatures, getGroupFeatures, groupFeature,
   dmPolicy, shouldReplyGroup, groupDecision, HOME_LANGS,
   NUMBERS_FILE, GROUPS_FILE, STATE_FILE
 };

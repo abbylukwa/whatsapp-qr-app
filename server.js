@@ -2753,6 +2753,17 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
     breadKillSwitch('blocked-number', 'send → +' + accessCtl.normalizePhone(jid) + ' [' + taskType + ']');
     return Promise.reject(new Error('number-blacklisted'));
   }
+  /* ═══ v92.9.10 DM TRIPLE-VERIFY — the boss: "verify 3 times if it's
+   * allowed to DM that number or group before sending anything." Every
+   * direct-message send funnels through here: three independent checks
+   * (allow-list/admin membership, blocklist, socket+pause state), ALL
+   * must pass or the send is refused and logged. ═══ */
+  if (!LOADTEST && typeof jid === 'string' && !jid.endsWith('@g.us') && !jid.endsWith('@broadcast')){
+    try {
+      const g = dmGuardTriple(jid);
+      if (!g.ok) return Promise.reject(new Error('dm-guard: ' + g.reason));
+    } catch (e) { /* guard infra not ready during module init — boot-time sends pass */ }
+  }
   /* v67: main-group lock for conversational group sends. Broadcasts,
    * admin !send and media pushes to other groups stay allowed.
    * v92.9.6b: groups the boss ACTIVATED are exempt now — his multi-group
@@ -4396,6 +4407,7 @@ function discoverGroup(jid){
   lastGreetingAt.set(jid, Date.now());
   saveGroups(); resetDailyStats(); dailyStats.discovered++;
   pushLog('success','group',`Discovered ${jid}`);
+  maybeAskAdminAboutGroup(jid);   /* v92.9.10: DM the admin — allow AI/NSFW/music here? */
   return true;
 }
 
@@ -7443,6 +7455,181 @@ function groupChatterSys(){
     'never say you are an AI or a bot. If the message is pure spam, a chain forward, ' +
     'or really not aimed at anyone, output exactly SKIP and nothing else.';
 }
+/* ═══ v92.9.10 ADMIN APPROVAL ENGINE ═══
+ * The boss's rules, verbatim:
+ *  · "once the bot is online it should DM the admins after a couple of
+ *    minutes with the list of groups which the admin is in";
+ *  · "once a group is discovered it's supposed to DM admin asking to
+ *    allow ai nsfw or music in that group — auto disable all groups,
+ *    this is to activate once activated";
+ *  · "once activated then the admin is supposed to send something in
+ *    the group like to verify activation like nsfw.play";
+ *  · "verify 3 times if it's allowed to DM that number or group before
+ *    sending anything."
+ * Everything the bot sends UNSOLICITED into a DM goes through
+ * dmGuardTriple — three passes over the same checks, all must pass. ═══ */
+function isKnownAdminJid(jid){
+  const core = String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+  if (!core) return false;
+  if (core === ADMIN_PHONE) return true;
+  for (const a of adminLids){
+    if (String(a).replace(/\D/g, '') === core) return true;
+  }
+  return false;
+}
+function dmAllowReason(jid){
+  if (!jid || typeof jid !== 'string') return 'no jid';
+  if (botPaused || Date.now() < botOfflineUntil) return 'bot paused or offline';
+  if (connectionStatus !== 'connected' || !sock) return 'socket not connected';
+  if (String(jid).endsWith('@g.us')){
+    if (accessCtl.isBlockedChat(jid, getGroupName(jid))) return 'group blocked';
+    if (!accessCtl.isGroupActive(jid)) return 'group not activated';
+    return '';
+  }
+  if (accessCtl.isBlockedChat(jid, '')) return 'number blocked';
+  if (isKnownAdminJid(jid)) return '';
+  if (accessCtl.dmPolicy(jid, false) !== 'ignore') return '';
+  return 'number not on the DM allow-list';
+}
+function dmGuardTriple(jid){
+  let verdict = 'unknown';
+  for (let i = 0; i < 3; i++){                 /* the boss: verify 3 times */
+    verdict = dmAllowReason(jid);
+    if (verdict !== '') break;
+  }
+  if (verdict !== ''){
+    pushLog('warn', 'guard', 'TRIPLE-VERIFY refused DM → ' + jid + ' (' + verdict + ')');
+    return { ok: false, reason: verdict };
+  }
+  return { ok: true };
+}
+function adminDmTargets(){
+  const t = [];
+  if (ADMIN_PHONE) t.push(ADMIN_PHONE + '@s.whatsapp.net');
+  for (const a of adminLids){
+    const s = String(a);
+    if (!s) continue;
+    t.push(s.includes('@') ? s : (s + '@lid'));
+  }
+  return [...new Set(t)];
+}
+/* ── boot summary: "the list of groups which the admin is in" ───────── */
+let bootSummaryTimer = null;
+function scheduleBootAdminSummary(){
+  if (bootSummaryTimer) clearTimeout(bootSummaryTimer);
+  bootSummaryTimer = setTimeout(async function(){
+    bootSummaryTimer = null;
+    try {
+      if (connectionStatus !== 'connected' || !sock || botPaused) return;
+      const adminCores = new Set([ADMIN_PHONE]);
+      for (const a of adminLids) adminCores.add(String(a).replace(/\D/g, ''));
+      const rows = [];
+      for (const jid of groupRegistry.keys()){
+        let meta = null;
+        try { meta = await sock.groupMetadata(jid); } catch (e) { /* skip unreadable */ }
+        if (!meta) continue;
+        const adminIn = (meta.participants || []).some(function(p){
+          return adminCores.has(String(p.id || '').split('@')[0].split(':')[0].replace(/\D/g, ''));
+        });
+        if (adminIn) rows.push((accessCtl.isGroupActive(jid) ? '✅ ' : '⭕ ') + (getGroupName(jid) || meta.subject || jid));
+        await new Promise(function(r){ setTimeout(r, 600); });   /* gentle on the socket */
+      }
+      if (!rows.length) return;
+      const msg = '🤖 Bot is ONLINE — we share ' + rows.length + ' group(s):\n\n' +
+        rows.slice(0, 60).join('\n') +
+        '\n\n✅ = activated · ⭕ = still silent (activate with !on inside the group).';
+      let sent = 0;
+      for (const jid of adminDmTargets()){
+        const g = dmGuardTriple(jid);
+        if (!g.ok) continue;
+        try { await sendBuffer(jid, { text: msg }, 3, 'slow', 'admin', false); sent++; } catch(e){}
+      }
+      pushLog('success', 'admin', 'Boot summary sent to ' + sent + ' admin chat(s) — ' + rows.length + ' shared groups listed');
+    } catch (e) { pushLog('warn', 'admin', 'Boot summary failed: ' + e.message); }
+  }, 3 * 60 * 1000);                    /* the boss: "after a couple of minutes" */
+  if (bootSummaryTimer.unref) bootSummaryTimer.unref();
+}
+/* ── discovery ask: "allow AI / NSFW / music in this group? yes or no" ─ */
+const pendingGroupAsks = new Map();    /* groupJid -> { name, asked, ts } */
+const pendingVerify    = new Map();    /* groupJid -> { ai, nsfw, music }  */
+function maybeAskAdminAboutGroup(jid, name){
+  if (!jid) return;
+  if (Date.now() - connectedAtMs < 5 * 60 * 1000) return;   /* boot flood — the boot summary already lists those */
+  pendingGroupAsks.set(jid, { name: name || getGroupName(jid) || jid, asked: false, ts: Date.now() });
+  askNextGroup();
+}
+async function askNextGroup(){
+  const kv = [...pendingGroupAsks.entries()].find(function(e){ return !e[1].asked; });
+  if (!kv) return;
+  const [gid, entry] = kv;
+  const adminJid = adminDmTargets()[0];
+  if (!adminJid){ entry.asked = false; return; }
+  const g = dmGuardTriple(adminJid);
+  if (!g.ok) return;                     /* stays pending — retried by the next ask/reply */
+  entry.asked = true;
+  const f = accessCtl.getGroupFeatures(gid);
+  const pendingCount = pendingGroupAsks.size;
+  const msg = '🆕 New group discovered: ' + (entry.name || gid) + '\n' +
+    'It stays OFF until you allow it. Allow in this group:\n' +
+    '• AI chat (currently ' + (f.ai ? 'ON' : 'OFF') + ')\n' +
+    '• NSFW (currently ' + (f.nsfw ? 'ON' : 'OFF') + ')\n' +
+    '• Music (currently ' + (f.music ? 'ON' : 'OFF') + ')\n\n' +
+    'Reply YES (allow all) or NO (keep it off).\n' +
+    'Or pick one: "ai yes" · "nsfw yes" · "music no"' +
+    (pendingCount > 1 ? ('\n(' + (pendingCount - 1) + ' more pending — reply "list")') : '');
+  try {
+    await sendBuffer(adminJid, { text: msg }, 3, 'slow', 'admin', false);
+    pushLog('info', 'admin', 'Group approval ask sent: ' + (entry.name || gid));
+  } catch(e){ entry.asked = false; pushLog('warn', 'admin', 'Group ask send failed: ' + e.message); }
+}
+async function handleGroupAskReply(text, adminJid){
+  const t = String(text || '').trim().toLowerCase();
+  if (!pendingGroupAsks.size) return false;
+  const pend = [...pendingGroupAsks.entries()];
+  let target = null, verdict = null, feats = null;
+  const numMatch  = t.match(/^(\d{1,2})\s+(yes|no|on|off)\b/);
+  const featMatch = t.match(/^(ai|nsfw|music)\s+(yes|no|on|off)\b/);
+  const yesRe = /^(yes|y|yeah|yep|ok|okay|ehe|hongu|allow|on)\b/;
+  const noRe  = /^(no|n|nope|aiwa|hapana|skip|deny|off)\b/;
+  if (/^list\b/.test(t)){
+    const lines = pend.map(function(e, i){ return (i + 1) + '. ' + (e[1].name || e[0]); });
+    const g = dmGuardTriple(adminJid);
+    if (!g.ok) return true;
+    await sendBuffer(adminJid, { text: '📋 Pending group approvals:\n' + lines.join('\n') + '\n\nReply "1 yes" / "2 no" — or plain YES for the latest.' }, 3, 'slow', 'admin', false);
+    return true;
+  } else if (numMatch){
+    const idx = parseInt(numMatch[1], 10) - 1;
+    if (idx < 0 || idx >= pend.length) return true;   /* number out of range — consumed */
+    target = pend[idx]; verdict = /yes|on/.test(numMatch[2]);
+  } else if (featMatch){
+    target = pend[pend.length - 1];
+    verdict = /yes|on/.test(featMatch[2]);
+    feats = {}; feats[featMatch[1]] = verdict;
+  } else if (yesRe.test(t)){ target = pend[pend.length - 1]; verdict = true; }
+  else if (noRe.test(t))   { target = pend[pend.length - 1]; verdict = false; }
+  else return false;
+  const [gid, entry] = target;
+  pendingGroupAsks.delete(gid);
+  const name = entry.name || gid;
+  if (!verdict){
+    const g = dmGuardTriple(adminJid);
+    if (g.ok) await sendBuffer(adminJid, { text: '❌ ' + name + ' stays OFF — nothing will be sent there.' }, 3, 'slow', 'admin', false);
+    pushLog('info', 'admin', 'Group ask DECLINED: ' + name);
+    askNextGroup();
+    return true;
+  }
+  accessCtl.activateGroup(gid, { by: 'admin-dm-approval', name });
+  const f = accessCtl.setGroupFeatures(gid, Object.assign({ by: 'admin-dm-approval' }, feats || { ai: true, nsfw: true, music: true }));
+  pendingVerify.set(gid, { ai: !!f.ai, nsfw: !!f.nsfw, music: !!f.music });
+  const g = dmGuardTriple(adminJid);
+  if (g.ok){
+    await sendBuffer(adminJid, { text: '✅ ' + name + ' — AI: ' + (f.ai ? 'ON' : 'OFF') + ' · NSFW: ' + (f.nsfw ? 'ON' : 'OFF') + ' · Music: ' + (f.music ? 'ON' : 'OFF') + '.\nNow send "nsfw play" inside the group to verify activation.' }, 3, 'slow', 'admin', false);
+  }
+  pushLog('success', 'admin', 'Group APPROVED via DM: ' + name + ' (ai ' + f.ai + ' nsfw ' + f.nsfw + ' music ' + f.music + ') — awaiting in-group verify');
+  askNextGroup();
+  return true;
+}
+
 async function brainHandleGroup(chatJid, dec, opts){
   if (!dec) return false;
   const isAdmin = !!(opts && opts.isAdmin);
@@ -7468,7 +7655,11 @@ async function brainHandleGroup(chatJid, dec, opts){
    * reply (this used to be folded into silence). Everywhere else the
    * bot stays quiet — non-activated groups, DMs, admin messages. ═══ */
   if (dec.action === 'chat'){
+    /* v92.9.10: the boss allows AI chatter PER GROUP from the discovery
+     * DM — features.ai defaults OFF for every group until approved. */
+    const feats = (opts && opts.feats) || null;
     if (!groupAiChat || !(opts && opts.activated)) return true;
+    if (feats && feats.ai === false) return true;
     if (!chatterAllowed(chatJid)) return true;
     try {
       const recent = (opts && opts.recent && opts.recent.length)
@@ -8073,6 +8264,9 @@ async function handleMessage(msg){
       && !parseShortMediaCommand(text)
       && !detectMediaIntent(text)
       && !isNextRequest(text)){
+    /* v92.9.10: YES/NO group-approval replies are consumed here first —
+     * the boss answers the discovery asks with plain yes/no in this DM. */
+    if (await handleGroupAskReply(text, chatJid)) return;
     pushLog('info','admin','Admin plain DM — AI stays silent (commands only).');
     return;
   }
@@ -8170,10 +8364,25 @@ async function handleMessage(msg){
      * goes back out in the group's own language via t2()/replyInLang. */
     const gText = await textToEnglish(chatJid, gLang, text);
 
+    /* ═══ v92.9.10 ACTIVATION VERIFY — the boss approves a group from the
+     * discovery DM, then sends "nsfw play" (or "!verify") inside the group
+     * itself to confirm the activation is live. ═══ */
+    if (isAdmin && text && pendingVerify.has(chatJid) && /^(!verify|nsfw[ .]?play)$/i.test(text.trim())){
+      const f = pendingVerify.get(chatJid);
+      pendingVerify.delete(chatJid);
+      await sendBuffer(chatJid, { text: '✅ Verified — AI ' + (f.ai ? 'ON' : 'OFF') + ' · NSFW ' + (f.nsfw ? 'ON' : 'OFF') + ' · Music ' + (f.music ? 'ON' : 'OFF') }, 3, 'slow', 'group', true);
+      pushLog('success', 'admin', 'Activation VERIFIED in ' + (getGroupName(chatJid) || chatJid));
+      return;
+    }
+
     if (text){
       /* v87: NSFW window — normal hours everywhere, ALWAYS OPEN in the
-       * designated group once the admin activated it */
-      const nsfwOpen = isNsfwWindow() || (accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated());
+       * designated group once the admin activated it.
+       * v92.9.10: a group the boss approved with "nsfw yes" in the
+       * discovery DM gets the same always-open treatment. */
+      const nsfwOpen = isNsfwWindow()
+        || (accessCtl.isDesignated(chatJid) && accessCtl.isNsfwActivated())
+        || accessCtl.groupFeature(chatJid, 'nsfw');
       /* ═══ v91: "next / more" continues this group's last search ═══
        * Before the brain: a bare "next" is a media follow-up, never
        * chatter. Everyone in a served group can use it. */
@@ -8239,7 +8448,8 @@ async function handleMessage(msg){
           if (await brainHandleGroup(chatJid, dec, { isAdmin, nsfwWin: nsfwOpen, senderJid,
               activated: !!groupOn, recent: recentGroupTexts(chatJid, 6),
               senderName: pushName, groupName: getGroupName(chatJid) || 'main',
-              gtext: gText })) return;
+              gtext: gText,
+              feats: accessCtl.getGroupFeatures(chatJid) })) return;
         } catch(e){ pushLog('warn','brain','group: ' + e.message); }
       }
       if (detectGroupLinkRequest(gText)){ await sendBuffer(chatJid, { text: await t2(chatJid,'Join: '+ADMIN_GROUP_LINK) }, 3, 'slow', 'group', true); return; }
@@ -8293,6 +8503,12 @@ async function handleMessage(msg){
             query: gIntent.query, lang: gLang, phone, taskType: 'group', senderJid
           });
           if (menuSent) return;
+        }
+        /* v92.9.10: the boss can switch music OFF for a group ("music no"
+         * in the discovery DM). Admins bypass their own switch. */
+        if (gIntent.type === 'music' && !isAdmin && !accessCtl.groupFeature(chatJid, 'music')){
+          await sendBuffer(chatJid, { text: await t2(chatJid,'Music is switched off in this group (admin setting)') }, 3, 'slow', 'group', true);
+          return;
         }
         if (gIntent.type === 'music'){
           try {
@@ -8496,6 +8712,7 @@ async function connectBot(){
         lastStatusChangeAt = Date.now();
         reconnectAttempts = 0; botStartTime = Date.now();
         connectedAtMs = Date.now(); decryptedSinceConnect = 0; badMacStormWarned = false;   /* v92.7: fresh storm window per connect */
+        scheduleBootAdminSummary();   /* v92.9.10: DM admins the shared-group list after a couple of minutes */
         botQrCount = 0; botCloseTimes = [];   /* v68.3: fresh cycle */
         botJid = sock.user?.id || null;
         botNumber = botJid?.split(':')[0]?.split('@')[0] || 'unknown';

@@ -45,6 +45,7 @@ const CHAT_AF2   = '93765002356@s.whatsapp.net';    /* allowed + AI (the +93 76�
 const CHAT_BLOCK = '263777999999@s.whatsapp.net';   /* blocked          */
 const CHAT_NEVER = '263777888888@s.whatsapp.net';   /* allowed, never asked */
 const GRP_BLOCK  = '120000000000042@g.us';          /* stub "Other 4", JID-blacklisted */
+const GRP_NEW    = '120000000000009@g.us';          /* v92.9.14: silent-activation target */
 const GRP_MAIN   = '120000000000001@g.us';
 
 /* 300x300 solid JPEG — passes the image realness gate (≥120px) */
@@ -68,11 +69,16 @@ function section(title){ console.log('\n── ' + title + ' ──'); }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /* ── tiny HTTP helpers ─────────────────────────────────────────────── */
+/* v92.9.14: request timeouts — a hung/crashed server must FAIL the poll
+ * instead of freezing the harness forever inside waitFor (whose deadline
+ * check only runs between fn() resolutions). */
 function get(url){
   return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
+    const req = http.get(url, (res) => {
       let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ status: res.statusCode, body: d }));
-    }).on('error', reject);
+    });
+    req.setTimeout(12000, () => req.destroy(new Error('request timeout (12s)')));
+    req.on('error', reject);
   });
 }
 function post(url, obj){
@@ -82,6 +88,7 @@ function post(url, obj){
     const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + (u.search || ''),
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } },
       (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ status: res.statusCode, body: d })); });
+    req.setTimeout(15000, () => req.destroy(new Error('request timeout (15s)')));
     req.on('error', reject); req.write(data); req.end();
   });
 }
@@ -162,7 +169,7 @@ const CONFIG_FILES = [
   'config/allowed-numbers.txt', 'config/blocked-numbers.txt',
   'config/allowed-groups.txt', 'config/blocked-groups.txt',
   'data/access-state.json', 'data/dm_histories.json', 'data/pending.json',
-  'data/media-stats.json', 'data/group_registry.json', 'data/joined_groups.json',
+  'data/media-stats.json', 'data/joined_groups.json', 'group_registry.json',
   'data/group_settings.json', 'data/learning_data.json'
 ];
 const backups = {};
@@ -186,6 +193,11 @@ function writeConfigs(){
     inviteToJid: {}, designated: null, activated: false,
     activeGroups: { [GRP_MAIN]: { by: 'sim', name: 'Main Loadtest', ts: Date.now() } }
   }, null, 2));
+  /* v92.9.14: the registry the !grouplist list is built from */
+  w('group_registry.json', JSON.stringify([
+    [GRP_MAIN, { subject: 'Main Loadtest', size: 10, announce: false, botAdmin: false, participants: [] }],
+    [GRP_NEW,  { subject: 'Sim Silent Target', size: 6, announce: false, botAdmin: false, participants: [] }]
+  ], null, 2));
   for (const f of ['data/dm_histories.json', 'data/pending.json', 'data/media-stats.json']){
     if (!fs.existsSync(path.join(ROOT, f))) w(f, '{}');
   }
@@ -298,6 +310,11 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
   return { viaMenu, rec: await observe(SIM_PORT_1) };
 }
 
+
+/* v92.9.14: a SIGTERM (the `timeout` wrapper) must STILL restore the
+ * config sandbox — run 1 died on SIGTERM and left the sim's configs live. */
+process.on('SIGTERM', () => { try { restoreConfigs(); } catch(e){} process.exit(124); });
+process.on('SIGINT',  () => { try { restoreConfigs(); } catch(e){} process.exit(130); });
 (async function main(){
   console.log('╔══════════════════════════════════════════════════════════╗');
   console.log('║  BREADBOT v92.9.13 REAL-LIFE SIMULATION                  ║');
@@ -317,7 +334,9 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
     section('G1 — Afghan number (+93 77 255 3417): Persian DM download via the site picker');
     const rG1 = await inject(SIM_PORT_1, dmMsg(CHAT_AF, 'عکس هرات بفرست', { pushName: 'Afghan friend' }));
     ok('Persian intent accepted by the REAL handler', rG1 && rG1.ok === true, JSON.stringify(rG1).slice(0, 120));
-    const g1 = await menuThenPick(CHAT_AF, '1', 1, 150000, 'G1 menu/media');
+    /* v92.9.14: the pick's DEFAULT count is 5 images — wait for the whole
+     * batch to settle so later isolation checks use a stable baseline */
+    const g1 = await menuThenPick(CHAT_AF, '1', 5, 300000, 'G1 menu/media');
     let rec = g1.rec;
     const afOwnMedia = mediaTo(rec, CHAT_AF).length;
     ok('the Afghan DM received media (downloads work in DM, picker ' + (g1.viaMenu ? 'MENU path' : 'fallback path') + ')', afOwnMedia > 0,
@@ -342,7 +361,7 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
     await inject(SIM_PORT_1, dmMsg(CHAT_A, '5 pics of mbira', { pushName: 'ChatA' }));
     await sleep(700);                                          /* the two handlers overlap on purpose */
     await inject(SIM_PORT_1, dmMsg(CHAT_B, 'hello there friend how are you', { pushName: 'ChatB' }));
-    const a1 = await menuThenPick(CHAT_A, '1 3', 3, 180000, 'A menu/media');   /* pick site 1, THREE results */
+    const a1 = await menuThenPick(CHAT_A, '1 3', 3, 480000, 'A menu/media');   /* v92.9.14: 3 sends × human lane (5-90s each) */   /* pick site 1, THREE results */
     rec = a1.rec;
     ok('chat A received its own pic batch (count selection honoured: \u22653)', mediaTo(rec, CHAT_A).length >= 3, 'got ' + mediaTo(rec, CHAT_A).length);
     ok('chat B (only chatting) received NOTHING — no leak', anyTo(rec, CHAT_B).sends.length === 0,
@@ -372,6 +391,62 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
     rec = await observe(SIM_PORT_1);
     const f1 = anyTo(rec, GRP_BLOCK).sends.length + anyTo(rec, GRP_BLOCK).reads.length + anyTo(rec, GRP_BLOCK).typings.length;
     ok('blacklisted group got ZERO sends/typings/read receipts', f1 === f0, 'delta: ' + (f1 - f0));
+
+    /* ═══ S — v92.9.14 REMOTE SILENT ACTIVATION: !grouplist → number → the
+     * group goes live WITHOUT ONE message sent into it (the boss: "the bot
+     * shows me the group name and id, I chose which one to activate") ═══ */
+    section('S — remote SILENT activation (!grouplist → "N" → nothing in the group)');
+    await inject(SIM_PORT_1, dmMsg(ADMIN_JID, '!grouplist', { pushName: 'Boss' }));
+    const listMsg = await waitFor(async () => {
+      const r = await observeRetry(SIM_PORT_1);
+      return anyTo(r, ADMIN_JID).sends.find(s => (s.text || '').includes(GRP_NEW)) ? true : null;
+    }, 240000, 800, 'the numbered group list in the admin DM');
+    rec = await observe(SIM_PORT_1);
+    const listText = (anyTo(rec, ADMIN_JID).sends.map(s => s.text || '').find(t => t.includes(GRP_NEW))) || '';
+    ok('the list shows NAME + JID together (boss rule)', listText.includes('Sim Silent Target') && listText.includes(GRP_NEW),
+       'list: ' + listText.slice(0, 120).replace(/\n/g, ' | '));
+    const rowM = listText.match(new RegExp('(\\d+)\\. [^\\n]*' + GRP_NEW.replace(/@/g, '@')));
+    ok('the silent group sits on a NUMBERED row', !!rowM, 'row: ' + (rowM ? rowM[0] : 'none'));
+    const newRow = rowM ? parseInt(rowM[1], 10) : 0;
+    const sBefore = await observe(SIM_PORT_1);
+    const s0 = anyTo(sBefore, GRP_NEW).sends.length + anyTo(sBefore, GRP_NEW).reads.length + anyTo(sBefore, GRP_NEW).typings.length;
+    await inject(SIM_PORT_1, dmMsg(ADMIN_JID, String(newRow), { pushName: 'Boss' }));
+    await waitFor(async () => {
+      const r = await observeRetry(SIM_PORT_1);
+      return anyTo(r, ADMIN_JID).sends.some(s => /ACTIVATED silently/.test(s.text || '')) ? true : null;
+    }, 240000, 800, 'the silent-activation confirmation DM');
+    rec = await observe(SIM_PORT_1);
+    const s1c = anyTo(rec, GRP_NEW).sends.length + anyTo(rec, GRP_NEW).reads.length + anyTo(rec, GRP_NEW).typings.length;
+    ok('activation was SILENT — the group got ZERO messages/read receipts', s1c === s0, 'delta: ' + (s1c - s0));
+    ok('the admin DM confirms the silent activation',
+       anyTo(rec, ADMIN_JID).sends.some(s => /ACTIVATED silently/.test(s.text || '')));
+    /* deactivate again + designate round-trip */
+    await inject(SIM_PORT_1, dmMsg(ADMIN_JID, newRow + ' off', { pushName: 'Boss' }));
+    await waitFor(async () => {
+      const r = await observeRetry(SIM_PORT_1);
+      return anyTo(r, ADMIN_JID).sends.some(s => /deactivated/.test(s.text || '')) ? true : null;
+    }, 240000, 800, 'the deactivation confirmation DM');
+    await inject(SIM_PORT_1, dmMsg(ADMIN_JID, newRow + ' nsfw', { pushName: 'Boss' }));
+    await waitFor(async () => {
+      const r = await observeRetry(SIM_PORT_1);
+      return anyTo(r, ADMIN_JID).sends.some(s => /Designated NSFW/.test(s.text || '')) ? true : null;
+    }, 240000, 800, 'the NSFW-designate confirmation DM');
+    rec = await observe(SIM_PORT_1);
+    const s2c = anyTo(rec, GRP_NEW).sends.length + anyTo(rec, GRP_NEW).reads.length + anyTo(rec, GRP_NEW).typings.length;
+    ok('NSFW designation was silent too — still ZERO in the group', s2c === s0, 'delta: ' + (s2c - s0));
+    await inject(SIM_PORT_1, dmMsg(ADMIN_JID, newRow + ' off', { pushName: 'Boss' }));
+    await sleep(2500);
+
+    /* ═══ L — v92.9.14 the backslash bug: "gif \" must DEFAULT, not hunt
+     * a literal backslash (live log: the scraper got query "\") ═══ */
+    section('L — backslash junk input ("gif \\") defaults instead of hunting "\\"');
+    await inject(SIM_PORT_1, dmMsg(CHAT_A, 'gif \\', { pushName: 'ChatA' }));
+    const l1 = await menuThenPick(CHAT_A, '1', 1, 300000, 'L menu/media');
+    ok('junk "gif \\" still delivered media (defaulted, no crash, no literal-backslash hunt)',
+       mediaTo(l1.rec, CHAT_A).length >= 1, 'media sends: ' + mediaTo(l1.rec, CHAT_A).length);
+    rec = await observe(SIM_PORT_1);
+    ok('the junk ask touched ONLY chat A',
+       mediaTo(rec, CHAT_B).length === 0 && mediaTo(rec, CHAT_NEVER).length === 0 && mediaTo(rec, GRP_NEW).length === 0);
 
     /* ═══ H — file cleanup: local copy deleted the moment the send lands ═══ */
     section('H — cleanup: download sent → local file deleted immediately');
@@ -403,7 +478,7 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
                   AF: mediaTo(bBefore, CHAT_AF).length, AF2: mediaTo(bBefore, CHAT_AF2).length,
                   N: mediaTo(bBefore, CHAT_NEVER).length };
     await inject(SIM_PORT_1, dmMsg(ADMIN_JID, 'nsfw.see blonde', { pushName: 'Boss' }));
-    const b1 = await menuThenPick(ADMIN_JID, '1', 2, 240000, 'B menu/media');
+    const b1 = await menuThenPick(ADMIN_JID, '1', 2, 480000, 'B menu/media');
     rec = b1.rec;
     ok('admin chat received the NSFW media (picker ' + (b1.viaMenu ? 'MENU path' : 'fallback path') + ')',
        mediaTo(rec, ADMIN_JID).length >= 2, 'got ' + mediaTo(rec, ADMIN_JID).length);
@@ -418,7 +493,7 @@ async function menuThenPick(jid, pickText, minMedia, timeoutMs, label){
     /* ═══ G3 — the SECOND Afghan number (+93 76 500 2356) ═══ */
     section('G3 — second Afghan number (+93 76 500 2356): DM download + AI reply');
     await inject(SIM_PORT_1, dmMsg(CHAT_AF2, 'ویدیو کابل بفرست', { pushName: 'Afghan friend 2' }));
-    const g3 = await menuThenPick(CHAT_AF2, '2', 1, 150000, 'G3 menu/media');
+    const g3 = await menuThenPick(CHAT_AF2, '2', 1, 300000, 'G3 menu/media');
     ok('second Afghan number received media (picker ' + (g3.viaMenu ? 'MENU path' : 'fallback path') + ')',
        mediaTo(g3.rec, CHAT_AF2).length >= 1, 'got ' + mediaTo(g3.rec, CHAT_AF2).length);
     await inject(SIM_PORT_1, dmMsg(CHAT_AF2, 'شما کجایی هستی', { pushName: 'Afghan friend 2' }));

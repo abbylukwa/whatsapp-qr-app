@@ -33,8 +33,11 @@ const MENU_SITES      = 6;                       /* sites listed per menu      *
 const PROBE_TIMEOUT   = 4000;                    /* ms per site test          */
 const PROBE_ROUNDS    = 2;                       /* max candidate rounds      */
 const PICK_TTL_MS     = 10 * 60 * 1000;          /* menu validity             */
+/* v92.9.14 — the boss: "make downloads more simple, user chooses to
+ * download videos from 1 to 10 per query to avoid collision on all
+ * media". ONE count rule for EVERY kind: 1-10 results per query. */
 const DEFAULT_COUNT   = { image: 5, gif: 5, video: 1 };
-const MAX_COUNT       = { image: 10, gif: 10, video: 3 };
+const MAX_COUNT       = { image: 10, gif: 10, video: 10 };
 const SITE_KIND       = { image: 'images', gif: 'gifs', video: 'videos' };
 
 /* chatJid -> { kind, nsfw, query, sites:[{n,name,url}], lang, cat, taskType, ts } */
@@ -67,6 +70,27 @@ function boostCategoryFor(kind, opts){
   const cat = byPhone || byLang;
   if (cat) return cat;
   return kind === 'video' ? 'arab' : null;
+}
+
+/* v92.9.14 LANGUAGE DEFAULT SITE — the boss: "make sure it just dies
+ * random sites unless selected by user … language default site". A hunt
+ * without a user pick must NOT let the scraper wander the whole pool.
+ * This returns the LANGUAGE TIER's healthy sites in a DETERMINISTIC
+ * order (own category first, then shared neighbours, fastest probed
+ * first — site-health's own ordering) so the hunt pins site #1 and only
+ * falls back to site #2 of the SAME tier when #1 yields nothing. No
+ * randomness anywhere: same chat + same language always hunts the same
+ * site. */
+function languageDefaultSites(kind, nsfw, opts){
+  const sk = SITE_KIND[kind];
+  if (!sk) return [];
+  /* opts.cat wins when the caller already resolved the language category */
+  const cat = (opts && opts.cat) || boostCategoryFor(kind, opts || {});
+  const ranked = siteHealth.healthyLinks(sk, !!nsfw, null, cat);
+  return ranked.slice(0, 2).map(url => ({
+    url,
+    name: siteHealth.siteNameByUrl(url) || prettyName(null, url)
+  }));
 }
 
 /* prettify registry names: "persian-xvideos-persian-lang" → "Xvideos Persian" */
@@ -180,6 +204,6 @@ function parsePick(chatJid, text){
 
 module.exports = {
   init, buildMenu, parsePick, setPending, getPending, clearPending,
-  pendingCount, boostCategoryFor, prettyName, probeAlive,
+  pendingCount, boostCategoryFor, prettyName, probeAlive, languageDefaultSites,
   MENU_SITES, PICK_TTL_MS, DEFAULT_COUNT, MAX_COUNT
 };

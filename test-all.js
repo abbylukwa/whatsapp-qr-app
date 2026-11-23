@@ -333,7 +333,10 @@ async function main() {
     assert(p.valid && p.count === 10, 'image count must cap at 10, got ' + p.count);
     SP.setPending(chat, { kind:'video', nsfw:false, query:'kabul', sites: two, lang:null, cat:null, taskType:'dmreply', senderJid:null });
     p = SP.parsePick(chat, '2 9');
-    assert(p.valid && p.count === 3, 'video count must cap at 3, got ' + p.count);
+    assert(p.valid && p.count === 9, 'v92.9.14: video count must honor 1-10, got ' + p.count);
+    SP.setPending(chat, { kind:'video', nsfw:false, query:'kabul', sites: two, lang:null, cat:null, taskType:'dmreply', senderJid:null });
+    p = SP.parsePick(chat, '2 10');
+    assert(p.valid && p.count === 10, 'v92.9.14: video count 10 must be allowed, got ' + p.count);
     SP.setPending(chat, { kind:'gif', nsfw:false, query:'dance', sites: two, lang:null, cat:null, taskType:'group', senderJid:null });
     p = SP.parsePick(chat, '2,5');
     assert(p.valid && p.count === 5, 'comma form "2,5" must work, got ' + p.count);
@@ -342,6 +345,45 @@ async function main() {
     assert(p && p.invalid === true, 'a number outside the menu must be flagged invalid');
     assert(SP.parsePick(chat, 'hello') === null, 'non-number text is not a pick');
     assert(SP.parsePick('stranger@s.whatsapp.net', '1') === null, 'no pending menu in this chat → null');
+  });
+  /* ═══ v92.9.14 LANGUAGE DEFAULT SITE + uniform 1-10 counts ═══ */
+  await test('site-picker: languageDefaultSites — deterministic, category-first, capped at 2', () => {
+    const SP = require('./site-picker');
+    const SH = require('./site-health');
+    SH.loadRegistry(); SH.loadHealth();
+    SP.init(function(){});
+    const a = SP.languageDefaultSites('video', true, {});
+    assert(a.length <= 2, 'must return at most 2 default sites, got ' + a.length);
+    assert(a.length >= 1, 'registry has video sites — need at least 1, got 0');
+    const b = SP.languageDefaultSites('video', true, {});
+    assert(JSON.stringify(a.map(s => s.url)) === JSON.stringify(b.map(s => s.url)),
+      'MUST be deterministic — two calls returned different orders');
+    assert(a[0].name && typeof a[0].name === 'string', 'each default site carries a NAME for the scraper pin');
+    /* cat override wins: an arab cat must NOT lead with a persian-tier site */
+    const arab = SP.languageDefaultSites('video', true, { cat: 'arab' });
+    const pers = SP.languageDefaultSites('video', true, { cat: 'persian' });
+    if (arab.length && pers.length) assert(arab[0].url !== pers[0].url || arab[0].url === pers[0].url === SH.healthyLinks('videos', true, null, 'arab')[0],
+      'category tiers must be honoured (arab vs persian leaders differ unless only one tier exists)');
+    assert(SP.languageDefaultSites('music', true, {}).length === 0, 'unknown kind → empty (no fake sites)');
+    assert(SP.languageDefaultSites('image', false, {}).every(s => s.url), 'image defaults carry URLs');
+  });
+  await test('server v92.9.14 wiring — pins, explicitCount, silent activation, no verify step', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(__dirname + '/server.js', 'utf8');
+    assert(/function defaultSitePin\(/.test(src), 'defaultSitePin helper must exist');
+    const pins = (src.match(/defaultSitePin\(/g) || []).length;
+    assert(pins >= 12, 'all direct hunts must pin the language default — found ' + pins + ' uses');
+    assert(/explicitCount: pick\.count/.test(src), 'picked hunts must forward the explicit count (1-10)');
+    assert(/explicitCount: cnt\.count/.test(src), 'counted intents must forward the explicit count');
+    assert(!/pendingVerify\b/.test(src.replace(/pendingVerifyJid/g, '')), 'the non-silent verify step must be GONE');
+    assert(/async function handleGroupPickReply\(/.test(src), 'remote silent-activation handler must exist');
+    assert(/handleGroupPickReply\(text, chatJid\)/.test(src), 'pick handler must be wired in the admin DM path');
+    assert(/case 'grouplist':/.test(src), '!grouplist command must exist');
+    assert(/groupListText\(rows\)/.test(src) && /r\.n \+ '\. ' \+ r\.name \+ ' — ' \+ r\.jid/.test(src),
+      'the list must show NUMBER + NAME + JID (the boss: "shows me the group name and id")');
+    assert(/"3 nsfw"/.test(src), 'the instruction must mention the nsfw designate form');
+    assert(/ONLY punctuation\/symbols/.test(src), 'cleanQuery symbol guard (gif \\ bug) must be present');
+    assert(/Activated silently — nothing was sent to the group/.test(src), 'approval flow must be SILENT now');
   });
   await test('site-picker: probeAlive bounded — stops at MENU_SITES alive, ≤6 in flight', async () => {
     const SP = require('./site-picker');

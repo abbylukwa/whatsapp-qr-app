@@ -730,8 +730,11 @@ const lt = {
 function ltRec(account, kind, jid, content){
   if (!LOADTEST) return;
   const bucket = lt.rec[kind] || (lt.rec[kind] = []);
+  /* v92.9.14: 2000-char text capture — the 140-char cut hid the tail of
+   * the numbered group list (8 rows × ~40 chars), so the sim's S scenario
+   * could never see the target group's JID even though the send landed. */
   bucket.push({ account, jid, ts: Date.now(),
-    text: content && content.text ? String(content.text).slice(0, 140) : '',
+    text: content && content.text ? String(content.text).slice(0, 2000) : '',
     media: content ? Object.keys(content).filter(k => ['image','video','audio','document','sticker'].includes(k)).join('/') : '' });
   if (bucket.length > 600) bucket.splice(0, bucket.length - 600);
 }
@@ -1318,6 +1321,10 @@ const FIB_TABLES = {
 const fibIdx = { broadcast:0, dmreply:0, group:0, admin:0, join:0 };
 
 function nextFibDelayMs(taskType){
+  /* v92.9.14: LOADTEST — the stub is not WhatsApp; the anti-spam ladder
+   * (dmreply 5-89s PER SEND, index climbs with every send) made sim
+   * timing assertions flaky. Production pacing is untouched. */
+  if (LOADTEST) return 250;
   const tbl = FIB_TABLES[taskType] || FIB_TABLES.group;
   const i = fibIdx[taskType] || 0;
   const secs = tbl[Math.min(i, tbl.length - 1)];
@@ -2003,6 +2010,19 @@ function forgetMedia(jid, url){
 function localCat(senderJid, chatJid, lang){
   return siteHealth.categoryByPhone(senderJid) || siteHealth.categoryByLang(lang) || siteHealth.categoryByPhone(chatJid) || null;
 }
+/* ═══ v92.9.14 LANGUAGE DEFAULT SITE PIN — the boss: "make sure it just
+ * dies random sites unless selected by user … language default site".
+ * Direct hunts (no menu pick, no user pin) hunt the chat's language-tier
+ * DEFAULT site — deterministic, never a random slot: same chat always
+ * hunts the same site until that site dies, then the tier's #2. Returns
+ * the site NAME for the scraper's site:<name> pin (null → the caller
+ * keeps its old behaviour). ═══ */
+function defaultSitePin(kind, nsfw, opts){
+  try {
+    const s = sitePicker.languageDefaultSites(kind, nsfw, opts || {})[0];
+    return s ? s.name : null;
+  } catch (e){ return null; }
+}
 /* v88 DAMAGED-RESULT DEFENSE — try candidates until one actually sends;
  * a URL that dies is forgotten for this chat (and quietly skipped, no
  * "here is the link instead" spam). send*Safe return true/false. */
@@ -2198,7 +2218,7 @@ async function sendSiteMenu(chatJid, kind, nsfw, opts){
     const lines = mp.sites.map(s => s.n + '. ' + s.name);
     const header = await t2(chatJid, (nsfw ? 'NSFW ' : '') + SITE_MENU_KIND_WORD[kind] + ' — sites tested just now, alive:');
     const qline = mp.query ? (await t2(chatJid, 'For:') + ' "' + String(mp.query).slice(0, 60) + '"') : '';
-    const instr = await t2(chatJid, 'Reply with the NUMBER — optionally + how many results (e.g. "2 5"):');
+    const instr = await t2(chatJid, 'Reply with the NUMBER — optionally + how many results 1-10 (e.g. "2 5"):');
     await sendBuffer(chatJid, { text: [header, qline, lines.join('\n'), instr].filter(Boolean).join('\n') },
       2, 'slow', (opts && opts.taskType) || 'dmreply', true);
     return true;
@@ -2208,10 +2228,30 @@ async function sendSiteMenu(chatJid, kind, nsfw, opts){
   }
 }
 async function runPickedHunt(chatJid, pick){
+  try {
+    return await pickedHuntInner(chatJid, pick);
+  } catch (e){
+    /* v92.9.14 NO SILENT FAILURES — a hunt error must never escape into
+     * the handler chain (an unhandled rejection on the free tier kills
+     * the whole process); the member gets an honest retry note. */
+    pushLog('error', 'picker', 'hunt failed: ' + (e && e.message));
+    try { await sendBuffer(chatJid, { text: await t2(chatJid, '❌ That search failed — try again in a minute.') }, 2, 'slow', (pick && pick.taskType) || 'dmreply', true); } catch (e2){}
+    return false;
+  }
+}
+async function pickedHuntInner(chatJid, pick){
   const q = String(pick.query || '').trim();
   const taskType = pick.taskType || 'dmreply';
   const cat = localCat(pick.senderJid, chatJid, pick.lang);
   markMediaRequest(chatJid);
+  /* v92.9.14 LANGUAGE DEFAULT FALLBACK — the boss: "make sure it just
+   * dies random sites unless selected by user … language default site".
+   * When the picked site yields NOTHING, the retry hunts the chat's own
+   * language-tier default site — deterministic, never a random slot. */
+  const defSites = sitePicker.languageDefaultSites(pick.kind, pick.nsfw,
+    { lang: pick.lang || getChatLang(chatJid), phone: pick.senderJid || chatJid })
+    .filter(s => s.name !== pick.site.name);
+  const defSite = defSites[0] || null;
   try {
     const note = await t2(chatJid, 'Searching "' + q + '" on ' + pick.site.name + (pick.count > 1 ? ' — ' + pick.count + ' results' : '') + '...');
     await sendBuffer(chatJid, { text: note }, 2, 'slow', taskType, true);
@@ -2225,10 +2265,25 @@ async function runPickedHunt(chatJid, pick){
     const rs = qr.result;
     if (rs.ok && rs.ranked.length){
       rememberVideoSearch(chatJid, rs.ranked, q, pick.nsfw);
-      const sent = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw });
+      const sent = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw, explicitCount: pick.count });
       if (sent) return true;
     }
-    /* ranked dead on that site → the site's classic single-shot */
+    /* picked site dead/empty → the LANGUAGE DEFAULT site, still pinned
+     * (never a random slot) */
+    if (defSite){
+      try { await sendBuffer(chatJid, { text: await t2(chatJid, 'Nothing on ' + pick.site.name + ' — trying ' + defSite.name + ' (default for your language)...') }, 2, 'slow', taskType, true); } catch(e){}
+      const qr2 = await mediaQueue.run(chatJid, 'video', q + '|' + defSite.name, async () => {
+        const ranked = await scraperVideoRanked(q, { site: defSite.name, boostCat: cat });
+        return { ok: ranked.length > 0, ranked };
+      });
+      const rs2 = qr2.result;
+      if (rs2.ok && rs2.ranked.length){
+        rememberVideoSearch(chatJid, rs2.ranked, q, pick.nsfw);
+        const sent2 = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw, explicitCount: pick.count });
+        if (sent2) return true;
+      }
+    }
+    /* both pinned hunts empty → the picked site's classic single-shot */
     const r = await mediaQueue.run(chatJid, 'video', q + '|' + pick.site.name + '|v2', async () =>
       scraperVideo(q, null, pick.site.name, cat));
     const rr = r.result;
@@ -2237,15 +2292,34 @@ async function runPickedHunt(chatJid, pick){
         caption: '🎬 ' + (rr.title || q).slice(0, 90), priority: 3, lane: 'slow', taskType, typing: false, nsfw: pick.nsfw });
       return true;
     }
+    if (defSite){
+      const r2 = await mediaQueue.run(chatJid, 'video', q + '|' + defSite.name + '|v2', async () =>
+        scraperVideo(q, null, defSite.name, cat));
+      const rr2 = r2.result;
+      if (rr2.ok){
+        await sendMediaUrl(chatJid, rr2.mediaUrl, { kind: 'video', mimetype: rr2.mimetype || 'video/mp4',
+          caption: '🎬 ' + (rr2.title || q).slice(0, 90), priority: 3, lane: 'slow', taskType, typing: false, nsfw: pick.nsfw });
+        return true;
+      }
+    }
   } else {
     const isGif = pick.kind === 'gif';
-    const qr = await mediaQueue.run(chatJid, isGif ? 'gif' : 'image', q + '|' + pick.site.name, async () =>
-      isGif ? scraperGif(q, pick.nsfw, pick.site.name, cat) : scraperSearch(q, pick.nsfw, pick.site.name, cat));
-    const r = qr.result;
+    const huntOne = (siteName) => mediaQueue.run(chatJid, isGif ? 'gif' : 'image', q + '|' + siteName, async () =>
+      isGif ? scraperGif(q, pick.nsfw, siteName, cat) : scraperSearch(q, pick.nsfw, siteName, cat));
+    const qr = await huntOne(pick.site.name);
+    let r = qr.result;
     const list = r.ok ? (isGif ? r.gifs : r.images) : [];
-    if (r.ok && list.length){
-      rememberSearch(chatJid, isGif ? 'gif' : 'image', list, q, pick.nsfw);
-      const sent = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw });
+    if (!(r.ok && list.length) && defSite){
+      /* picked site empty → the LANGUAGE DEFAULT site, still pinned */
+      try { await sendBuffer(chatJid, { text: await t2(chatJid, 'Nothing on ' + pick.site.name + ' — trying ' + defSite.name + ' (default for your language)...') }, 2, 'slow', taskType, true); } catch(e){}
+      const qr2 = await huntOne(defSite.name);
+      const r2 = qr2.result;
+      if (r2.ok && (isGif ? r2.gifs : r2.images).length){ r = r2; }
+    }
+    const finalList = r.ok ? (isGif ? r.gifs : r.images) : [];
+    if (r.ok && finalList.length){
+      rememberSearch(chatJid, isGif ? 'gif' : 'image', finalList, q, pick.nsfw);
+      const sent = await sendRelevantBatch(chatJid, pick.count, { taskType, nsfw: pick.nsfw, explicitCount: pick.count });
       if (sent) return true;
     }
   }
@@ -3717,7 +3791,8 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
       const vq = vcnt.query || cmd.query;
       const want = vcnt.count || 5;
       await reply('Searching "' + vq + '" — ' + want + ' best videos coming up...');
-      const ranked = await scraperVideoRanked(vq, { site: prefer || null });
+      /* v92.9.14: no user pick → the LANGUAGE DEFAULT site (never random) */
+      const ranked = await scraperVideoRanked(vq, { site: prefer || defaultSitePin('video', true, { cat, lang: opts.lang, phone: opts.phone }) });
       if (ranked.length){
         rememberVideoSearch(chatJid, ranked, vq);
         const sent = await sendRelevantBatch(chatJid, want, { taskType, explicitCount: want > 5 ? want : 0 });
@@ -3727,7 +3802,7 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
           return true;
         }
       }
-      const r1 = await scraperVideo(cmd.query, null, prefer || null);
+      const r1 = await scraperVideo(cmd.query, null, prefer || defaultSitePin('video', true, { cat, lang: opts.lang, phone: opts.phone }));
       if (r1.ok){
         await sendMediaUrl(chatJid, r1.mediaUrl, { kind:'video', mimetype:r1.mimetype||'video/mp4',
           caption:'🎬 ' + (r1.title||cmd.query).slice(0,90), priority:0, lane:'fast', taskType, typing:false });
@@ -3751,7 +3826,9 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
         if (menuSent) return true;
         await reply('No site answered the test right now — hunting the normal chain instead...');
       }
-      const ranked = await scraperVideoRanked(cmd.query, { site: prefer || null });
+      /* v92.9.14: no user pick → the LANGUAGE DEFAULT site (never random) */
+      const nsfwPin = prefer || defaultSitePin('video', true, { cat, lang: opts.lang, phone: opts.phone });
+      const ranked = await scraperVideoRanked(cmd.query, { site: nsfwPin });
       if (ranked.length){
         rememberVideoSearch(chatJid, ranked, cmd.query, true);
         const sent = await sendRelevantBatch(chatJid, 1, { taskType, caption: '', nsfw: true });
@@ -3761,7 +3838,7 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
           return true;
         }
       }
-      const r = await scraperVideo(cmd.query, null, prefer || null);
+      const r = await scraperVideo(cmd.query, null, nsfwPin);
       if (r.ok){
         await sendMediaUrl(chatJid, r.mediaUrl, { kind:'video', mimetype:r.mimetype||'video/mp4',
           caption:'\uD83C\uDFAC ' + (r.title||cmd.query).slice(0,90), priority:0, lane:'fast', taskType, typing:false, nsfw:true });
@@ -3788,9 +3865,11 @@ async function runShortMediaCommand(chatJid, cmd, opts = {}){
         if (menuSent) return true;
         await reply('No site answered the test right now — hunting the normal chain instead...');
       }
+      /* v92.9.14: no user pick → the LANGUAGE DEFAULT site (never random) */
+      const seePin = prefer || defaultSitePin(wantGif ? 'gif' : 'image', true, { cat, lang: opts.lang, phone: opts.phone });
       const r = wantGif
-        ? await scraperGif(q, true, prefer, cat)
-        : await scraperSearch(q, true, prefer, cat);
+        ? await scraperGif(q, true, seePin, cat)
+        : await scraperSearch(q, true, seePin, cat);
       const list = (wantGif ? r.gifs : r.images) || [];
       if (r.ok && list.length){
         rememberSearch(chatJid, wantGif ? 'gif' : 'image', list, cmd.query, true);
@@ -3847,6 +3926,10 @@ function detectMediaIntent(text){
     while (s && s !== prev){ prev = s; s = s.replace(LEAD_FILL,'').trim(); }
     let prevT = null;
     while (s && s !== prevT){ prevT = s; s = s.replace(TRAIL_FILL,'').trim(); }
+    /* v92.9.14: a "query" of ONLY punctuation/symbols ("gif \", "video ??")
+     * is not a query — return '' so the branch falls back to its default
+     * instead of hunting a literal backslash. */
+    if (s && !/[\p{L}\p{N}]/u.test(s)) return '';
     return s;
   }
   /* v92 NATURAL ORDER — the boss: "commands like 'give me a ---- video'
@@ -4493,9 +4576,9 @@ async function tickTasks(){
       const tCat = localCat(t.chatJid, t.chatJid);      /* v89: localized chain */
       for (let tries = 0; tries < 2; tries++){
         r = t.kind === 'music' ? await musicDownload(t.query, 'audio')
-          : t.kind === 'video' ? await scraperVideo(t.query, t.sentKeys || [], null, tCat)
-          : t.kind === 'gif'   ? await scraperGif(t.query, false, null, tCat)
-          : await scraperSearch(t.query, false, null, tCat);
+          : t.kind === 'video' ? await scraperVideo(t.query, t.sentKeys || [], defaultSitePin('video', false, { cat: tCat }), tCat)
+          : t.kind === 'gif'   ? await scraperGif(t.query, false, defaultSitePin('gif', false, { cat: tCat }), tCat)
+          : await scraperSearch(t.query, false, defaultSitePin('image', false, { cat: tCat }), tCat);
         if (r && r.ok) break;
       }
       let url = null, caption = t.query, mimetype = '', dedupKey = null;
@@ -4873,6 +4956,10 @@ function runDmCycleSweep(){
   if (t.unref) t.unref();
 }
 function startDmAiCycle(){
+  /* v92.9.14: LOADTEST OFF — the sim asserts per-chat isolation; the
+   * autonomous proactive DMs (designed behaviour in production) would
+   * read as "leaks" there. Production is untouched. */
+  if (LOADTEST) return;
   if (dmCycleRunning) return;
   dmCycleRunning = true;
   const t = setTimeout(runDmCycleSweep, DM_CYCLE_MS * (0.5 + Math.random() * 0.5));
@@ -5091,7 +5178,7 @@ async function processDM(item){
           return;
         }
         const qrv = await mediaQueue.run(chatJid, 'video', intent.query, async () =>
-          scraperVideo(intent.query, null, null, localCat(senderJid, chatJid)));
+          scraperVideo(intent.query, null, defaultSitePin('video', false, { cat: localCat(senderJid, chatJid) }), localCat(senderJid, chatJid)));
         const rv = qrv.result;
         if (rv.ok){
           if (!dmAdmin) videoScheduler.recordRequest(senderJid);
@@ -5106,7 +5193,7 @@ async function processDM(item){
       } else if (intent.type === 'gif'){
         const cnt = extractCountFromQuery(intent.query);
         const qrg = await mediaQueue.run(chatJid, 'gif', cnt.query || intent.query, async () =>
-          scraperGif(cnt.query || intent.query, false, null, localCat(senderJid, chatJid)));
+          scraperGif(cnt.query || intent.query, false, defaultSitePin('gif', false, { cat: localCat(senderJid, chatJid) }), localCat(senderJid, chatJid)));
         const r = qrg.result;
         if (r.ok && r.gifs.length){
           /* v91: the MOST RELEVANT batch (up to 5), not one random gif —
@@ -5118,7 +5205,7 @@ async function processDM(item){
       } else {
         const cnt = extractCountFromQuery(intent.query);
         const qri = await mediaQueue.run(chatJid, 'image', cnt.query || intent.query, async () =>
-          scraperSearch(cnt.query || intent.query, false, null, localCat(senderJid, chatJid)));
+          scraperSearch(cnt.query || intent.query, false, defaultSitePin('image', false, { cat: localCat(senderJid, chatJid) }), localCat(senderJid, chatJid)));
         const r = qri.result;
         if (r.ok && r.images.length){
           /* v91: relevant batch (up to 5) + "next" pagination */
@@ -5237,7 +5324,7 @@ async function resolvePending(id, action, payload, adminChatJid){
     markMediaRequest(p.userJid);   /* v92.9: fulfilling the user's own request */
     if (p.intent.type === 'video'){
       /* v72.2: pending video requests resolve to a REAL video (was gif). */
-      const r = await scraperVideo(query, null, null, pCat);
+      const r = await scraperVideo(query, null, defaultSitePin('video', pNsfw, { cat: pCat }), pCat);
       if (!r.ok){ adminReply(adminChatJid, 'No video.'); return { ok:false }; }
       await sendMediaUrl(p.userJid, r.mediaUrl, {
         kind: 'video', mimetype: r.mimetype || 'video/mp4',
@@ -5245,7 +5332,7 @@ async function resolvePending(id, action, payload, adminChatJid){
         priority: 2, lane: 'slow', taskType: 'dmreply', typing: false, nsfw: pNsfw
       });
     } else if (p.intent.type === 'gif'){
-      const r = await scraperGif(query, pNsfw, null, pCat);
+      const r = await scraperGif(query, pNsfw, defaultSitePin('gif', pNsfw, { cat: pCat }), pCat);
       if (!r.ok || !r.gifs.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendGifSafe(p.userJid, pickFresh(r.gifs, p.userJid), '', 2, 'slow', 'dmreply', true, { nsfw: pNsfw });
     } else if (p.intent.type === 'music'){
@@ -5253,7 +5340,7 @@ async function resolvePending(id, action, payload, adminChatJid){
       if (!r.ok){ adminReply(adminChatJid, 'Music failed.'); return { ok:false }; }
       await sendMediaUrl(p.userJid, r.mediaUrl, { kind:'audio', mimetype:r.mimetype, caption:r.title, priority:2, lane:'slow', taskType:'dmreply', typing:true });
     } else {
-      const r = await scraperSearch(query, pNsfw, null, pCat);
+      const r = await scraperSearch(query, pNsfw, defaultSitePin('image', pNsfw, { cat: pCat }), pCat);
       if (!r.ok || !r.images.length){ adminReply(adminChatJid, 'No results.'); return { ok:false }; }
       await sendImageSafe(p.userJid, pickFresh(r.images, p.userJid), '', 2, 'slow', 'dmreply', true, { nsfw: pNsfw });
     }
@@ -5641,6 +5728,7 @@ const COMMAND_LIST = `🤖 BreadBot — WHAT WORKS
   !help persian · !help shona · !help arabic · !help spanish · !help french
 
 👥 GROUPS (boss only)
+  !grouplist — every group (name + JID) · reply with the NUMBER to activate it SILENTLY
   !activegroups — what is on · !groupoff (inside a group) — switch off
   !setmain <link> · !join <link> · !blockgroup <name>
 
@@ -5657,6 +5745,7 @@ const FULL_COMMAND_LIST = `BreadBot v92.9.6b — Admin (manager — school buddy
 
 ACCESS (v92.9.6 boss rules)
 !mediastats — photos/videos the bot sent, per chat + total
+!grouplist — numbered name+JID list · reply "N" / "N nsfw" / "N off" — SILENT remote activation
 !activegroups — groups the boss activated · !groupoff closes one (run inside it)
 !blockgroup <name|link|jid> — HARD blacklist, the bot NEVER sends there
 !unblockgroup <name> — unblock (KCC Youth Fellowship / KCC Bubble Study are permanent)
@@ -5813,6 +5902,12 @@ function parseCasualAdmin(text){
 async function handleAdminCommand(text, chatJid, msg, opts={}){
   const args = text.slice(1).trim().split(/\s+/);
   const cmd  = args[0].toLowerCase();
+  /* v92.9.14 FIX — !download / !groupoff / !allowgroup / !grouplist all
+   * read isGroup + senderJid, but neither existed in this scope: any of
+   * them threw ReferenceError here (caught, but the command silently
+   * failed). Derived from the same shapes handleMessage uses. */
+  const isGroup   = !!(chatJid && String(chatJid).endsWith('@g.us'));
+  const senderJid = isGroup ? ((msg && msg.key && msg.key.participant) || chatJid) : chatJid;
   /* v67: replyFn lets the SCHOOL account reuse this whole command set
    * while replying through its own socket. */
   const reply = (opts && opts.replyFn) ? opts.replyFn : ((t)=>adminReply(chatJid, t));
@@ -6382,7 +6477,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const q = cnt.query || args.slice(1).join(' ');
       if (!q){ await reply('Usage: !pic [5] <query>'); return; }
       /* v72.3: NSFW-aware — explicit pic requests use the NSFW index */
-      const r = await scraperSearch(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
+      const r = await scraperSearch(q, detectNsfw(q), defaultSitePin('image', detectNsfw(q), { cat: localCat(ADMIN_JID, chatJid) }), localCat(ADMIN_JID, chatJid));
       if (!r.ok || !r.images.length){ await reply('No results'); return; }
       previewCache.imageUrls = r.images; previewCache.imageIndex = 0;
       previewCache.currentType = 'image'; previewCache.currentUrl = r.images[0];
@@ -6416,7 +6511,7 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       if (!q){ await reply('Usage: !gif <query>'); return; }
       /* v73: NSFW-aware — explicit gif requests use the NSFW path so
        * the scraper serves adult slots for them. */
-      const r = await scraperGif(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
+      const r = await scraperGif(q, detectNsfw(q), defaultSitePin('gif', detectNsfw(q), { cat: localCat(ADMIN_JID, chatJid) }), localCat(ADMIN_JID, chatJid));
       if (!r.ok || !r.gifs.length){ await reply('No results'); return; }
       previewCache.gifUrls = r.gifs; previewCache.gifIndex = 0;
       previewCache.currentType = 'gif'; previewCache.currentUrl = r.gifs[0];
@@ -6600,14 +6695,16 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
           : '') +
           '\nMembers can just type "give me a … video / pics / song" in this chat now.\nEverything else stays ignored.\nDownloading "' + arg + '"…');
       }
-      const ranked = await scraperVideoRanked(arg, {});
+      /* v92.9.14: language default site — never a random slot */
+      const dlPin = defaultSitePin('video', detectNsfw(arg), { cat: localCat(chatJid, chatJid) });
+      const ranked = await scraperVideoRanked(arg, { site: dlPin });
       if (ranked.length){
         rememberVideoSearch(chatJid, ranked, arg);
         const sent = await sendRelevantBatch(chatJid, 1, { taskType: 'admin' });
         if (sent){ resetDailyStats(); dailyStats.nsfwSent++; await reply('✅ Sent — say "next" for the next match.'); break; }
       }
       await reply('Searching "'+arg+'" via scrapper...');
-      const r = await scraperVideo(arg, null, null);
+      const r = await scraperVideo(arg, null, dlPin);
       if (r.ok){
         await sendMediaUrl(chatJid, r.mediaUrl, {
           kind: 'video', mimetype: r.mimetype || 'video/mp4', caption: '🎬 ' + (r.title || arg).slice(0, 90),
@@ -6823,7 +6920,9 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       const q = args.slice(1).join(' ');
       if (!q){ await reply('Give query.'); return; }
       /* v72.3: NSFW-aware diagnostics too */
-      const r = cmd === 'scrapersearch' ? await scraperSearch(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid)) : await scraperGif(q, detectNsfw(q), null, localCat(ADMIN_JID, chatJid));
+      const r = cmd === 'scrapersearch'
+        ? await scraperSearch(q, detectNsfw(q), defaultSitePin('image', detectNsfw(q), { cat: localCat(ADMIN_JID, chatJid) }), localCat(ADMIN_JID, chatJid))
+        : await scraperGif(q, detectNsfw(q), defaultSitePin('gif', detectNsfw(q), { cat: localCat(ADMIN_JID, chatJid) }), localCat(ADMIN_JID, chatJid));
       if (!r.ok){ await reply('Err: '+r.error); return; }
       const items = r.images || r.gifs || [];
       await reply(items.length+' results\nFirst: '+(items[0]||'none'));
@@ -7054,10 +7153,29 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
     case 'activegroups': {
       /* v92.9.6 — groups the boss opened with a request; !groupoff closes */
       const act = accessCtl.activeGroupList();
-      if (!act.length){ await reply('No groups activated. Open one by requesting a video INSIDE it (admin), or !allowgroup + !nsfwgroup on.'); break; }
+      if (!act.length){ await reply('No groups activated. Open one: !grouplist → reply with the NUMBER (silent), or !allowgroup + !nsfwgroup on.'); break; }
       await reply('🔥 *Activated groups* (' + act.length + ')\n'
         + act.map((g, i) => (i + 1) + '. ' + (g.name || g.jid) + ' — by ' + g.by + ', ' + new Date(g.ts).toISOString().slice(0, 16).replace('T', ' ')).join('\n')
-        + '\n\nClose one: run !groupoff inside it.');
+        + '\n\nClose one: !grouplist → "N off", or run !groupoff inside it.');
+      break;
+    }
+    case 'grouplist': {
+      /* v92.9.14 REMOTE SILENT ACTIVATION — the boss: "the bot shows me the
+       * group name and id, I chose which one to activate". The numbered
+       * NAME + JID list goes to the ADMIN'S DM (never into a group —
+       * members must not see JIDs); the admin replies with the number and
+       * the group goes live WITHOUT one message sent into it. */
+      const rows = groupListRows();
+      if (!rows.length){ await reply('No groups seen yet — the bot only lists groups it is a member of.'); break; }
+      const pickChat = (!isGroup && isAdminSender(msg, senderJid)) ? chatJid : (adminDmTargets()[0] || chatJid);
+      pendingGroupPick.set(pickChat, { rows, ts: Date.now() });
+      if (isGroup && pickChat !== chatJid){
+        try { await sendBuffer(pickChat, { text: groupListText(rows) }, 3, 'slow', 'admin', false); }
+        catch (e){ await reply('Could not DM the list: ' + e.message); }
+        await reply('📋 Sent the group list to your DM — reply with the NUMBER there.');
+      } else {
+        await reply(groupListText(rows));
+      }
       break;
     }
     case 'groupoff': {
@@ -7368,17 +7486,24 @@ function scheduleBootAdminSummary(){
         const adminIn = (meta.participants || []).some(function(p){
           return adminCores.has(String(p.id || '').split('@')[0].split(':')[0].replace(/\D/g, ''));
         });
-        if (adminIn) rows.push((accessCtl.isGroupActive(jid) ? '✅ ' : '⭕ ') + (getGroupName(jid) || meta.subject || jid));
+        if (adminIn) rows.push({ jid, name: (getGroupName(jid) || meta.subject || jid), active: accessCtl.isGroupActive(jid) });
         await new Promise(function(r){ setTimeout(r, 600); });   /* gentle on the socket */
       }
       if (!rows.length) return;
+      /* v92.9.14: numbered NAME + JID rows; the pick list is ARMED so the
+       * boss can activate any of them SILENTLY by replying "3" / "3 nsfw"
+       * / "3 off" straight to this summary — nothing goes to the group. */
+      rows.sort(function(a, b){ return a.name.localeCompare(b.name); });
+      rows.forEach(function(r, i){ r.n = i + 1; });
       const msg = '🤖 Bot is ONLINE — we share ' + rows.length + ' group(s):\n\n' +
-        rows.slice(0, 60).join('\n') +
-        '\n\n✅ = activated · ⭕ = still silent (activate with !on inside the group).';
+        rows.slice(0, 60).map(function(r){ return r.n + '. ' + r.name + ' — ' + r.jid + (r.active ? ' ✅' : ' ⭕'); }).join('\n') +
+        '\n\n✅ = activated · ⭕ = silent. Reply with the NUMBER to activate it SILENTLY (nothing is sent to the group):' +
+        '\n"3" · "3 nsfw" (designate NSFW) · "3 off" (deactivate).';
       let sent = 0;
       for (const jid of adminDmTargets()){
         const g = dmGuardTriple(jid);
         if (!g.ok) continue;
+        pendingGroupPick.set(jid, { rows: rows.slice(0, 60), ts: Date.now() });
         try { await sendBuffer(jid, { text: msg }, 3, 'slow', 'admin', false); sent++; } catch(e){}
       }
       pushLog('success', 'admin', 'Boot summary sent to ' + sent + ' admin chat(s) — ' + rows.length + ' shared groups listed');
@@ -7388,7 +7513,8 @@ function scheduleBootAdminSummary(){
 }
 /* ── discovery ask: "allow AI / NSFW / music in this group? yes or no" ─ */
 const pendingGroupAsks = new Map();    /* groupJid -> { name, asked, ts } */
-const pendingVerify    = new Map();    /* groupJid -> { ai, nsfw, music }  */
+/* v92.9.14 REMOTE SILENT ACTIVATION — adminJid -> { rows:[{n,jid,name,active}], ts } */
+const pendingGroupPick = new Map();
 function maybeAskAdminAboutGroup(jid, name){
   if (!jid) return;
   if (Date.now() - connectedAtMs < 5 * 60 * 1000) return;   /* boot flood — the boot summary already lists those */
@@ -7457,13 +7583,97 @@ async function handleGroupAskReply(text, adminJid){
   }
   accessCtl.activateGroup(gid, { by: 'admin-dm-approval', name });
   const f = accessCtl.setGroupFeatures(gid, Object.assign({ by: 'admin-dm-approval' }, feats || { ai: true, nsfw: true, music: true }));
-  pendingVerify.set(gid, { ai: !!f.ai, nsfw: !!f.nsfw, music: !!f.music });
+  /* v92.9.14 SILENT — the "send nsfw play to verify" step is GONE: the
+   * approval IS the activation. Nothing is ever sent into the group. */
   const g = dmGuardTriple(adminJid);
   if (g.ok){
-    await sendBuffer(adminJid, { text: '✅ ' + name + ' — AI: ' + (f.ai ? 'ON' : 'OFF') + ' · NSFW: ' + (f.nsfw ? 'ON' : 'OFF') + ' · Music: ' + (f.music ? 'ON' : 'OFF') + '.\nNow send "nsfw play" inside the group to verify activation.' }, 3, 'slow', 'admin', false);
+    await sendBuffer(adminJid, { text: '✅ ' + name + ' — AI: ' + (f.ai ? 'ON' : 'OFF') + ' · NSFW: ' + (f.nsfw ? 'ON' : 'OFF') + ' · Music: ' + (f.music ? 'ON' : 'OFF') + '.\nActivated silently — nothing was sent to the group.' }, 3, 'slow', 'admin', false);
   }
-  pushLog('success', 'admin', 'Group APPROVED via DM: ' + name + ' (ai ' + f.ai + ' nsfw ' + f.nsfw + ' music ' + f.music + ') — awaiting in-group verify');
+  pushLog('success', 'admin', 'Group APPROVED via DM (silent): ' + name + ' (ai ' + f.ai + ' nsfw ' + f.nsfw + ' music ' + f.music + ')');
   askNextGroup();
+  return true;
+}
+
+/* ═══ v92.9.14 REMOTE SILENT ACTIVATION — the boss: "the bot shows me the
+ * group name and id, I chose which one to activate" — and NOTHING may be
+ * sent into the group while doing it. !grouplist (or the boot summary)
+ * DMs a numbered list of NAME + JID; the admin replies with the number:
+ *   "3"       → activate SILENTLY, media-only defaults (AI off, NSFW off)
+ *   "3 nsfw"  → activate + designate as THE NSFW media group
+ *   "3 off"   → deactivate again
+ * The group itself never receives a single message. ═══ */
+const GROUP_PICK_TTL_MS = 10 * 60 * 1000;
+function groupPickPrune(adminJid){
+  const p = pendingGroupPick.get(adminJid);
+  if (p && Date.now() - p.ts > GROUP_PICK_TTL_MS) pendingGroupPick.delete(adminJid);
+}
+function groupListRows(){
+  const rows = [];
+  for (const [jid, g] of groupRegistry.entries()){
+    rows.push({ jid, name: getGroupName(jid) || g.subject || jid, active: accessCtl.isGroupActive(jid) });
+  }
+  rows.sort(function(a, b){ return a.name.localeCompare(b.name); });
+  return rows.map(function(r, i){ return { n: i + 1, jid: r.jid, name: r.name, active: r.active }; });
+}
+function groupListText(rows){
+  return '📋 Groups we share (' + rows.length + '):\n\n' +
+    rows.slice(0, 60).map(function(r){ return r.n + '. ' + r.name + ' — ' + r.jid + (r.active ? ' ✅' : ' ⭕'); }).join('\n') +
+    '\n\n✅ active · ⭕ silent. Reply with the NUMBER to activate it SILENTLY (nothing is sent to the group):' +
+    '\n"3" · "3 nsfw" (designate it the NSFW group) · "3 off" (deactivate).';
+}
+async function handleGroupPickReply(text, adminJid){
+  const t = String(text || '').trim().toLowerCase();
+  groupPickPrune(adminJid);
+  const p = pendingGroupPick.get(adminJid);
+  if (/^!?grouplist$/.test(t) || (!p && !pendingGroupAsks.size && /^list$/.test(t))){
+    const rows = groupListRows();
+    if (!rows.length) return false;
+    pendingGroupPick.set(adminJid, { rows, ts: Date.now() });
+    try { await sendBuffer(adminJid, { text: groupListText(rows) }, 3, 'slow', 'admin', false); }
+    catch (e){ return true; }
+    pushLog('info', 'admin', 'Group list sent: ' + rows.length + ' group(s) — numbered pick armed');
+    return true;
+  }
+  if (!p) return false;
+  const m = t.match(/^(\d{1,3})\s*(nsfw|off)?\s*$/);
+  if (!m) return false;
+  const row = p.rows.find(function(r){ return r.n === parseInt(m[1], 10); });
+  if (!row) return false;                     /* number not from this list — ignore */
+  const g = dmGuardTriple(adminJid);
+  let reply;
+  if (m[2] === 'off'){
+    accessCtl.deactivateGroup(row.jid);
+    row.active = false;
+    /* v92.9.14: deactivating the designated NSFW group also STOPS the
+     * auto-drop scheduler — it must not keep hunting NSFW videos for a
+     * group that no longer exists. */
+    if (accessCtl.isDesignated(row.jid)){
+      accessCtl.setDesignated(null);
+      accessCtl.setNsfwActivated(false);
+      videoScheduler.disable();
+    }
+    reply = '🛑 ' + row.name + ' deactivated — silent again (nothing is sent there).';
+    pushLog('success', 'admin', 'Group DEACTIVATED remotely (silent): ' + row.name);
+  } else {
+    accessCtl.addGroup(row.jid);              /* whitelist it too — same as !on */
+    accessCtl.activateGroup(row.jid, { by: 'admin-pick', name: row.name });
+    const f = accessCtl.setGroupFeatures(row.jid, Object.assign({ by: 'admin-pick' },
+      m[2] === 'nsfw' ? { ai: false, nsfw: true, music: true } : {}));
+    if (m[2] === 'nsfw'){
+      accessCtl.setDesignated(row.jid);
+      accessCtl.setNsfwActivated(true);
+      videoScheduler.setQueries(NSFW_QUERIES);
+      videoScheduler.setGroup(row.jid);
+      videoScheduler.enable();
+    }
+    row.active = true;
+    reply = '✅ ' + row.name + ' (' + row.jid + ') ACTIVATED silently — nothing was sent to the group.' +
+      '\nAI: ' + (f.ai ? 'ON' : 'OFF') + ' · NSFW: ' + (f.nsfw ? 'ON' : 'OFF') + ' · Music: ' + (f.music ? 'ON' : 'OFF') +
+      (m[2] === 'nsfw' ? '\n🔥 Designated NSFW media group — explicit content goes HERE only.' : '') +
+      '\nChange it any time: "!grouplist" → "N nsfw" · "N off".';
+    pushLog('success', 'admin', 'Group ACTIVATED remotely (silent): ' + row.name + (m[2] === 'nsfw' ? ' (NSFW designated)' : ''));
+  }
+  if (g.ok){ try { await sendBuffer(adminJid, { text: reply }, 3, 'slow', 'admin', false); } catch (e){} }
   return true;
 }
 
@@ -8102,7 +8312,10 @@ async function handleMessage(msg){
       && !detectMediaIntent(text)
       && !isNextRequest(text)){
     /* v92.9.10: YES/NO group-approval replies are consumed here first —
-     * the boss answers the discovery asks with plain yes/no in this DM. */
+     * the boss answers the discovery asks with plain yes/no in this DM.
+     * v92.9.14: the !grouplist pick list is armed too — "3" / "3 nsfw" /
+     * "3 off" activate silently (pick list FIRST: "N off" belongs to it). */
+    if (await handleGroupPickReply(text, chatJid)) return;
     if (await handleGroupAskReply(text, chatJid)) return;
     pushLog('info','admin','Admin plain DM — AI stays silent (commands only).');
     return;
@@ -8201,16 +8414,10 @@ async function handleMessage(msg){
      * goes back out in the group's own language via t2()/replyInLang. */
     const gText = await textToEnglish(chatJid, gLang, text);
 
-    /* ═══ v92.9.10 ACTIVATION VERIFY — the boss approves a group from the
-     * discovery DM, then sends "nsfw play" (or "!verify") inside the group
-     * itself to confirm the activation is live. ═══ */
-    if (isAdmin && text && pendingVerify.has(chatJid) && /^(!verify|nsfw[ .]?play)$/i.test(text.trim())){
-      const f = pendingVerify.get(chatJid);
-      pendingVerify.delete(chatJid);
-      await sendBuffer(chatJid, { text: '✅ Verified — AI ' + (f.ai ? 'ON' : 'OFF') + ' · NSFW ' + (f.nsfw ? 'ON' : 'OFF') + ' · Music ' + (f.music ? 'ON' : 'OFF') }, 3, 'slow', 'group', true);
-      pushLog('success', 'admin', 'Activation VERIFIED in ' + (getGroupName(chatJid) || chatJid));
-      return;
-    }
+    /* ═══ v92.9.10 ACTIVATION VERIFY — REMOVED (v92.9.14): the boss
+     * activates groups REMOTELY and SILENTLY now (!grouplist → number),
+     * so there is no "send nsfw play inside the group to verify" step
+     * anymore — that step was never silent. ═══ */
 
     if (text){
       /* v87: NSFW window — normal hours everywhere, ALWAYS OPEN in the
@@ -8370,12 +8577,14 @@ async function handleMessage(msg){
         if (gIntent.type === 'gif'){
           const cnt = extractCountFromQuery(gIntent.query);
           const qr = await mediaQueue.run(chatJid, 'gif', cnt.query || gIntent.query, async () =>
-            scraperGif(cnt.query || gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
+            scraperGif(cnt.query || gIntent.query, isNsfw,
+              defaultSitePin('gif', isNsfw, { cat: localCat(senderJid, chatJid, gLang), lang: gLang, phone: senderJid || chatJid }),
+              localCat(senderJid, chatJid, gLang)));
           const r = qr.result;
           if (r.ok && r.gifs.length){
             /* v91: MOST RELEVANT batch (up to 5) + "next" pagination */
             rememberSearch(chatJid, 'gif', r.gifs, cnt.query || gIntent.query, isNsfw);
-            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '', nsfw: isNsfw === true });
+            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '', nsfw: isNsfw === true, explicitCount: cnt.count });
             if (sent){
               resetDailyStats();
               dailyStats.picsSent += sent;
@@ -8397,9 +8606,13 @@ async function handleMessage(msg){
           if (!isVague(gIntent.query)){
             const cnt = extractCountFromQuery(gIntent.query);   /* "5 porn videos" → count 5, query "porn" */
             const vq = cnt.query || gIntent.query;
+            const gCat = localCat(senderJid, chatJid, gLang);
+            /* v92.9.14: no menu (probe found nothing) → the LANGUAGE
+             * DEFAULT site, pinned — never a random slot */
+            const gPin = defaultSitePin('video', isNsfw === true, { cat: gCat, lang: gLang, phone: senderJid || chatJid });
             await sendBuffer(chatJid, { text:'🎬 Finding the best "' + vq + '" — downloading, this takes a moment...' }, 3, 'slow', 'group', true);
             const qr = await mediaQueue.run(chatJid, 'video', vq, async () => {
-              const ranked = await scraperVideoRanked(vq, { boostCat: localCat(senderJid, chatJid, gLang) });
+              const ranked = await scraperVideoRanked(vq, { site: gPin, boostCat: gCat });
               return { ok: ranked.length > 0, ranked };
             });
             const rs = qr.result;
@@ -8407,7 +8620,7 @@ async function handleMessage(msg){
               if (!isAdmin) videoScheduler.recordRequest(senderJid);
               rememberVideoSearch(chatJid, rs.ranked, vq, isNsfw);
               const st = lastSearchByChat.get(chatJid);
-              const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', nsfw: isNsfw === true });
+              const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', nsfw: isNsfw === true, explicitCount: cnt.count });
               if (sent){
                 resetDailyStats(); dailyStats.videosSent += sent;
                 if (isNsfw) dailyStats.nsfwSent += sent;
@@ -8419,7 +8632,7 @@ async function handleMessage(msg){
               /* every ranked candidate failed → fall through to the old chain */
             }
             const r = await mediaQueue.run(chatJid, 'video', vq, async () =>
-              scraperVideo(vq, null, null, localCat(senderJid, chatJid, gLang)));
+              scraperVideo(vq, null, gPin, gCat));
             const rr = r.result;
             if (rr.ok){
               if (!isAdmin) videoScheduler.recordRequest(senderJid);
@@ -8438,12 +8651,14 @@ async function handleMessage(msg){
         } else if (gIntent.type === 'image') {
           const cnt = extractCountFromQuery(gIntent.query);
           const qr = await mediaQueue.run(chatJid, 'image', cnt.query || gIntent.query, async () =>
-            scraperSearch(cnt.query || gIntent.query, isNsfw, null, localCat(senderJid, chatJid, gLang)));
+            scraperSearch(cnt.query || gIntent.query, isNsfw,
+              defaultSitePin('image', isNsfw, { cat: localCat(senderJid, chatJid, gLang), lang: gLang, phone: senderJid || chatJid }),
+              localCat(senderJid, chatJid, gLang)));
           const r = qr.result;
           if (r.ok && r.images.length){
             /* v91: MOST RELEVANT batch (up to 5) + "next" pagination */
             rememberSearch(chatJid, 'image', r.images, cnt.query || gIntent.query, isNsfw);
-            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '', nsfw: isNsfw === true });
+            const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'group', caption: '', nsfw: isNsfw === true, explicitCount: cnt.count });
             if (sent){
               resetDailyStats(); dailyStats.picsSent += sent;
               if (isNsfw) dailyStats.nsfwSent += sent;
@@ -9532,9 +9747,11 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
       await sendBuffer(chatJid, { text: await t2(chatJid, '⏳ You have used your 3 video requests for this hour — try again later.') }, 2, 'slow', 'dmreply', true);
       return;
     }
-    /* v92.1: the ranked flow — most relevant first, "next" walks the list */
+    /* v92.1: the ranked flow — most relevant first, "next" walks the list.
+     * v92.9.14: no user pin → the LANGUAGE DEFAULT site (never random). */
+    const dmVidPin = prefer || defaultSitePin('video', detectNsfw(searchQ), { cat: localCat(senderJid, chatJid), lang: getChatLang(chatJid), phone: senderJid || chatJid });
     const qr = await mediaQueue.run(chatJid, 'video', searchQ, async () => {
-      const ranked = await scraperVideoRanked(searchQ, { site: prefer || null, boostCat: localCat(senderJid, chatJid) });
+      const ranked = await scraperVideoRanked(searchQ, { site: dmVidPin, boostCat: localCat(senderJid, chatJid) });
       return { ok: ranked.length > 0, ranked };
     });
     const rs = qr.result;
@@ -9542,7 +9759,7 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
       videoScheduler.recordRequest(senderJid);
       rememberVideoSearch(chatJid, rs.ranked, searchQ);
       const cnt = extractCountFromQuery(searchQ);
-      const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply' });
+      const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', explicitCount: cnt.count });
       if (sent){
         resetDailyStats(); dailyStats.videosSent += sent;
         const st = lastSearchByChat.get(chatJid);
@@ -9554,7 +9771,7 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
       /* every ranked candidate failed → old single-shot chain */
     }
     const rv = await mediaQueue.run(chatJid, 'video', searchQ, async () =>
-      scraperVideo(searchQ, null, prefer, localCat(senderJid, chatJid)));
+      scraperVideo(searchQ, null, dmVidPin, localCat(senderJid, chatJid)));
     const rvq = rv.result;
     if (rvq.ok){
       await sendMediaUrl(chatJid, rvq.mediaUrl, { kind: 'video', mimetype: rvq.mimetype || 'video/mp4',
@@ -9568,13 +9785,15 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
   if (intent.type === 'gif'){
     const cnt = extractCountFromQuery(searchQ);
     const qr = await mediaQueue.run(chatJid, 'gif', cnt.query || searchQ, async () =>
-      scraperGif(cnt.query || searchQ, false, prefer, localCat(senderJid, chatJid)));
+      scraperGif(cnt.query || searchQ, false,
+        prefer || defaultSitePin('gif', false, { cat: localCat(senderJid, chatJid), lang: getChatLang(chatJid), phone: senderJid || chatJid }),
+        localCat(senderJid, chatJid)));
     const r = qr.result;
     if (r.ok && r.gifs.length){
       /* v91: MOST RELEVANT batch (up to 5) + "next" pagination — each
        * candidate still rides the damaged-result defense */
       rememberSearch(chatJid, 'gif', r.gifs, cnt.query || intent.query);
-      const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '' });
+      const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '', explicitCount: cnt.count });
       if (sent){ resetDailyStats(); dailyStats.picsSent += sent; }
       else await sendBuffer(chatJid, { text: await t2(chatJid, 'No working gif found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
     } else {
@@ -9585,11 +9804,13 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
   /* default: images — v91: MOST RELEVANT batch (up to 5) + "next" pagination */
   const cnt = extractCountFromQuery(intent.query);
   const qr = await mediaQueue.run(chatJid, 'image', cnt.query || intent.query, async () =>
-    scraperSearch(cnt.query || searchQ, false, prefer, localCat(senderJid, chatJid)));
+    scraperSearch(cnt.query || searchQ, false,
+      prefer || defaultSitePin('image', false, { cat: localCat(senderJid, chatJid), lang: getChatLang(chatJid), phone: senderJid || chatJid }),
+      localCat(senderJid, chatJid)));
   const r = qr.result;
   if (r.ok && r.images.length){
     rememberSearch(chatJid, 'image', r.images, cnt.query || intent.query);
-    const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '' });
+    const sent = await sendRelevantBatch(chatJid, cnt.count, { taskType: 'dmreply', caption: '', explicitCount: cnt.count });
     if (sent){ resetDailyStats(); dailyStats.picsSent += sent; }
     else await sendBuffer(chatJid, { text: await t2(chatJid, 'No working picture found for "' + intent.query + '"') }, 2, 'slow', 'dmreply', true);
   } else {
@@ -11016,7 +11237,12 @@ app.post('/loadtest/message', async function(req,res){
       return res.status(410).json({ error:'school account removed in v92 — use account "groups"' });
     } else {
       if (!sock) return res.status(409).json({ error:'bot stub not connected' });
-      await handleMessage(msg);
+      /* v92.9.14: FIRE AND FORGET — a real WhatsApp message arrives over
+       * the socket with no request-response coupling; the sim must match
+       * that. Awaiting the full handler made the sim POST hang for the
+       * whole media hunt (real-site searches run minutes) and trip the
+       * harness timeouts. Errors still surface in the server log. */
+      handleMessage(msg).catch(function(e){ pushLog('error','loadtest','handler: ' + e.message); });
     }
     res.json({ ok:true, account: 'groups' });
   } catch(e){ res.json({ ok:false, error: e.message }); }

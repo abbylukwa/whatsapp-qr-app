@@ -367,6 +367,29 @@ async function main() {
     assert(SP.languageDefaultSites('music', true, {}).length === 0, 'unknown kind → empty (no fake sites)');
     assert(SP.languageDefaultSites('image', false, {}).every(s => s.url), 'image defaults carry URLs');
   });
+  /* ═══ v92.9.15 BANDWIDTH METER — Render 5GB self-protection ═══ */
+  await test('bandwidth: records, budget gate, warn-once, new-day reset', () => {
+    const BW = require('./bandwidth');
+    BW._setState({ day: '', downBytes: 0, upBytes: 0, warned80: false, warned100: false });
+    BW.recordDown(1024 * 1024 * 30);            /* 30 MB down */
+    BW.recordUp(1024 * 1024 * 60);              /* 60 MB up */
+    assert(BW.totalBytes() === 90 * 1024 * 1024, 'total must be 90MB, got ' + BW.totalBytes());
+    assert(BW.overBudget() === 0, '90/120MB must be fine (0)');
+    BW.recordDown(1024 * 1024 * 10);            /* 100 MB */
+    assert(BW.overBudget() === 1, '100/120MB must be warn-level (1)');
+    const w = BW.shouldWarn();
+    assert(w && w.level === 1, 'first crossing must warn 80%');
+    assert(!BW.shouldWarn(), 'warn-once — second call must be null');
+    BW.recordUp(1024 * 1024 * 30);              /* 130 MB */
+    assert(BW.overBudget() === 2, '130/120MB must be over (2)');
+    assert(BW.mediaAllowed() === false, 'over budget → media refused');
+    const w2 = BW.shouldWarn();
+    assert(w2 && w2.level === 2, 'crossing 100 must warn once');
+    assert(!BW.shouldWarn(), 'warn-once at 100% too');
+    assert(BW.summary().includes('MB'), 'summary renders MB');
+    BW._setState({ day: '2000-01-01', downBytes: 1024 * 1024 * 500, upBytes: 0, warned80: true, warned100: true });
+    assert(BW.mediaAllowed() === true, 'a NEW day must reset the gate (daily, not monthly)');
+  });
   await test('server v92.9.14 wiring — pins, explicitCount, silent activation, no verify step', () => {
     const fs = require('fs');
     const src = fs.readFileSync(__dirname + '/server.js', 'utf8');

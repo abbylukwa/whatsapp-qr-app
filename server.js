@@ -1930,6 +1930,7 @@ async function downloadAndCheckInner(url, maxBytes, expectType){
   let buf = null;
   try {
     buf = await grab(url);
+    bandwidthMeter.recordDown(buf.length);   /* v92.9.15: meter every media byte — Render 5GB */
   } catch (e1){
     /* v92.6 HOTLINK DEFENSE — CDNs like athumbs.pornpics.com 403/429
      * plain bots. Retry like a real browser (UA + same-origin Referer),
@@ -2228,6 +2229,13 @@ async function sendSiteMenu(chatJid, kind, nsfw, opts){
   }
 }
 async function runPickedHunt(chatJid, pick){
+  /* v92.9.15: the daily media budget — over it, the bot stops hauling
+   * megabytes so the Render 5GB month never runs dry mid-day. */
+  if (!bandwidthMeter.mediaAllowed()){
+    try { await sendBuffer(chatJid, { text: await t2(chatJid, '🛑 Media is paused until tomorrow — daily bandwidth cap reached (keeps the free server alive). Texts still work.') }, 2, 'slow', (pick && pick.taskType) || 'dmreply', true); } catch (e){}
+    pushLog('warn', 'bandwidth', 'media refused (daily cap) → ' + chatJid);
+    return false;
+  }
   try {
     return await pickedHuntInner(chatJid, pick);
   } catch (e){
@@ -2759,6 +2767,16 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   if (priority >= 2) recordOutbound(jid);
   const showTyping_ = typing && priority >= 2 && ENABLE_TYPING;
   if (LOADTEST) lt.sendsQueued++;
+  /* v92.9.15: bandwidth warn-once sweep (no media send needed to hear it) */
+  try {
+    const _bwW = bandwidthMeter.shouldWarn();
+    if (_bwW && typeof ADMIN_JID !== 'undefined' && ADMIN_JID){
+      setImmediate(() => sendBuffer(ADMIN_JID, { text: (_bwW.level === 2
+        ? '🛑 DAILY BANDWIDTH CAP REACHED — media paused until tomorrow (texts/AI keep working). '
+        : '⚠️ Bandwidth at ' + _bwW.pct + '% of the daily media budget. ') +
+        bandwidthMeter.summary() }, 2, 'fast', 'admin', false).catch(() => {}));
+    }
+  } catch (_bwE2) {}
 
   return new Promise((resolve, reject)=>{
     const job = {
@@ -2802,6 +2820,26 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
             /* if withTypingLock returned false the typing was skipped —
              * exactly the "never type in 2 groups at once" rule */
           }
+          /* v92.9.15: meter the UPLOAD side too — buffer payloads are the
+           * real bytes Render pushes out (URL sends were counted at
+           * download time; the meter is a floor, never an over-count). */
+          try {
+            const _mediaBuf = (content && (Buffer.isBuffer(content.image) || Buffer.isBuffer(content.video) ||
+              Buffer.isBuffer(content.audio) || Buffer.isBuffer(content.document))) ||
+              (content && content.image && content.image.buffer) ? content : null;
+            if (_mediaBuf){
+              const _b = _mediaBuf.image || _mediaBuf.video || _mediaBuf.audio || _mediaBuf.document;
+              const _n = Buffer.isBuffer(_b) ? _b.length : (_b && _b.length) || 0;
+              bandwidthMeter.recordUp(_n);
+              const _warn = bandwidthMeter.shouldWarn();
+              if (_warn && ADMIN_JID){
+                sendBuffer(ADMIN_JID, { text: (_warn.level === 2
+                  ? '🛑 DAILY BANDWIDTH CAP REACHED — media is paused until tomorrow (texts/AI keep working). '
+                  : '⚠️ Bandwidth at ' + _warn.pct + '% of the daily media budget — big media will pause at 100%. ') +
+                  bandwidthMeter.summary() + '\nRaise it: !bw 200 (MB/day) · Render Hobby = 5 GB/month TOTAL.' }, 2, 'fast', 'admin', false).catch(() => {});
+              }
+            }
+          } catch (_bwErr) { /* metering must never break a send */ }
           try {
             const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
@@ -7150,6 +7188,24 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
         + (top ? 'TOP CHATS:\n' + top : 'No media sent yet.'));
       break;
     }
+    case 'bw': {
+      /* v92.9.15: bandwidth meter — today's media bytes vs the daily
+       * budget (Render Hobby = 5 GB/month TOTAL; the cap keeps it alive) */
+      const bwArg = args.slice(1).join(' ').trim();
+      const mBW = bwArg.match(/^(\d{1,4})\s*mb$/i);
+      if (mBW){
+        bandwidthMeter.setBudgetMB(parseInt(mBW[1], 10));
+        await reply('✅ Daily media budget set to ' + mBW[1] + ' MB (this boot; add BANDWIDTH_DAILY_BUDGET_MB=' + mBW[1] + ' in Render env to keep it).\n' + bandwidthMeter.summary());
+        break;
+      }
+      const lvl = bandwidthMeter.overBudget();
+      await reply(bandwidthMeter.summary() + '\n' + (lvl === 2
+        ? '🛑 OVER — media paused until tomorrow. Raise: !bw 200'
+        : lvl === 1
+          ? '⚠️ At 80%+ — media pauses at 100%. Raise: !bw 200'
+          : '✅ OK — media flows normally.') + '\nRender Hobby plan = 5 GB/month TOTAL. Media bytes (down+up) are the big cost; texts are free.');
+      break;
+    }
     case 'activegroups': {
       /* v92.9.6 — groups the boss opened with a request; !groupoff closes */
       const act = accessCtl.activeGroupList();
@@ -9142,6 +9198,7 @@ siteHealth.init(pushLog);
  * chat's language; the member replies with the number (optionally +
  * result count) and the bot hunts that exact site. */
 const sitePicker = require('./site-picker');
+const bandwidthMeter = require('./bandwidth');   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
 sitePicker.init(pushLog);
 /* v88 MUSIC ENGINE — MP3/MP4 via online downloader sites (y2mate style),
  * self-healing provider chain, 32MB pre-send cap (see music.js) */

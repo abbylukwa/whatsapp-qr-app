@@ -1930,7 +1930,8 @@ async function downloadAndCheckInner(url, maxBytes, expectType){
   let buf = null;
   try {
     buf = await grab(url);
-    bandwidthMeter.recordDown(buf.length);   /* v92.9.15: meter every media byte — Render 5GB */
+    bandwidthMeter.recordDown(buf.length);
+    try { monitor.recordDownload(expectType || 'media', buf.length, (new URL(url).hostname || ''), true); } catch (e) {}   /* v92.9.18 audit trail */
   } catch (e1){
     /* v92.6 HOTLINK DEFENSE — CDNs like athumbs.pornpics.com 403/429
      * plain bots. Retry like a real browser (UA + same-origin Referer),
@@ -2096,6 +2097,7 @@ function rememberSearch(chatJid, kind, results, query, nsfw){
    * needs it to tell NSFW batches apart from safe ones (kill vs block) */
   const _st916 = { kind, results: list, idx: 0, query: String(query || ''), nsfw: nsfw === true, at: Date.now() };
   lastSearchByChat.set(chatJid, _st916);
+  monitor.recordQuery(chatJid, focusRequesterOf(chatJid), _st916.query, _st916.kind, (list || []).length);
   /* v92.9.16: per-USER session — 3+ users can search at once, each one's
    * "next"/"preview" serves THEIR results, never another user's */
   focusLock.rememberUserSession(chatJid, (typeof focusRequesterOf === 'function' ? focusRequesterOf(chatJid) : '') || chatJid, _st916);
@@ -2860,6 +2862,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
               const _b = _mediaBuf.image || _mediaBuf.video || _mediaBuf.audio || _mediaBuf.document;
               const _n = Buffer.isBuffer(_b) ? _b.length : (_b && _b.length) || 0;
               bandwidthMeter.recordUp(_n);
+            try { monitor.recordSend(jid, content.image ? 'image' : content.video ? 'video' : content.audio ? 'audio' : 'doc', _n); } catch (e) {}
               const _warn = bandwidthMeter.shouldWarn();
               if (_warn && ADMIN_JID){
                 sendBuffer(ADMIN_JID, { text: (_warn.level === 2
@@ -7255,6 +7258,11 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
           : '✅ OK — media flows normally.') + '\nRender Hobby plan = 5 GB/month TOTAL. Media bytes (down+up) are the big cost; texts are free.');
       break;
     }
+    case 'monitor': {
+      /* v92.9.18: today's audit trail — queries, downloads, sends, mods */
+      await reply(monitor.summary());
+      break;
+    }
     case 'activegroups': {
       /* v92.9.6 — groups the boss opened with a request; !groupoff closes */
       const act = accessCtl.activeGroupList();
@@ -7978,6 +7986,15 @@ async function handleMessage(msg){
     } else return;
   }
   focusLock.noteRequester(chatJid, (msg.key && msg.key.participant) || chatJid);
+  /* v92.9.18: moderation — scam links / group-link spam, human-timed.
+   * Runs for GROUP chats only, never for the admin, never in DMs. */
+  try {
+    if (chatJid.endsWith('@g.us')){
+      const _mSender = (msg.key && msg.key.participant) || chatJid;
+      const _mText = (msg.message && (msg.message.conversation || (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text))) || '';
+      if (_mText && typeof isAdminSender === 'function' && moderation.check(chatJid, _mSender, _mText, isAdminSender(msg, _mSender))) return;
+    }
+  } catch (_mErr) { pushLog('warn', 'mod', 'check error: ' + _mErr.message); }
   /* v92.9.17: GROUPS — "next"/"preview" adopt the SENDER's own session
    * (3+ users searching never collide). DMs keep their own path below. */
   if (chatJid.endsWith('@g.us') && (isNextRequest(text) || focusLock.isPreviewRequest(text))){
@@ -9285,8 +9302,21 @@ siteHealth.init(pushLog);
  * result count) and the bot hunts that exact site. */
 const sitePicker = require('./site-picker');
 const bandwidthMeter = require('./bandwidth');
-const focusLock = require('./focus');            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
-focusLock.setAdminJid(ADMIN_JID);   /* v92.9.16 focus lock: admin always allowed (AFTER the require — v92.9.17: this sat above the declaration and crashed the boot: TDZ ReferenceError) */   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
+const focusLock = require('./focus');
+const moderation = require('./moderation');   /* v92.9.18: scam-link ban + group-link-spam kick, human-timed */
+const monitor = require('./monitor');         /* v92.9.18: query/download/send audit trail */            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
+focusLock.setAdminJid(ADMIN_JID);
+moderation.configure({
+  kick: (chat, user, reason) => { try {
+    if (!sock || typeof sock.groupParticipantsUpdate !== 'function') return;
+    sock.groupParticipantsUpdate(chat, [user], 'remove').then(() =>
+      pushLog('ok', 'mod', 'kicked ' + user + ' — ' + reason)).catch(e =>
+      pushLog('warn', 'mod', 'kick failed ' + user + ': ' + e.message));
+  } catch (e) {} },
+  del: (chat) => { try { /* scam message deletion is handled by antilink path in-flow */ } catch (e) {} },
+  warn: (chat, text) => { try { sendBuffer(chat, { text }, 2, 'slow', 'group', true); } catch (e) {} },
+  report: (text) => { try { sendBuffer(ADMIN_JID, { text }, 2, 'fast', 'admin', false); } catch (e) {} }
+});   /* v92.9.16 focus lock: admin always allowed (AFTER the require — v92.9.17: this sat above the declaration and crashed the boot: TDZ ReferenceError) */   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
 sitePicker.init(pushLog);
 /* v88 MUSIC ENGINE — MP3/MP4 via online downloader sites (y2mate style),
  * self-healing provider chain, 32MB pre-send cap (see music.js) */

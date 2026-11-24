@@ -2873,6 +2873,14 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
             }
           } catch (_bwErr) { /* metering must never break a send */ }
           try {
+            /* v92.9.19: SEND-TIME GATE — the last seal at the protocol
+             * boundary. Enqueue-time (top of sendBuffer) + send-time:
+             * a job queued while a chat was allowed and drained after a
+             * revoke, a crash-replay, ANY path — refused here too. */
+            if (!focusLock.isAllowedJid(jid)){
+              pushLog('warn', 'focus', 'send-time gate REFUSED (revoked/unknown) → ' + jid);
+              return { key: { id: 'focus-blocked-st' } };
+            }
             const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
             countSentMedia(jid, content);   /* v92.9.6: photos/videos actually delivered */
@@ -9308,6 +9316,7 @@ const monitor = require('./monitor');         /* v92.9.18: query/download/send a
 focusLock.setAdminJid(ADMIN_JID);
 moderation.configure({
   kick: (chat, user, reason) => { try {
+    if (!chat || !String(chat).endsWith('@g.us') || !focusLock.isAllowedJid(chat)) return;   /* v92.9.19: kicks only inside whitelisted groups */
     if (!sock || typeof sock.groupParticipantsUpdate !== 'function') return;
     sock.groupParticipantsUpdate(chat, [user], 'remove').then(() =>
       pushLog('ok', 'mod', 'kicked ' + user + ' — ' + reason)).catch(e =>

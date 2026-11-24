@@ -2676,6 +2676,12 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   /* v92.9.16 FOCUS LOCK — fail-closed: NOTHING ever goes to a chat that
    * is not the admin or the focus group. Not on crash, not on a wild
    * code path, not ever: this line sits above EVERY send. */
+  /* v92.9.20: observe mode — zero group sends (scheduler, broadcasts,
+   * reports, anything). Only the admin's private DM replies survive. */
+  if (observe.active() && jid !== ADMIN_JID){
+    pushLog('info', 'observe', 'send suppressed (observe mode) → ' + jid);
+    return Promise.resolve({ key: { id: 'observe-silent' } });
+  }
   if (typeof focusLock.isAllowedJid === 'function' && !focusLock.isAllowedJid(jid)){
     pushLog('warn', 'focus', 'send REFUSED (not admin/focus group) → ' + jid);
     return Promise.resolve({ key: { id: 'focus-blocked' } });
@@ -7266,6 +7272,22 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
           : '✅ OK — media flows normally.') + '\nRender Hobby plan = 5 GB/month TOTAL. Media bytes (down+up) are the big cost; texts are free.');
       break;
     }
+    case 'observe': {
+      /* v92.9.20: listen-only window — on [hours] / off / status / report */
+      const sub = String(args[1] || 'status').toLowerCase();
+      if (sub === 'on'){
+        const h = Math.min(24, Math.max(0.5, parseFloat(args[2]) || 3));
+        observe.setMode(true, h);
+        await reply('👂 Observe ON — the bot goes silent for ' + h + 'h: listening, capturing every group message, sending NOTHING (no replies, no AI, no media, no moderation). Admin DMs still work. It wakes up by itself — or end it early with !observe off.');
+      } else if (sub === 'off'){
+        observe.setMode(false); await reply('👂 Observe OFF — the bot is live again.');
+      } else if (sub === 'report'){
+        await reply(observe.report());
+      } else {
+        await reply(observe.status());
+      }
+      break;
+    }
     case 'monitor': {
       /* v92.9.18: today's audit trail — queries, downloads, sends, mods */
       await reply(monitor.summary());
@@ -7994,6 +8016,14 @@ async function handleMessage(msg){
     } else return;
   }
   focusLock.noteRequester(chatJid, (msg.key && msg.key.participant) || chatJid);
+  /* v92.9.20: OBSERVE MODE — listen-only. Every group message is
+   * captured for the refinement report, then DROPPED: no AI, no media,
+   * no moderation, no bytes out. Admin DMs keep working (private). */
+  if (chatJid.endsWith('@g.us') && observe.active()){
+    try { const _oText = (msg.message && (msg.message.conversation || (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text))) || '';
+          if (_oText) observe.capture(chatJid, (msg.key && msg.key.participant) || chatJid, _oText); } catch (_oErr) {}
+    return;
+  }
   /* v92.9.18: moderation — scam links / group-link spam, human-timed.
    * Runs for GROUP chats only, never for the admin, never in DMs. */
   try {
@@ -9312,10 +9342,12 @@ const sitePicker = require('./site-picker');
 const bandwidthMeter = require('./bandwidth');
 const focusLock = require('./focus');
 const moderation = require('./moderation');   /* v92.9.18: scam-link ban + group-link-spam kick, human-timed */
-const monitor = require('./monitor');         /* v92.9.18: query/download/send audit trail */            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
+const monitor = require('./monitor');         /* v92.9.18: query/download/send audit trail */
+const observe = require('./observe');         /* v92.9.20: listen-only mode — capture chats, send nothing */            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
 focusLock.setAdminJid(ADMIN_JID);
 moderation.configure({
   kick: (chat, user, reason) => { try {
+    if (observe.active()){ pushLog('info', 'observe', 'kick suppressed (observe mode): ' + user); return; }
     if (!chat || !String(chat).endsWith('@g.us') || !focusLock.isAllowedJid(chat)) return;   /* v92.9.19: kicks only inside whitelisted groups */
     if (!sock || typeof sock.groupParticipantsUpdate !== 'function') return;
     sock.groupParticipantsUpdate(chat, [user], 'remove').then(() =>

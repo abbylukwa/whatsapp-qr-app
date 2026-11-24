@@ -23,6 +23,12 @@ const HEALTH_FILE   = path.join(__dirname, 'data', 'site-health.json');
 
 const PROBE_INTERVAL_MS = 6 * 60 * 60 * 1000;   /* 6h */
 const DEAD_COOLDOWN_MS  = 30 * 60 * 1000;       /* dead → skipped 30min */
+/* v92.9.21: LOCAL-ONLY categories (the boss: "I don't want global
+ * websites, make sure no global" — Afghanistan first, ZW/SA frozen).
+ * A local-only category NEVER falls back to neighbours or the world:
+ * hunts in these categories use verified local sources or fail honest. */
+const LOCAL_ONLY_CATS = new Set(['afghan']);
+function isLocalOnlyCat(cat){ return LOCAL_ONLY_CATS.has(String(cat || '')); }
 const PROBE_CONC        = 3;                     /* gentle — avoid 429s */
 const PROBE_QUERY       = process.env.SITE_PROBE_QUERY || 'amateur';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -127,8 +133,11 @@ function markFail(url, why){
  * Dead sites (recently failed, inside cooldown) are EXCLUDED. */
 function healthyLinks(kind, nsfw, preferUrl, boostCat){
   const now = Date.now();
-  const rows = registry.filter(s =>
+  let rows = registry.filter(s =>
     s.kind === kind && (!nsfw || s.nsfw !== false));
+  /* v92.9.21: local-only cats are hard-filtered to their own category —
+   * the world tier below can never leak a global site into them */
+  if (boostCat && isLocalOnlyCat(boostCat)) rows = rows.filter(s => s.category === boostCat);
   const boostCats = categoriesFor(boostCat);
   const scored = rows.map(s => {
     const h = health[s.url];
@@ -226,5 +235,5 @@ module.exports = {
   healthyLinks, siteNameByUrl, summary, perCategory,
   categoryByPhone, categoryByLang, categoriesFor,
   loadRegistry, loadHealth, saveHealth,
-  REGISTRY_FILE, HEALTH_FILE, registry: () => registry
+  REGISTRY_FILE, HEALTH_FILE, registry: () => registry, isLocalOnlyCat
 };

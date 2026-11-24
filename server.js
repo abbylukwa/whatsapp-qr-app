@@ -2022,8 +2022,19 @@ function localCat(senderJid, chatJid, lang){
 function defaultSitePin(kind, nsfw, opts){
   try {
     const s = sitePicker.languageDefaultSites(kind, nsfw, opts || {})[0];
+    const cat = opts && opts.cat;
+    /* v92.9.21: local-only policy — when the category is local-only and
+     * has NO local source, the hunt is ABORTED here (throw) instead of
+     * letting the scraper fall back to a global default. Covers every
+     * call site: no request with a global site can ever leave. */
+    if (cat && siteHealth.isLocalOnlyCat(cat) && !s){
+      throw new Error('LOCAL-ONLY: no verified local ' + cat + ' source for ' + kind + ' yet — hunt stays 100% local, no global fallback.');
+    }
     return s ? s.name : null;
-  } catch (e){ return null; }
+  } catch (e) {
+    if (/^LOCAL-ONLY:/.test(e.message)) throw e;   /* abort — never swallow the policy */
+    return null;
+  }
 }
 /* v88 DAMAGED-RESULT DEFENSE — try candidates until one actually sends;
  * a URL that dies is forgotten for this chat (and quietly skipped, no

@@ -61,6 +61,9 @@ function capture(chat, user, text){
 function report(){
   let rows = [];
   try { rows = fs.readFileSync(CHATLOG, 'utf8').trim().split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean); } catch (e) {}
+  /* v92.9.20b: THIS window only — earlier observe windows must never
+   * mix into the current decision data (the dry run caught this) */
+  if (st.startedAt) rows = rows.filter(r => r.t >= st.startedAt);
   if (!rows.length) return '📭 No chat captured yet — the observe window has not seen messages.';
   const byUser = {}, byHour = {};
   let asks = 0, links = 0, scamish = 0, greetings = 0;

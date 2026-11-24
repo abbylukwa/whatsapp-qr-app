@@ -338,14 +338,23 @@ function sessionInfo(folder, envName){
            blob: hasCreds ? buildSessionBlob(folder) : null,
            credsBytes: hasCreds ? fs.statSync(path.join(folder, 'creds.json')).size : 0 };
 }
+/* v92.9.23: SELF-HEAL — fresh boot is forced by FRESH_QR=1 OR by the
+ * data/FRESH_REQUIRED marker that the 401 loggedOut self-heal writes
+ * (WhatsApp invalidated the session; without this, every boot
+ * resurrected the dead creds from disk/env/gist and 401'd again). */
+function freshBootForced(){
+  if ((process.env.FRESH_QR || '') === '1') return true;
+  try { return fs.existsSync(path.join(__dirname, 'data', 'FRESH_REQUIRED')); } catch (e) { return false; }
+}
 function ensureSessionFromEnv(slot, folder, envName){
   /* v92.9.22: FRESH_QR — the boss: "qr code not to use Auth files
-   * which are already there." When FRESH_QR=1, existing auth is
-   * IGNORED at boot: the disk folder is renamed aside (backup, never
-   * deleted — recoverable) and the env session blob is NOT restored.
-   * The socket starts clean → the QR card shows a fresh code to scan.
-   * Remove FRESH_QR after pairing so restarts keep the new session. */
-  if ((process.env.FRESH_QR || '') === '1'){
+   * which are already there." When FRESH_QR=1 (or the self-heal
+   * marker is set), existing auth is IGNORED at boot: the disk folder
+   * is renamed aside (backup, never deleted — recoverable) and the
+   * env session blob is NOT restored. The socket starts clean → the
+   * QR card shows a fresh code to scan. Remove FRESH_QR after pairing
+   * so restarts keep the new session. */
+  if (freshBootForced()){
     if (fs.existsSync(folder)){
       const bak = folder + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       try { fs.renameSync(folder, bak); pushLog('warn', 'session', slot + ': FRESH_QR — old auth backed up to ' + bak); }
@@ -8983,6 +8992,9 @@ async function connectBot(){
       }
       if (connection === 'open'){
         isConnecting = false; connectionStatus = 'connected';
+        /* v92.9.23: pairing succeeded — the fresh-required mark has done
+         * its job; the new session auto-backs-up over the dead one. */
+        try { fs.rmSync(path.join(__dirname, 'data', 'FRESH_REQUIRED'), { force:true }); } catch(e){}
         qrDataUri = null;   /* v71.2: drop the QR once paired — panel hides it */
         lastStatusChangeAt = Date.now();
         reconnectAttempts = 0; botStartTime = Date.now();
@@ -9074,7 +9086,18 @@ async function connectBot(){
          * got the school account logged out. A rescan is required. */
         if (code === DisconnectReason.loggedOut){
           connectionStatus = 'logged-out';
-          pushLog('error','bot','401 Logged out — credentials invalid. Press Refresh QR to scan again (auto-retry disabled in v68.3).');
+          /* v92.9.23: SELF-HEAL — WhatsApp invalidated the session, but
+           * leaving the dead creds in place meant every boot restored
+           * them again (disk/env/gist) and 401'd in a loop — the exact
+           * logged-out trap the boss hit on deploy. Back the dead auth
+           * up, mark fresh-required, restart: the next boot shows a
+           * clean QR. Nothing to juggle. */
+          pushLog('error','bot','401 Logged out — credentials invalid (self-heal: backing up dead auth, restarting fresh — a clean QR appears on the card, scan it once)');
+          try { fs.renameSync(AUTH_FOLDER, AUTH_FOLDER + '.bak-' + new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)); }
+          catch (e) { try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch (e2) {} }
+          try { fs.mkdirSync(path.join(__dirname, 'data'), { recursive:true }); fs.writeFileSync(path.join(__dirname, 'data', 'FRESH_REQUIRED'), 'loggedOut ' + new Date().toISOString()); } catch (e) {}
+          pushLog('warn','bot','Self-heal restart in 3s — no env changes needed. After scanning the fresh QR, delete the stale SESSION_B64_GROUPS env var (the gist auto-backup takes over).');
+          setTimeout(() => process.exit(70), 3000);   /* Render auto-restarts the service */
           return;
         }
         if (code === 403){ connectionStatus = 'disconnected'; pushLog('error','bot','403 Forbidden — likely banned'); return; }
@@ -13201,7 +13224,7 @@ const HTTP_SERVER = app.listen(PORT, async function(){
          * path. The auto-backup below stays ON: once the fresh QR is
          * scanned, the NEW session backs itself up and future deploys
          * restore THAT. */
-        if ((process.env.FRESH_QR || '') === '1'){
+        if (freshBootForced()){
           pushLog('warn', 'session', 'FRESH_QR — GitHub gist session NOT restored (the fresh QR stays fresh)');
         } else {
         const r = await sessionStore.restoreLatest(AUTH_FOLDER);

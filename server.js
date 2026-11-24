@@ -219,7 +219,6 @@ const AUTH_FOLDER = 'auth_info';
 
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g,'');
 const ADMIN_JID   = `${ADMIN_PHONE}@s.whatsapp.net`;
-focusLock.setAdminJid(ADMIN_JID);   /* v92.9.16 focus lock: admin always allowed */
 const ADMIN_LID_FILE         = path.join(__dirname,'admin_lids.json');
 const HARDCODED_ADMIN_LIDS   = ['115110005706891'];
 const MAIN_GROUP_FILE        = path.join(__dirname,'main_group_jid.json');
@@ -2473,6 +2472,17 @@ async function sendMediaUrl(jid, mediaUrl, opts = {}){
   const isVideo = kind === 'video' || (mimetype && mimetype.startsWith('video/'));
   const isImage = kind === 'image' || (mimetype && mimetype.startsWith('image/'));
 
+  /* v92.9.17: meter URL-delivered sends — Baileys downloads these bytes
+   * itself, invisible to downloadAndCheck. A cheap HEAD reveals the size
+   * so the Render meter stays honest (floor → near-exact). */
+  if (isVideo || isAudio){
+    try {
+      const h = await axios.head(mediaUrl, { timeout: 8000, validateStatus: s2 => s2 < 400,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BreadBot/1.0)' } });
+      const cl = parseInt(h.headers['content-length'] || '0', 10);
+      if (cl > 0) bandwidthMeter.recordDown(cl);
+    } catch (_hErr) { /* opaque URL — meter stays a floor */ }
+  }
   let content;
   if (isAudio)      content = { audio:  { url: mediaUrl }, mimetype: mimetype || 'audio/mpeg', caption };
   else if (isVideo) content = { video:  { url: mediaUrl }, mimetype: mimetype || 'video/mp4',  caption };
@@ -3213,6 +3223,8 @@ async function sendButtons(jid, menuKeyOrText, opts = {}){
   } catch(e){ pushLog('warn','buttons','native flow failed: ' + e.message); }
   /* 2) legacy quick-reply buttons — older builds */
   try {
+    /* v92.9.17: focus lock — buttons go through the same whitelist */
+    if (!focusLock.isAllowedJid(jid)){ pushLog('warn', 'focus', 'buttons REFUSED → ' + jid); return { ok: false, via: 'focus-lock' }; }
     const sent = await S.sendMessage(jid, {
       text: String(title).slice(0, 900),
       buttons: btns.map(b => ({ buttonId: b.id, buttonText: { displayText: b.label }, type: 1 })),
@@ -4265,6 +4277,8 @@ async function probeMainGroup(){
   if (lastProbeDate === today) return;
   lastProbeDate = today;
   try {
+    /* v92.9.17: focus lock — the probe must not wake a stranger group */
+    if (!focusLock.isAllowedJid(mainGroupJid)){ pushLog('info', 'focus', 'probe skipped — main group not whitelisted'); return; }
     const sent = await sock.sendMessage(mainGroupJid, { text: 'Anyone online? 👋' });
     if (sent?.key?.id) markBotSent(sent.key.id);
     pushLog('success','main',`Probe sent to ${mainGroupJid}`);
@@ -4354,6 +4368,7 @@ async function handleAntiLink(jid, msg, text, senderJid, isAdmin){
   if (!deleteAllowed()){ pushLog('warn','antilink','Delete rate cap hit'); return false; }
   const botIsAdmin = await botIsAdminIn(jid);
   if (!botIsAdmin){ pushLog('info','antilink',`Skip delete in ${jid} — not admin`); return false; }
+  if (!focusLock.isAllowedJid(jid)){ pushLog('info', 'focus', 'delete skipped — chat not whitelisted'); return false; }
   try { await sock.sendMessage(jid, { delete: msg.key }); recordDelete(); resetDailyStats(); dailyStats.deletesDone++; } catch(e){}
   pushLog('info','antilink',`Deleted link from ${senderJid.split('@')[0]}`);
   const key = `${jid}:${senderJid}`;
@@ -7951,8 +7966,11 @@ async function handleMessage(msg){
    * processing (no AI, no media, no bytes). The invite code is resolved
    * to the group JID on first sight and persisted for reboots. */
   if (!focusLock.isAllowedJid(chatJid)){
-    if (chatJid.endsWith('@g.us') && !global._focusResolveTried){
-      global._focusResolveTried = true;
+    /* v92.9.17: retry the invite resolve every 5 minutes — the old flag
+     * was set BEFORE the attempt, so one hiccup locked the group out
+     * until the next reboot. */
+    if (chatJid.endsWith('@g.us') && Date.now() - (global._focusResolveAt || 0) > 300000){
+      global._focusResolveAt = Date.now();
       try { const S0 = sock; const info = await S0.groupGetInviteInfo(focusLock.resolveInviteCode());
             if (info && info.id){ focusLock.addFocusJid(info.id); pushLog('ok', 'focus', 'focus group resolved: ' + info.id); } } catch (e) { pushLog('warn', 'focus', 'invite resolve failed: ' + e.message); }
       if (focusLock.isAllowedJid(chatJid)){ /* now allowed */ }
@@ -7960,6 +7978,27 @@ async function handleMessage(msg){
     } else return;
   }
   focusLock.noteRequester(chatJid, (msg.key && msg.key.participant) || chatJid);
+  /* v92.9.17: GROUPS — "next"/"preview" adopt the SENDER's own session
+   * (3+ users searching never collide). DMs keep their own path below. */
+  if (chatJid.endsWith('@g.us') && (isNextRequest(text) || focusLock.isPreviewRequest(text))){
+    const _u917 = (msg.key && msg.key.participant) || chatJid;
+    const _t = (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'group', true);
+    if (focusLock.isPreviewRequest(text)){
+      focusLock.adoptUserSession(chatJid, _u917, (c, st2) => { if (st2) lastSearchByChat.set(c, st2); });
+      const pst = lastSearchByChat.get(chatJid);
+      if (pst && pst.idx < pst.results.length){
+        const pnext = pst.results[pst.idx];
+        if (pst.kind === 'video'){
+          sendBuffer(chatJid, { text: '▶️ Next: ' + ((pnext.title || '') + ' ' + (pnext.site ? '[' + pnext.site + ']' : '')).trim() + '\n' + (pnext.url || '') + '\nSay "next" to watch it.' }, 2, 'slow', 'group', true);
+        } else {
+          sendFirstWorking(chatJid, [pnext], pst.kind, '👁 preview ' + (pst.idx + 1) + '/' + pst.results.length, { taskType: 'group', nsfw: pst.nsfw === true }).then(pr => { if (pr && pr.ok) pst.idx++; });
+        }
+      } else { _t('Nothing queued — send a search first ("send latina video").'); }
+      return;
+    }
+    const handled = await handleNextMedia(chatJid, _t, 'group', _u917);
+    if (handled) return;
+  }
   /* v92.9.10: message age — stale-redelivery detection (see staleRedeliveryDrop) */
   const _msgTsRaw = Number(msg.messageTimestamp || 0);
   const redelivTsMs = _msgTsRaw > 1e12 ? _msgTsRaw : _msgTsRaw * 1000;
@@ -9246,7 +9285,8 @@ siteHealth.init(pushLog);
  * result count) and the bot hunts that exact site. */
 const sitePicker = require('./site-picker');
 const bandwidthMeter = require('./bandwidth');
-const focusLock = require('./focus');            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
+const focusLock = require('./focus');            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
+focusLock.setAdminJid(ADMIN_JID);   /* v92.9.16 focus lock: admin always allowed (AFTER the require — v92.9.17: this sat above the declaration and crashed the boot: TDZ ReferenceError) */   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
 sitePicker.init(pushLog);
 /* v88 MUSIC ENGINE — MP3/MP4 via online downloader sites (y2mate style),
  * self-healing provider chain, 32MB pre-send cap (see music.js) */

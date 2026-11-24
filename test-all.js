@@ -367,6 +367,33 @@ async function main() {
     assert(SP.languageDefaultSites('music', true, {}).length === 0, 'unknown kind → empty (no fake sites)');
     assert(SP.languageDefaultSites('image', false, {}).every(s => s.url), 'image defaults carry URLs');
   });
+  /* ═══ v92.9.16 FOCUS LOCK — only admin + the focus group, fail-closed ═══ */
+  await test('focus lock: send kill-switch fail-closed, video cap 2, specs in many languages, per-user sessions', () => {
+    const F = require('./focus');
+    F.setAdminJid('263771234567@s.whatsapp.net');
+    assert(F.isAllowedJid('263771234567@s.whatsapp.net') === true, 'admin DM allowed');
+    assert(F.isAllowedJid('12036302xxxx@g.us') === false, 'unknown group REFUSED');
+    assert(F.isAllowedJid('254799999999@s.whatsapp.net') === false, 'random DM REFUSED');
+    assert(F.isAllowedJid('status@broadcast') === false, 'status refused');
+    assert(F.isAllowedJid(undefined) === false && F.isAllowedJid('') === false, 'garbage refused');
+    F.addFocusJid('120363029999999@g.us');
+    assert(F.isAllowedJid('120363029999999@g.us') === true, 'resolved focus group allowed');
+    assert(F.capVideoCount(10) === 2, 'video cap = 2');
+    assert(F.capVideoCount(1) === 1 && F.capVideoCount(0) === 2, 'cap floor 1, default 2');
+    assert(F.detectSpec('send latina video') === 'video', 'en video spec');
+    assert(F.detectSpec('بفرست لاتین ویدیو') === 'video', 'fa video spec');
+    assert(F.detectSpec('envía latina foto') === 'image', 'es image spec');
+    assert(F.detectSpec('send dance gif') === 'gif', 'gif spec');
+    assert(F.isPreviewRequest('preview') && F.isPreviewRequest('Preview') && !F.isPreviewRequest('next'), 'preview parser');
+    /* per-user sessions: two users in one group never collide */
+    F.rememberUserSession('G@g.us', 'userA@s.whatsapp.net', { query: 'latina', idx: 2 });
+    F.rememberUserSession('G@g.us', 'userB@s.whatsapp.net', { query: 'dance', idx: 0 });
+    assert(F.getUserSession('G@g.us', 'userA@s.whatsapp.net').idx === 2, 'userA session intact');
+    assert(F.getUserSession('G@g.us', 'userB@s.whatsapp.net').idx === 0, 'userB session separate');
+    assert(F.getUserSession('G@g.us', 'nobody@s.whatsapp.net') === null, 'unknown user = no session');
+    F.noteRequester('G@g.us', 'userB@s.whatsapp.net');   /* router does this on every message */
+    assert(F.peekRequester('G@g.us') === 'userB@s.whatsapp.net', 'last requester peek');
+  });
   /* ═══ v92.9.15 BANDWIDTH METER — Render 5GB self-protection ═══ */
   await test('bandwidth: records, budget gate, warn-once, new-day reset', () => {
     const BW = require('./bandwidth');

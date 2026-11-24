@@ -1,0 +1,104 @@
+/* ══════════════════════════════════════════════════════════════
+ *  FOCUS MODE (v92.9.16) — the boss: "it won't interact with anyone
+ *  except this group and the admin ... no matter what, even if it
+ *  crashes it doesn't ever send to anyone else."
+ *
+ *  THREE layers, all fail-closed:
+ *   1. INVITE LOCK — the group is pinned by its invite code
+ *      (HGW3IdVbDJyImOgp1BFqT7). On connect the code is resolved to the
+ *      real group JID (sock.groupGetInviteInfo) and persisted to
+ *      data/focus_group.json; the persisted JID survives reboots.
+ *   2. SEND KILL SWITCH — sendBuffer (the ONE choke point every send
+ *      goes through) refuses ANY jid that is not the admin or the focus
+ *      group. A crashed handler cannot make the bot talk to a stranger:
+ *      the gate is above every code path, by construction.
+ *   3. ROUTER GATE — messages.upsert drops non-whitelisted chats before
+ *      any processing (no AI, no media, no bytes — bandwidth too).
+ *
+ *  SESSIONS: "same search needs different results" + "2 videos per
+ *  query, next and preview, 3+ users at once" — every user in the
+ *  focus group gets their OWN session (chat|user key): a user's "next"
+ *  never collides with another user's search. Results never repeat
+ *  within a session (the dedup cache + idx cursor guarantee it), and a
+ *  repeated query after exhaustion re-hunts with a rotated slot, so the
+ *  same search surfaces DIFFERENT results.
+ *
+ *  MEDIA LIMIT: video queries are capped at 2 per request (the boss's
+ *  number — bandwidth-aware); pics/gifs keep the normal batch. ═══ */
+const fs   = require('fs');
+const path = require('path');
+
+const STATE_FILE = path.join(__dirname, 'data', 'focus_group.json');
+const FOCUS_INVITE = (process.env.FOCUS_GROUP_INVITE || 'HGW3IdVbDJyImOgp1BFqT7').trim();
+
+let adminJid = '';                       /* set at boot from server config */
+let focusJids = new Set();               /* resolved group JID(s) */
+try {
+  const j = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  if (j && j.jid) focusJids.add(j.jid);
+} catch (e) { /* resolve on first connect */ }
+
+function setAdminJid(j){ if (j && typeof j === 'string') adminJid = j; }
+function addFocusJid(jid){
+  if (!jid || typeof jid !== 'string' || !jid.endsWith('@g.us')) return false;
+  if (focusJids.has(jid)) return true;
+  focusJids.add(jid);
+  try { fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+        fs.writeFileSync(STATE_FILE, JSON.stringify({ invite: FOCUS_INVITE, jid: jid, at: Date.now() })); } catch (e) {}
+  return true;
+}
+function resolveInviteCode(){ return FOCUS_INVITE; }
+/* THE kill-switch predicate — fail closed: unknown jid = refused */
+function isAllowedJid(jid){
+  if (!jid || typeof jid !== 'string') return false;
+  if (adminJid && jid === adminJid) return true;
+  if (jid === 'status@broadcast') return false;
+  return focusJids.has(jid);
+}
+
+/* ── per-USER sessions ─────────────────────────────────────────── */
+const sessions = new Map();              /* 'chat|user' → search state */
+const SESSION_TTL = 30 * 60 * 1000;      /* 30 min like NEXT_TTL */
+function noteRequester(chatJid, userJid){
+  if (chatJid && userJid) sessions._last = { chat: chatJid, user: userJid, at: Date.now() };
+}
+function peekRequester(chatJid){
+  const L = sessions._last;
+  return (L && L.chat === chatJid) ? L.user : null;
+}
+function rememberUserSession(chatJid, userJid, st){
+  if (!chatJid || !userJid || !st) return;
+  sessions.set(chatJid + '|' + userJid, Object.assign({}, st, { at: Date.now() }));
+}
+function getUserSession(chatJid, userJid){
+  const k = chatJid + '|' + userJid;
+  const st = sessions.get(k);
+  if (st && Date.now() - st.at > SESSION_TTL){ sessions.delete(k); return null; }
+  return st || null;
+}
+/* swap a user's session in as the chat's active search so the existing
+ * sendRelevantBatch/handleNextMedia pipeline serves THAT user */
+function adoptUserSession(chatJid, userJid, adopt){
+  const st = getUserSession(chatJid, userJid);
+  if (!st) return null;
+  if (typeof adopt === 'function') adopt(chatJid, st);
+  return st;
+}
+function capVideoCount(n){ return Math.max(1, Math.min(parseInt(n || 2, 10) || 2, 2)); }   /* the boss: 2 videos */
+
+/* ── parsers (any language) ────────────────────────────────────── */
+/* media-type spec words: English, Persian, Spanish, Portuguese, French,
+ * Arabic, Swahili, Shona, Chinese, Hindi, Russian, Indonesian */
+const SPEC_RE = /\b(video|videos|vid|vids|clip|movie|film|ویدیو|فيديو|视频|वीडियो|видео|bideo|video s)\b|\b(pic|pics|photo|photos|image|images|picture|pictures|jpg|عکس|صورة|照片|तस्बिर|фото|foto|imagen|imagen s|picha|foto s|mufananidzo)\b|\b(gif|gifs|animated|گیف|جيف|动图|gif s|gitp)\b/i;
+function detectSpec(text){
+  const t = String(text || '').toLowerCase();
+  if (!t) return '';
+  if (/(^|\s)(gif|gifs|گیف|جيف|动图|gitp)($|\s)/.test(t) || 'gif' === t) return 'gif';
+  if (/(video|vid|clip|movie|film|ویدیو|فيديو|视频|वीडियो|видео|bideo)/.test(t)) return 'video';
+  if (/(pic|photo|image|picture|jpg|عکس|صورة|照片|фото|foto|imagen|picha|mufananidzo)/.test(t)) return 'image';
+  return '';
+}
+const PREVIEW_RE = /^(preview|previews|show me|tarisa|پیش نمایش|vista previa|aperçu|превью|預覽|pratinjau|অাগের)\s*$/i;
+function isPreviewRequest(text){ return PREVIEW_RE.test(String(text || '').trim()); }
+
+module.exports = { setAdminJid, addFocusJid, resolveInviteCode, isAllowedJid, noteRequester, peekRequester, rememberUserSession, getUserSession, adoptUserSession, capVideoCount, detectSpec, isPreviewRequest, _state: () => ({ adminJid, focusJids: [...focusJids] }) };

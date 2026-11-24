@@ -219,6 +219,7 @@ const AUTH_FOLDER = 'auth_info';
 
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '263777627210').replace(/\D/g,'');
 const ADMIN_JID   = `${ADMIN_PHONE}@s.whatsapp.net`;
+focusLock.setAdminJid(ADMIN_JID);   /* v92.9.16 focus lock: admin always allowed */
 const ADMIN_LID_FILE         = path.join(__dirname,'admin_lids.json');
 const HARDCODED_ADMIN_LIDS   = ['115110005706891'];
 const MAIN_GROUP_FILE        = path.join(__dirname,'main_group_jid.json');
@@ -2052,7 +2053,9 @@ async function sendFirstWorking(jid, candidates, kind, caption, opts = {}){
  * batch from the SAME search instead of searching again. */
 const lastSearchByChat = new Map();       /* jid -> { kind, results, idx, query, at } */
 const NEXT_TTL_MS = 30 * 60 * 1000;       /* "next" forgets a search after 30 min */
-const RELEVANT_BATCH_CAP = 5;             /* the boss's number */
+const RELEVANT_BATCH_CAP = 5;
+/* v92.9.16: which user in this chat is acting (for per-USER sessions) */
+function focusRequesterOf(chatJid){ return focusLock.peekRequester(chatJid) || chatJid; }             /* the boss's number */
 /* "send 5 pics of mbira" → count 5, query "mbira". A standalone number
  * token 2-99 riding with the media words is the requested batch size
  * (capped at 10). Guards: "50 cent songs" / "2 pac songs" / "99 red
@@ -2092,7 +2095,11 @@ function rememberSearch(chatJid, kind, results, query, nsfw){
   const list = (results || []).filter(u => typeof u === 'string' && u);
   /* v92.9.11: remember the NSFW verdict of the search — the send boundary
    * needs it to tell NSFW batches apart from safe ones (kill vs block) */
-  lastSearchByChat.set(chatJid, { kind, results: list, idx: 0, query: String(query || ''), nsfw: nsfw === true, at: Date.now() });
+  const _st916 = { kind, results: list, idx: 0, query: String(query || ''), nsfw: nsfw === true, at: Date.now() };
+  lastSearchByChat.set(chatJid, _st916);
+  /* v92.9.16: per-USER session — 3+ users can search at once, each one's
+   * "next"/"preview" serves THEIR results, never another user's */
+  focusLock.rememberUserSession(chatJid, (typeof focusRequesterOf === 'function' ? focusRequesterOf(chatJid) : '') || chatJid, _st916);
   if (lastSearchByChat.size > 500){        /* bound the map */
     lastSearchByChat.delete(lastSearchByChat.keys().next().value);
   }
@@ -2138,7 +2145,9 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
    * returns 0 when no number was said — the old `count || 1` sent ONE). */
   const explicit = Math.min(10, Math.max(0, parseInt(opts.explicitCount || 0, 10)));
   const cap = Math.max(RELEVANT_BATCH_CAP, explicit);
-  const n = Math.max(1, Math.min(count || RELEVANT_BATCH_CAP, cap));
+  let n = Math.max(1, Math.min(count || RELEVANT_BATCH_CAP, cap));
+  /* v92.9.16: MEDIA LIMIT — 2 videos per search query, "next" for more */
+  if (st.kind === 'video') n = Math.min(n, focusLock.capVideoCount(explicit || n));
   let sent = 0;
   for (let i = 0; i < n; i++){
     if (st.idx >= st.results.length) break;
@@ -2183,8 +2192,11 @@ async function sendRelevantBatch(chatJid, count, opts = {}){
 }
 /* "next" / "more" — continue the last search of this chat. reply(text)
  * is the chat's own reply helper. Returns true when "next" was handled. */
-async function handleNextMedia(chatJid, reply, taskType = 'group'){
+async function handleNextMedia(chatJid, reply, taskType = 'group', userJid = null){
   markMediaRequest(chatJid);     /* v92.9: "next" is a media request too */
+  /* v92.9.16: multi-user — "next" serves the SENDER's session, not the
+   * chat's last search (3+ users searching at once never collide) */
+  if (userJid) focusLock.adoptUserSession(chatJid, userJid, (c, st2) => { if (st2) lastSearchByChat.set(c, st2); });
   const st = lastSearchByChat.get(chatJid);
   if (!st || Date.now() - st.at > NEXT_TTL_MS){
     reply('Say what you want first — "5 pics of mbira", "gif dance", "song Tariro" — then say "next" for more.');
@@ -2649,6 +2661,13 @@ function countSentMedia(jid, content){
   } catch (e) {}
 }
 function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typing=false, opts={}){
+  /* v92.9.16 FOCUS LOCK — fail-closed: NOTHING ever goes to a chat that
+   * is not the admin or the focus group. Not on crash, not on a wild
+   * code path, not ever: this line sits above EVERY send. */
+  if (typeof focusLock.isAllowedJid === 'function' && !focusLock.isAllowedJid(jid)){
+    pushLog('warn', 'focus', 'send REFUSED (not admin/focus group) → ' + jid);
+    return Promise.resolve({ key: { id: 'focus-blocked' } });
+  }
   const useSchool = opts && opts.account === 'school';
   /* v71.1: remap self-addressed sends to the LID jid (decrypt fix) */
   jid = selfLidRemap(jid, useSchool ? 'school' : 'groups');
@@ -5138,8 +5157,23 @@ async function processDM(item){
    * chat reply or an ignored message. */
   if (isNextRequest(text)){
     const handled = await handleNextMedia(chatJid,
-      (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply');
+      (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply', chatJid);
     if (handled) return;
+  }
+  /* v92.9.16: "preview" — a cheap look before the download: the next
+   * image itself, or the video page link (saves bandwidth) */
+  if (focusLock.isPreviewRequest(text) && typeof lastSearchByChat !== 'undefined'){
+    const pst = lastSearchByChat.get(chatJid);
+    if (pst && pst.idx < pst.results.length){
+      const pnext = pst.results[pst.idx];
+      if (pst.kind === 'video'){
+        await sendBuffer(chatJid, { text: '▶️ Next: ' + ((pnext.title || '') + ' ' + (pnext.site ? '[' + pnext.site + ']' : '')).trim() + '\n' + (pnext.url || '') + '\nSay "next" to watch it.' }, 2, 'slow', 'dmreply', true);
+      } else {
+        const pr = await sendFirstWorking(chatJid, [pnext], pst.kind, '👁 preview ' + (pst.idx + 1) + '/' + pst.results.length, { taskType: 'dmreply', nsfw: pst.nsfw === true });
+        if (pr && pr.ok) pst.idx++;
+      }
+      return;
+    }
   }
 
   /* ═══ v71.5 AI BRAIN — one call decides what this DM means ═══
@@ -7913,6 +7947,19 @@ async function handleMessage(msg){
 
   const chatJid = msg.key?.remoteJid;
   if (!chatJid) return;
+  /* v92.9.16 FOCUS LOCK — non-whitelisted chats are dropped before ANY
+   * processing (no AI, no media, no bytes). The invite code is resolved
+   * to the group JID on first sight and persisted for reboots. */
+  if (!focusLock.isAllowedJid(chatJid)){
+    if (chatJid.endsWith('@g.us') && !global._focusResolveTried){
+      global._focusResolveTried = true;
+      try { const S0 = sock; const info = await S0.groupGetInviteInfo(focusLock.resolveInviteCode());
+            if (info && info.id){ focusLock.addFocusJid(info.id); pushLog('ok', 'focus', 'focus group resolved: ' + info.id); } } catch (e) { pushLog('warn', 'focus', 'invite resolve failed: ' + e.message); }
+      if (focusLock.isAllowedJid(chatJid)){ /* now allowed */ }
+      else return;
+    } else return;
+  }
+  focusLock.noteRequester(chatJid, (msg.key && msg.key.participant) || chatJid);
   /* v92.9.10: message age — stale-redelivery detection (see staleRedeliveryDrop) */
   const _msgTsRaw = Number(msg.messageTimestamp || 0);
   const redelivTsMs = _msgTsRaw > 1e12 ? _msgTsRaw : _msgTsRaw * 1000;
@@ -9198,7 +9245,8 @@ siteHealth.init(pushLog);
  * chat's language; the member replies with the number (optionally +
  * result count) and the bot hunts that exact site. */
 const sitePicker = require('./site-picker');
-const bandwidthMeter = require('./bandwidth');   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
+const bandwidthMeter = require('./bandwidth');
+const focusLock = require('./focus');            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */   /* v92.9.15 Render 5GB meter — media self-limits on a daily budget */
 sitePicker.init(pushLog);
 /* v88 MUSIC ENGINE — MP3/MP4 via online downloader sites (y2mate style),
  * self-healing provider chain, 32MB pre-send cap (see music.js) */
@@ -9731,8 +9779,23 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
    * detection — "next" alone is not a media intent) */
   if (isNextRequest(text)){
     const handled = await handleNextMedia(chatJid,
-      (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply');
+      (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'dmreply', true), 'dmreply', chatJid);
     if (handled) return;
+  }
+  /* v92.9.16: "preview" — a cheap look before the download: the next
+   * image itself, or the video page link (saves bandwidth) */
+  if (focusLock.isPreviewRequest(text) && typeof lastSearchByChat !== 'undefined'){
+    const pst = lastSearchByChat.get(chatJid);
+    if (pst && pst.idx < pst.results.length){
+      const pnext = pst.results[pst.idx];
+      if (pst.kind === 'video'){
+        await sendBuffer(chatJid, { text: '▶️ Next: ' + ((pnext.title || '') + ' ' + (pnext.site ? '[' + pnext.site + ']' : '')).trim() + '\n' + (pnext.url || '') + '\nSay "next" to watch it.' }, 2, 'slow', 'dmreply', true);
+      } else {
+        const pr = await sendFirstWorking(chatJid, [pnext], pst.kind, '👁 preview ' + (pst.idx + 1) + '/' + pst.results.length, { taskType: 'dmreply', nsfw: pst.nsfw === true });
+        if (pr && pr.ok) pst.idx++;
+      }
+      return;
+    }
   }
   /* ═══ v92.2 SHORT COMMANDS — .play / nsfw.play / nsfw.see / nsfw.gif ═══
    * Super-easy downloads with no ! — the boss asked for them to feel the

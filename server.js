@@ -339,6 +339,21 @@ function sessionInfo(folder, envName){
            credsBytes: hasCreds ? fs.statSync(path.join(folder, 'creds.json')).size : 0 };
 }
 function ensureSessionFromEnv(slot, folder, envName){
+  /* v92.9.22: FRESH_QR — the boss: "qr code not to use Auth files
+   * which are already there." When FRESH_QR=1, existing auth is
+   * IGNORED at boot: the disk folder is renamed aside (backup, never
+   * deleted — recoverable) and the env session blob is NOT restored.
+   * The socket starts clean → the QR card shows a fresh code to scan.
+   * Remove FRESH_QR after pairing so restarts keep the new session. */
+  if ((process.env.FRESH_QR || '') === '1'){
+    if (fs.existsSync(folder)){
+      const bak = folder + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      try { fs.renameSync(folder, bak); pushLog('warn', 'session', slot + ': FRESH_QR — old auth backed up to ' + bak); }
+      catch (e) { try { fs.rmSync(folder, { recursive: true, force: true }); } catch (e2) {} }
+    }
+    pushLog('info', 'session', slot + ': FRESH_QR mode — ' + envName + ' NOT restored, fresh QR will be shown (scan once, then re-back-up the blob)');
+    return;
+  }
   if (fs.existsSync(path.join(folder, 'creds.json'))) return;   /* fresh session already on disk */
   const b = process.env[envName];
   if (!b){ pushLog('info','session', slot + ': no saved session, no ' + envName + ' — QR will be shown (scan once, then back the blob up on the panel)'); return; }
@@ -9356,6 +9371,15 @@ const moderation = require('./moderation');   /* v92.9.18: scam-link ban + group
 const monitor = require('./monitor');         /* v92.9.18: query/download/send audit trail */
 const observe = require('./observe');         /* v92.9.20: listen-only mode — capture chats, send nothing */            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
 focusLock.setAdminJid(ADMIN_JID);
+/* v92.9.22: OBSERVE_AUTO=1 — boot straight into the silent listen-only
+ * window (default 3h, OBSERVE_HOURS overrides). Fresh QR + silent
+ * listening = the clean relaunch: the group gets used to the
+ * environment before the bot ever sends a thing. */
+if ((process.env.OBSERVE_AUTO || '') === '1'){
+  const oh = Math.min(24, Math.max(0.5, parseFloat(process.env.OBSERVE_HOURS) || 3));
+  observe.setMode(true, oh);
+  pushLog('ok', 'observe', 'OBSERVE_AUTO — silent listen-only window started at boot: ' + oh + 'h. !observe off ends it early.');
+}
 moderation.configure({
   kick: (chat, user, reason) => { try {
     if (observe.active()){ pushLog('info', 'observe', 'kick suppressed (observe mode): ' + user); return; }
@@ -13173,11 +13197,19 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   (async () => {
     try {
       if (!fs.existsSync(path.join(AUTH_FOLDER, 'creds.json'))){
+        /* v92.9.22: FRESH_QR also skips the gist — the third restore
+         * path. The auto-backup below stays ON: once the fresh QR is
+         * scanned, the NEW session backs itself up and future deploys
+         * restore THAT. */
+        if ((process.env.FRESH_QR || '') === '1'){
+          pushLog('warn', 'session', 'FRESH_QR — GitHub gist session NOT restored (the fresh QR stays fresh)');
+        } else {
         const r = await sessionStore.restoreLatest(AUTH_FOLDER);
         if (r && r.ok){
           pushLog('success','session','groups: session RESTORED from GitHub gist (auto-backup of ' + new Date(r.ts).toISOString() + ') — NO QR scan needed');
         } else if (r && r.reason && r.reason !== 'no backup gist yet' && r.reason !== 'local session already on disk'){
           pushLog('warn','session','cloud restore did not apply: ' + r.reason);
+        }
         }
       }
       sessionStore.startAutoBackup(AUTH_FOLDER);

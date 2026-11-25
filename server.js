@@ -4307,6 +4307,8 @@ async function autoSetMainGroup(){
           const n = (meta.participants || []).length;
           if (n > 1){
             pushLog('success','main',`Main group metadata synced: ${meta.subject || subject} (${n} members)`);
+            recordParticipantPairs(meta);   /* v92.9.28: keep the focus lock's LID map fresh */
+            if (lidMapDirty) saveLidMap();
             for (const p of meta.participants || []){
               if (p.id && p.id.includes('@lid')) recentGroupLids.set(p.id.split('@')[0], Date.now());
               if (p.id && p.id.includes('@s.whatsapp.net')) recentGroupPhones.set(p.id.split('@')[0], Date.now());
@@ -5537,6 +5539,44 @@ function loadGroupRegistry(){
     }
   } catch(e){}
 }
+
+/* ═══ v92.9.28 LID→PN MAP — the focus lock's DM gate needs to recognise
+ * the ADMIN's DM when WhatsApp delivers it with an @lid remoteJid.
+ * Group metadata gives every member as BOTH phone (p.id) and LID
+ * (p.lid) — we harvest the pairs into a persistent map so the focus
+ * lock can resolve a lid back to a phone and allow ONLY the admin.
+ * Persisted to data/lid-map.json (survives in-process reconnects and
+ * repopulates within 5s of any fresh boot via refreshGroupRegistry). */
+const LID_PN_FILE = path.join(__dirname, 'data', 'lid-map.json');
+const lid2pn = new Map();
+let lidMapDirty = false;
+function loadLidMap(){
+  try {
+    if (fs.existsSync(LID_PN_FILE)){
+      const o = JSON.parse(fs.readFileSync(LID_PN_FILE, 'utf8')) || {};
+      for (const [k, v] of Object.entries(o)) lid2pn.set(String(k), String(v));
+      if (lid2pn.size) pushLog('info', 'focus', 'LID map loaded: ' + lid2pn.size + ' pair(s)');
+    }
+  } catch(e){}
+}
+function saveLidMap(){
+  try { fs.mkdirSync(path.dirname(LID_PN_FILE), { recursive: true });
+        fs.writeFileSync(LID_PN_FILE, JSON.stringify([...lid2pn.entries()])); lidMapDirty = false; }
+  catch(e){}
+}
+function recordParticipantPairs(meta){
+  try {
+    for (const p of (meta && meta.participants) || []){
+      const pnBase  = String((p.phoneNumber || p.id || '')).split('@')[0].split(':')[0];
+      const lidBase = String(p.lid || (p.id && p.id.includes('@lid') ? p.id : '')).split('@')[0];
+      if (!lidBase || !pnBase || lidBase === pnBase) continue;
+      if (lid2pn.get(lidBase) !== pnBase){ lid2pn.set(lidBase, pnBase); lidMapDirty = true; }
+    }
+    if (lid2pn.size > 5000){   /* bound the map */
+      for (const k of [...lid2pn.keys()].slice(0, lid2pn.size - 5000)) lid2pn.delete(k);
+    }
+  } catch(e){}
+}
 async function refreshGroupRegistry(){
   if (!sock || connectionStatus !== 'connected') return;
   try {
@@ -5563,7 +5603,9 @@ async function refreshGroupRegistry(){
         updatedAt: Date.now()
       });
       if (!joinedGroups.has(jid)){ discoverGroup(jid); added++; }
+      recordParticipantPairs(meta);   /* v92.9.28: harvest lid↔pn pairs for the focus lock */
     }
+    if (lidMapDirty) saveLidMap();
     saveGroupRegistry();
     pushLog('success','registry',`Group registry refreshed: ${groupRegistry.size} groups (${added} new)`);
   } catch(e){ pushLog('warn','registry','refresh failed: '+e.message); }
@@ -8157,23 +8199,50 @@ async function handleMessage(msg){
         pushLog('warn','crypto',
           undecryptableCount + ' message(s) arrived with keys this session does not have (sent while I was offline/asleep — WhatsApp cannot re-deliver them). NEW messages sent while I am awake arrive normally.');
       }
-      if (!badMacStormWarned && undecryptableCount >= 15 && (Date.now() - connectedAtMs) < 10 * 60 * 1000 && decryptedSinceConnect === 0){
+      if (!badMacStormWarned && undecryptableCount >= 15 && (Date.now() - connectedAtMs) < 10 * 60 * 1000 && decryptedSinceConnect === 0 && !LOADTEST){
         badMacStormWarned = true;
-        pushLog('error','crypto','BAD-MAC STORM: ' + undecryptableCount + ' undecryptable messages within ' + Math.round((Date.now()-connectedAtMs)/1000) + 's of connect and ZERO real messages decrypted — the restored session snapshot is STALE. ONE re-pair fixes it permanently: open the panel → scan the QR (or phone pairing code) → the auto-backup then keeps the fresh session forever.');
+        pushLog('error','crypto','BAD-MAC STORM: ' + undecryptableCount + ' undecryptable messages within ' + Math.round((Date.now()-connectedAtMs)/1000) + 's of connect and ZERO real messages decrypted — the restored session snapshot is STALE (v92.9.28 SELF-HEAL: wipe + fresh QR, no manual work needed beyond one scan).');
         (async () => {
+          /* 1. Tell the boss FIRST — outgoing still works on a stale session */
           try {
             const { S } = adminAccountSock();
             if (S && S.sendMessage){
               await S.sendMessage(ADMIN_JID, { text:
-                '⚠️ My session is STALE — messages sent to me arrive encrypted with keys I no longer have, so I cannot read ANY of them (outgoing still works, which is why you get this).\n\n' +
-                'ONE-TIME FIX (2 minutes):\n' +
+                '⚠️ My session went STALE — messages sent while I slept arrive with keys I no longer have, so I could not read ANY of them.\n\n' +
+                'I am fixing it MYSELF right now (v92.9.28): wiping the stale session and rebooting my connection — a fresh QR is appearing on the panel in seconds.\n\n' +
+                'ONE SCAN, 2 minutes:\n' +
                 '1. Open ' + (SELF_KEEPALIVE_URL || 'your panel URL') + '/admin\n' +
                 '2. Scan the QR card with the BOT phone (WhatsApp → Linked devices → Link a device)\n' +
-                '3. Done — with GITHUB_TOKEN set, the fresh session backs itself up and every future deploy restores it automatically. No QR again.\n\n' +
+                '3. Done — the fresh session auto-backs-up and every future deploy restores it automatically. No QR again.\n\n' +
                 'Messages you sent while I was asleep are lost (WhatsApp deleted the keys) — send them again after re-pairing.' });
-              pushLog('success','crypto','Re-pair guidance texted to the admin (outgoing works even with a stale session)');
+              pushLog('success','crypto','Self-heal notice texted to the admin (outgoing works even with a stale session)');
             }
           } catch(e){ pushLog('warn','crypto','storm warning send failed: ' + e.message); }
+          /* 2. v92.9.28 SELF-HEAL — the old flow only TEXTED instructions and
+           * waited: the bot stayed deaf forever if the boss missed the panel.
+           * Worse, a Render restart restored the SAME stale gist snapshot and
+           * the Bad-MAC storm came right back. Mirror of the 401 logged-out
+           * path: back up the dead auth, FRESH_REQUIRED marker, mark the GIST
+           * dead (the only store that survives restarts — so the stale blob
+           * can never resurrect), then reconnect IN-PROCESS — QR card refreshes
+           * without a 503. Nothing is lost: a stale session decrypts NOTHING. */
+          try { fs.renameSync(AUTH_FOLDER, AUTH_FOLDER + '.bak-' + new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)); }
+          catch (e) { try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch (e2) {} }
+          try { fs.mkdirSync(path.join(__dirname, 'data'), { recursive:true }); fs.writeFileSync(path.join(__dirname, 'data', 'FRESH_REQUIRED'), 'badMacStorm ' + new Date().toISOString()); } catch (e) {}
+          try {
+            sessionStore.markDeadSession().then(function(r){
+              if (r && r.ok) pushLog('warn','session','Gist session marked DEAD (Bad-MAC storm) — the stale snapshot can never restore again; the next successful pairing overwrites it with the live session.');
+              else pushLog('warn','session','Gist dead-mark failed (' + (r && r.error || '?') + ') — a future boot may restore the stale session once more, then self-heal again. No crash either way.');
+            }).catch(function(){});
+          } catch (e) {}
+          /* 3. Give the admin text 1.5s to flush, then reconnect in-process */
+          setTimeout(function(){
+            try { sock.ev.removeAllListeners('connection.update'); } catch(e){}
+            try { sock.ev.removeAllListeners('creds.update'); } catch(e){}
+            try { sock.end(undefined); } catch(e){}
+            pushLog('warn','bot','Stale session wiped — fresh QR in 2s. ONE scan on the panel card and the bot reads again.');
+            setTimeout(function(){ botQrCount = 0; reconnectAttempts = 0; manualDisconnect = false; connectBot(); }, 2000);
+          }, 1500);
         })();
       }
     }
@@ -9426,6 +9495,13 @@ const moderation = require('./moderation');   /* v92.9.18: scam-link ban + group
 const monitor = require('./monitor');         /* v92.9.18: query/download/send audit trail */
 const observe = require('./observe');         /* v92.9.20: listen-only mode — capture chats, send nothing */            /* v92.9.16: ONLY admin + focus group — send kill-switch, per-user sessions */
 focusLock.setAdminJid(ADMIN_JID);
+/* v92.9.28: the focus lock resolves @lid DMs via the harvested group
+ * participant pairs — ONLY the admin's lid passes, everyone else is
+ * refused (fail-closed). Map is persisted and refreshed every registry
+ * sweep (5s after connect, then every 30 min). */
+loadLidMap();
+focusLock.setLidResolver(function(lidBase){ return lid2pn.get(String(lidBase)) || null; });
+setInterval(function(){ if (lidMapDirty) saveLidMap(); }, 2 * 60 * 1000).unref();
 /* v92.9.22: OBSERVE_AUTO=1 — boot straight into the silent listen-only
  * window (default 3h, OBSERVE_HOURS overrides). Fresh QR + silent
  * listening = the clean relaunch: the group gets used to the

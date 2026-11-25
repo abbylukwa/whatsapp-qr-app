@@ -39,6 +39,18 @@ try {
 } catch (e) { /* resolve on first connect */ }
 
 function setAdminJid(j){ if (j && typeof j === 'string') adminJid = j; }
+
+/* v92.9.28 LID-NATIVE DMs — since the LID migration WhatsApp can deliver
+ * a 1:1 chat with remoteJid like '998877@lid.whatsapp.net' even when the
+ * contact is a normal phone number. The admin's OWN DM can arrive as an
+ * @lid jid, and a raw string compare against ADMIN_JID would silently
+ * drop the boss — the bot would look dead to its owner in real life.
+ * The resolver maps an @lid base back to a phone-number base using the
+ * group-participant pairs (every group member carries BOTH id (pn) and
+ * lid fields in group metadata). Fail-closed: a lid that does not
+ * resolve to the admin is refused, never guessed. */
+let lidResolver = null;
+function setLidResolver(fn){ if (typeof fn === 'function') lidResolver = fn; }
 function addFocusJid(jid){
   if (!jid || typeof jid !== 'string' || !jid.endsWith('@g.us')) return false;
   if (focusJids.has(jid)) return true;
@@ -51,8 +63,18 @@ function resolveInviteCode(){ return FOCUS_INVITE; }
 /* THE kill-switch predicate — fail closed: unknown jid = refused */
 function isAllowedJid(jid){
   if (!jid || typeof jid !== 'string') return false;
-  if (adminJid && jid === adminJid) return true;
   if (jid === 'status@broadcast') return false;
+  /* v92.9.28: admin DM arriving as an @lid jid — resolve lid→pn and
+   * allow ONLY when the resolved phone is the admin. Everyone else
+   * (group members DMing, strangers, other bots) stays refused. */
+  const at = jid.indexOf('@');
+  const dom = at > -1 ? jid.slice(at + 1) : '';
+  const base = jid.split('@')[0].split(':')[0];
+  if (dom === 's.whatsapp.net' && adminJid && (base + '@s.whatsapp.net') === adminJid) return true;
+  if (dom === 'lid.whatsapp.net'){
+    const pnBase  = (lidResolver && lidResolver(base)) || null;
+    return !!(pnBase && adminJid && (String(pnBase) + '@s.whatsapp.net') === adminJid);
+  }
   return focusJids.has(jid);
 }
 
@@ -101,4 +123,4 @@ function detectSpec(text){
 const PREVIEW_RE = /^(preview|previews|show me|tarisa|پیش نمایش|vista previa|aperçu|превью|預覽|pratinjau|অাগের)\s*$/i;
 function isPreviewRequest(text){ return PREVIEW_RE.test(String(text || '').trim()); }
 
-module.exports = { setAdminJid, addFocusJid, resolveInviteCode, isAllowedJid, noteRequester, peekRequester, rememberUserSession, getUserSession, adoptUserSession, capVideoCount, detectSpec, isPreviewRequest, _state: () => ({ adminJid, focusJids: [...focusJids] }) };
+module.exports = { setAdminJid, setLidResolver, addFocusJid, resolveInviteCode, isAllowedJid, noteRequester, peekRequester, rememberUserSession, getUserSession, adoptUserSession, capVideoCount, detectSpec, isPreviewRequest, _state: () => ({ adminJid, focusJids: [...focusJids] }) };

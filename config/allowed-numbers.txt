@@ -3,7 +3,9 @@
 # Formats: +27614159817 · 27614159817 · 0771122334 (Zimbabwe local)
 # The admin number is added automatically at every boot (do not remove).
 # Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).
+# v92.9.28: TWO NUMBERS ONLY (the boss's rule) — the admin (263777627210)
+# and the South Africa number (27614159817). The +93 test numbers are gone.
+# NOTE: even these two are NOT equal — DM service is ADMIN-ONLY by the
+# focus lock; the SA number gets full service INSIDE the designated group.
 +27614159817
 +263777627210
-+93772553417
-+93765002356

@@ -1,3 +1,20 @@
+## v92.9.32 — "IMAGE/GIF SIZE SPLIT: THE LAST BIG BOOT TRANSIENT"
+### WHY: third Render OOM email (2026-11-26). v92.9.31 killed the boot sweep OOM (verified
+### deployed: remote HEAD 5f78572, scraper /probe-urls live). This closes the only remaining
+### unguarded memory spike found by a fresh audit of the deployed tree.
+
+1. IMAGE/GIF DOWNLOAD CAP 40MB → 12MB: `downloadAndCheck` buffered up to MEDIA_MAX_BYTES
+   (40MB) per image/gif, and each buffer lives 3× in memory (axios arraybuffer + Buffer.from
+   copy + Baileys base64 ≈1.37×) × DL_CONCURRENCY(2) → ~270MB worst-case transient if a
+   self-test pick or member hunt landed an oversized file during the auth/redelivery window —
+   enough to cross the 512MB cgroup before the 15s memGuard tick even samples. WhatsApp
+   recompresses every photo it sends to ~1–2MB, so an "image" URL serving >12MB is mislabeled
+   junk, not a picture. Worst transient now ~90MB. Env: MEDIA_MAX_IMAGE_MB (clamped ≤
+   MEDIA_MAX_MB). Videos/music don't ride downloadAndCheck — unchanged.
+2. sendImageSafe + sendGifSafe use the new cap (they are downloadAndCheck's only callers —
+   grep-verified).
+3. Fossil: the 'too big' error hardcoded "34MB" — now reports the real cap.
+
 ## v92.9.31 — "STAY-ALIVE: OOM ROOT CAUSE FIXED · SELF-TEST UN-BROKEN · ADMIN NEVER COOLDOWN-WALLED"
 ### WHY: second Render OOM email (2026-11-25) + owner photo of the unified logs — every bug
 ### below is proven by a LIVE log line, not theory.

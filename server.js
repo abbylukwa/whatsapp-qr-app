@@ -259,6 +259,21 @@ const MEDIA_MAX_MB_ENV = parseInt(process.env.MEDIA_MAX_MB || '40', 10);
 const MEDIA_MAX_MB = (Number.isFinite(MEDIA_MAX_MB_ENV) && MEDIA_MAX_MB_ENV > 0) ? Math.min(MEDIA_MAX_MB_ENV, 200) : 40;
 if (process.env.MEDIA_MAX_MB !== undefined && String(MEDIA_MAX_MB) !== String(process.env.MEDIA_MAX_MB)) console.log('[ENV] MEDIA_MAX_MB="' + process.env.MEDIA_MAX_MB + '" is not a sane size — using ' + MEDIA_MAX_MB + 'MB instead (1–200 allowed)');
 const MEDIA_MAX_BYTES    = MEDIA_MAX_MB * 1024 * 1024;
+/* v92.9.32 IMAGE/GIF SIZE SPLIT — the last big boot-transient on the 512MB
+ * cgroup: downloadAndCheck buffered up to MEDIA_MAX_BYTES (40MB) per image,
+ * and each buffer lives 3× in memory (axios arraybuffer + Buffer.from copy
+ * + Baileys base64 ≈ 1.37×) × DL_CONCURRENCY(2) → ~270MB worst case if a
+ * self-test pick or a member hunt lands an oversized file during the auth
+ * window — enough to OOM before the 15s memGuard tick even notices. But
+ * WhatsApp recompresses every photo it SENDS to ~1–2MB: an "image" URL
+ * serving >12MB is mislabeled video junk, not a picture. Images/gifs now
+ * cap at 12MB (env MEDIA_MAX_IMAGE_MB, clamped to ≤ MEDIA_MAX_MB); the
+ * worst transient drops to ~90MB. Videos/music don't ride downloadAndCheck
+ * — their caps are unchanged. */
+const MEDIA_MAX_IMAGE_MB_ENV = parseInt(process.env.MEDIA_MAX_IMAGE_MB || '12', 10);
+const MEDIA_MAX_IMAGE_MB = (Number.isFinite(MEDIA_MAX_IMAGE_MB_ENV) && MEDIA_MAX_IMAGE_MB_ENV > 0)
+  ? Math.min(MEDIA_MAX_IMAGE_MB_ENV, MEDIA_MAX_MB) : Math.min(12, MEDIA_MAX_MB);
+const MEDIA_MAX_IMAGE_BYTES = MEDIA_MAX_IMAGE_MB * 1024 * 1024;
 
 /* ─── v66: dual-host mode + reports + broadcast cap ────────────
  * BOT_MODE=manager (default): full group-management bot.
@@ -2023,7 +2038,7 @@ async function downloadAndCheckInner(url, maxBytes, expectType){
       }
     }
   }
-  if (buf.length > maxBytes) throw new Error(`Media too big (${(buf.length/1024/1024).toFixed(1)}MB > 34MB)`);
+  if (buf.length > maxBytes) throw new Error(`Media too big (${(buf.length/1024/1024).toFixed(1)}MB > ${(maxBytes/1048576).toFixed(0)}MB)`);
   if (buf.length < 32) throw new Error('Media empty');
   const mimetype = expectType === 'gif' ? 'video/mp4' : 'image/jpeg';
   /* v89: image realness gate — logos/placeholders/banners never reach a member */
@@ -2474,7 +2489,7 @@ function armPresenceKeepalive(name, getSock){
 
 async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
-    const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
+    const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_IMAGE_BYTES, 'image');
     await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing,
       { nsfw: opts && opts.nsfw === true, account: opts && opts.account,
         /* v92.9.31: opts now REACH the send gates — sendImageSafe used to
@@ -2496,7 +2511,7 @@ async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', task
 }
 async function sendGifSafe(jid, url, caption='', priority=2, lane='slow', taskType='group', typing=false, opts={}){
   try {
-    const { buffer } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'gif');
+    const { buffer } = await downloadAndCheck(url, MEDIA_MAX_IMAGE_BYTES, 'gif');
     await sendBuffer(jid, { video: buffer, gifPlayback: true, caption, mimetype: 'video/mp4' }, priority, lane, taskType, typing,
       { nsfw: opts && opts.nsfw === true, account: opts && opts.account });
     return true;

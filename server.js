@@ -222,7 +222,10 @@ const ADMIN_JID   = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_FILE         = path.join(__dirname,'admin_lids.json');
 const HARDCODED_ADMIN_LIDS   = ['115110005706891'];
 const MAIN_GROUP_FILE        = path.join(__dirname,'main_group_jid.json');
-const ADMIN_GROUP_LINK       = 'https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7?s=sw&p=a&mlu=4&ilr=4';
+/* v92.9.30: ONE group link in the whole codebase (the boss's rule) —
+ * the real group, boss's exact URL shape. Env can still override it
+ * without a code change; an empty env value falls back to this. */
+const ADMIN_GROUP_LINK       = (process.env.ADMIN_GROUP_LINK || 'https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7?s=cl&p=a&iam=2').trim();
 
 const JOIN_QUEUE_FILE    = path.join(__dirname,'join_queue.json');
 const JOIN_MAX_PER_DAY       = 15;
@@ -4405,7 +4408,13 @@ async function deploySelfTest(){
   if (!focusLock.isGroupLinkVerified()) pushLog('warn','selftest','group 2FA not confirmed yet — proceeding on the persisted JID (link check continues in background)');
 
   deploySelfTestDone = true;
-  /* ── Step 1: ALL ACTIVE LINKS into the group (one message) ── */
+  /* ── Step 1: ALL ACTIVE LINKS into the group (one message) ──
+   * v92.9.30 REBUILD (the boss: the old list was "poorly constructed") —
+   * it dumped three comma-walls (every site on ONE line per type) and
+   * truncated mid-name at 3000 chars. The new roster is a NUMBERED list
+   * GROUPED BY WHAT EACH SITE IS ACTIVE FOR — videos, images, gifs,
+   * music — one site per line, counts in each header, a per-section cap
+   * so even 100 sites stay readable, and the phrases that use each group. */
   const slotsByType = { image: [], gif: [], video: [], music: [] };
   let totalSites = 0;
   try {
@@ -4414,16 +4423,24 @@ async function deploySelfTest(){
       if (l && l.enabled !== false && Object.prototype.hasOwnProperty.call(slotsByType, l.type)) slotsByType[l.type].push(l);
     }
   } catch (e) { pushLog('warn','selftest','active-links fetch failed: ' + e.message); }
-  totalSites = slotsByType.image.length + slotsByType.gif.length + slotsByType.video.length;
-  const siteLine = (t) => {
+  totalSites = slotsByType.image.length + slotsByType.gif.length + slotsByType.video.length + slotsByType.music.length;
+  const SECTION_CAP  = 40;                       /* per-type lines — the whole roster stays readable */
+  const SECTION_ICON = { video: '▶', image: '🖼', gif: '🎞', music: '♪' };
+  const SECTION_NAME = { video: 'VIDEOS', image: 'IMAGES', gif: 'GIFS', music: 'MUSIC' };
+  const sectionBlock = (t) => {
     const arr = slotsByType[t] || [];
-    if (!arr.length) return '· ' + t.toUpperCase() + ': none enabled';
-    return '· ' + t.toUpperCase() + ' (' + arr.length + '): ' + arr.map(selftestSlotLabel).join(', ');
+    if (!arr.length) return SECTION_ICON[t] + ' ' + SECTION_NAME[t] + ': none active';
+    const head = SECTION_ICON[t] + ' ' + SECTION_NAME[t] + ' — ' + arr.length + ' active' + (arr.length > SECTION_CAP ? ' (showing first ' + SECTION_CAP + ')' : '');
+    const lines = arr.slice(0, SECTION_CAP).map((s, i) => '  ' + (i + 1) + '. ' + selftestSlotLabel(s));
+    return head + '\n' + lines.join('\n');
   };
-  const linksText = '✅ DEPLOY CHECK — active sites (' + totalSites + '):\n' +
-    siteLine('video') + '\n' + siteLine('image') + '\n' + siteLine('gif');
+  const linksText = '✅ DEPLOY CHECK — ' + totalSites + ' active sites\n' +
+    '─────────────────\n' +
+    ['video', 'image', 'gif', 'music'].map(sectionBlock).join('\n─────────────────\n') + '\n' +
+    '─────────────────\n' +
+    'Try: "send 5 pics of…" · "video of…" · "gif of…" — bare "next" pulls the next batch.';
   try {
-    await sendBuffer(focusJid, { text: linksText.slice(0, 3000) }, 2, 'slow', 'group', true, { adminTrigger: true });
+    await sendBuffer(focusJid, { text: linksText.slice(0, 4000) }, 2, 'slow', 'group', true, { adminTrigger: true });
     pushLog('success','selftest','active-links list sent to the verified focus group (' + totalSites + ' sites)');
   } catch (e) { pushLog('warn','selftest','links list send refused: ' + e.message); }
 
@@ -7397,8 +7414,8 @@ async function handleAdminCommand(text, chatJid, msg, opts={}){
       break;
     }
     case 'allow': {
-      /* !allow +27614159817 — add a number to the DM whitelist */
-      if (!args[1]){ await reply('Usage: !allow <number>\ne.g. !allow +27614159817'); break; }
+      /* !allow +263771234567 — add a number to the DM whitelist */
+      if (!args[1]){ await reply('Usage: !allow <number>\ne.g. !allow +263771234567'); break; }
       const r = accessCtl.addNumber(args.slice(1).join(''));
       await reply(r.ok ? (r.added ? '✅ Allowed +' + r.number + ' — they can now send commands (' + r.count + ' allowed)' : 'ℹ️ +' + r.number + ' was already allowed (' + r.count + ')') : '❌ ' + r.error);
       break;
@@ -8239,11 +8256,18 @@ async function handleMessage(msg){
     }
   } catch (_mErr) { pushLog('warn', 'mod', 'check error: ' + _mErr.message); }
   /* v92.9.17: GROUPS — "next"/"preview" adopt the SENDER's own session
-   * (3+ users searching never collide). DMs keep their own path below. */
-  if (chatJid.endsWith('@g.us') && (isNextRequest(text) || focusLock.isPreviewRequest(text))){
+   * (3+ users searching never collide). DMs keep their own path below.
+   * v92.9.30 FIX: this gate read `text` BEFORE its const declaration
+   * (line ~8399) — "Cannot access 'text' before initialization" crashed
+   * EVERY group message right here (the [error] handler line in the
+   * logs) and groups went deaf. It now reads the raw text straight off
+   * msg.message; the wrapper-peeled copy further down is untouched. */
+  const _earlyText = (msg.message && (msg.message.conversation ||
+                  (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text))) || '';
+  if (chatJid.endsWith('@g.us') && (isNextRequest(_earlyText) || focusLock.isPreviewRequest(_earlyText))){
     const _u917 = (msg.key && msg.key.participant) || chatJid;
     const _t = (t) => sendBuffer(chatJid, { text: t }, 2, 'slow', 'group', true);
-    if (focusLock.isPreviewRequest(text)){
+    if (focusLock.isPreviewRequest(_earlyText)){
       focusLock.adoptUserSession(chatJid, _u917, (c, st2) => { if (st2) lastSearchByChat.set(c, st2); });
       const pst = lastSearchByChat.get(chatJid);
       if (pst && pst.idx < pst.results.length){
@@ -10574,7 +10598,7 @@ button:hover{background:#30363d}button.primary{background:#238636;color:#fff}but
 <b style="color:#8b949e">YOUR IMAGE SITES</b> (MYLINKS env — tried FIRST on every search):<br>
 <code>MYLINKS=https://mysite.com, https://mysite.com/search?q={query}</code><br>
 <b style="color:#8b949e">MAIN GROUP</b>:<br>
-<code>ADMIN_GROUP_LINK=https://chat.whatsapp.com/AbCdEf123</code><br>
+<code>ADMIN_GROUP_LINK=https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7</code><br>
 <b style="color:#8b949e">SESSION</b> (after pairing): panel 💾 → copy blob → <code>SESSION_B64_GROUPS=…</code><br>
 <b style="color:#8b949e">SCRAPER</b>: <code>SCRAPER_URL=https://intelligent-scraper.onrender.com</code><br>
 <span style="color:#8b949e">Empty slot = skipped. 1 working API does everything; 5 APIs split tasks 5 ways. Dead keys auto-cool and auto-revive.</span>
@@ -13404,6 +13428,42 @@ function startSelfKeepAlive(){
   }, SELF_KEEPALIVE_MS).unref();
   pushLog('info','keepalive','self-keepalive ON → GET ' + SELF_KEEPALIVE_URL + '/ping every ' + (SELF_KEEPALIVE_MS/60000) + ' min — service NEVER idles out, cron-job.org no longer required for the bot');
 }
+
+/* ═══ v92.9.30 MEMORY WATCHDOG — Render killed the service twice for
+ * exceeding the free-tier 512MB cap (OOM emails, 2026-11). Three layers
+ * now: render.yaml caps the V8 heap at 320MB (was 400 — heap + native
+ * buffers + Baileys overhead crossed the ceiling during media bursts)
+ * and adds --expose-gc; this watchdog samples RSS every 60s and on
+ * pressure runs a real GC + trims the fat in-process buffers (message
+ * dedupe, log ring, per-chat search memory). Healthy = ONE info line
+ * every 10 min so the panel shows memory is being watched. */
+const MEM_LIMIT_MB = parseInt(process.env.RENDER_MEMORY_LIMIT_MB || '512', 10);
+const MEM_SOFT_MB  = Math.round(MEM_LIMIT_MB * 0.78);          /* ~400MB */
+let lastMemLogAt = 0;
+setInterval(function(){
+  try {
+    const mu = process.memoryUsage();
+    const rssMb  = Math.round(mu.rss  / 1048576);
+    const heapMb = Math.round(mu.heapUsed / 1048576);
+    if (rssMb >= MEM_SOFT_MB){
+      if (typeof global.gc === 'function') global.gc();
+      if (processedMessages.size > 4000){
+        const keep = [...processedMessages].slice(-2000);
+        processedMessages.clear();
+        for (const i of keep) processedMessages.add(i);
+      }
+      if (logBuffer.length > 250) logBuffer.splice(0, logBuffer.length - 200);
+      if (lastSearchByChat && lastSearchByChat.size > 60){
+        const drop = [...lastSearchByChat.keys()].slice(0, lastSearchByChat.size - 40);
+        for (const k of drop) lastSearchByChat.delete(k);
+      }
+      pushLog('warn', 'memory', 'RSS ' + rssMb + 'MB / heap ' + heapMb + 'MB — GC + buffer trim done (soft ' + MEM_SOFT_MB + 'MB, Render cap ' + MEM_LIMIT_MB + 'MB)');
+    } else if (Date.now() - lastMemLogAt > 10 * 60 * 1000){
+      lastMemLogAt = Date.now();
+      pushLog('info', 'memory', 'RSS ' + rssMb + 'MB / heap ' + heapMb + 'MB (Render cap ' + MEM_LIMIT_MB + 'MB)');
+    }
+  } catch (e) {}
+}, 60000).unref();
 
 const HTTP_SERVER = app.listen(PORT, async function(){
   console.log('Port '+PORT);

@@ -10,7 +10,7 @@ services:
       - key: PUPPETEER_CACHE_DIR
         value: /opt/render/project/src/.cache/puppeteer
       - key: NODE_OPTIONS
-        value: --max-old-space-size=400
+        value: --max-old-space-size=320 --expose-gc
       # v84.1: pin the runtime so p-limit/ESM semantics never drift
       - key: NODE_VERSION
         value: 22.11.0

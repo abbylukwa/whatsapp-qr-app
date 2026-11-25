@@ -161,13 +161,39 @@ function siteNameByUrl(url){
   return s ? s.name : null;
 }
 
-/* ── full probe sweep (boot / 6h / !sitehealth check) ───────────────── */
+/* ── full probe sweep (boot / 6h / !sitehealth check) ─────────────────
+ * v92.9.30 HALF-HALF: the sweep used to run on the BOT's 512MB instance —
+ * ~100 fetches stacked on top of WhatsApp + Chrome + ffmpeg (Render OOM).
+ * Now the SCRAPER does the network sweep on its own RAM budget (its
+ * hardened fetch ladder passes 403/JS walls better than plain axios too),
+ * the bot only stores the verdicts. Local probing stays as the fallback
+ * for when the scraper is asleep or unreachable. */
 async function probeAll(opts = {}){
   if (probing) return { skipped: true };
   probing = true;
   const t0 = Date.now();
-  let alive = 0, dead = 0;
   try {
+    if (process.env.SCRAPER_URL){
+      try {
+        const base = process.env.SCRAPER_URL.replace(/\/+$/, '');
+        const r = await axios.post(base + '/probe-urls',
+          { urls: registry.map(s => s.url), query: PROBE_QUERY, timeout: opts.timeout || 14000 },
+          { timeout: 300000, maxContentLength: 8 * 1024 * 1024 });
+        if (r.data && r.data.ok && r.data.results){
+          let alive = 0, dead = 0;
+          for (const [url, res] of Object.entries(r.data.results)){
+            if (!registry.some(s => s.url === url)) continue;    /* only known sites */
+            if (res && res.ok){ markOk(url, res.ms || 0); alive++; }
+            else { markFail(url, res ? res.why : 'no-verdict'); dead++; }
+          }
+          log('info', 'sitehealth', `probe sweep (via scraper) done in ${Math.round((Date.now()-t0)/1000)}s — ${alive} alive, ${dead} down`);
+          return { alive, dead, ms: Date.now() - t0, via: 'scraper' };
+        }
+      } catch (e) {
+        log('warn', 'sitehealth', 'scraper probe unavailable (' + e.message.slice(0, 60) + ') — probing locally');
+      }
+    }
+    let alive = 0, dead = 0;
     const list = registry.slice();
     let i = 0;
     async function worker(){

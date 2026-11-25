@@ -4,4 +4,5 @@
 # CODE, so extra query junk (?s=cl&p=a&iam=2…) is ignored — and pasting
 # the same link twice stays ONE entry.
 # Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).
-https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW
+# v92.9.30: ONE GROUP ONLY (the boss rule) — the group below is THE group.
+https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7

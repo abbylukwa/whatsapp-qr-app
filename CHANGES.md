@@ -1,3 +1,36 @@
+## v92.9.30 — "ONE LINK · ONE NUMBER · CLEAN SITE LIST · GROUPS UN-DEAFED · HALF-HALF MEMORY"
+### WHY (owner request): "The list is poorly constructed make a better list of the active
+### sites … the code has too many group links … only ONE group link … only ONE phone number
+### … Why is it exceeding memory limit — spare the jobs for intelligent scraper, half half,
+### don't overwhelm"
+
+1. GROUPS UN-DEAFED (CRITICAL FIX): the v92.9.17 "next/preview" gate in handleMessage read
+   `text` BEFORE its const declaration — a TDZ ReferenceError ("Cannot access 'text' before
+   initialization") crashed EVERY group message at the gate ([error] handler in the logs).
+   The gate now reads the raw text straight off msg.message (`_earlyText`); the wrapper-peeled
+   copy further down is untouched.
+2. ONE GROUP LINK: ADMIN_GROUP_LINK is the boss's exact link (HGW3IdVbDJyImOgp1BFqT7),
+   env-overridable; config/allowed-groups.txt holds exactly ONE group; access.js first-boot
+   default swapped from the old GRmW5TzQ code; panel doc example updated. ONE link in the
+   whole codebase.
+3. ONE NUMBER: allowed-numbers.txt = exactly 263777627210 (the admin). The SA number is
+   removed — it can still talk INSIDE the designated group like any member; DMs are
+   admin-only by the focus lock. First-boot default in access.js is admin-only. test-gates
+   now PROVES the one-number rule (45/45 PASS).
+4. DEPLOY SELF-TEST LIST REBUILT: the old list was three comma-walls truncated at 3000
+   chars mid-name. The new roster is a numbered list GROUPED BY WHAT EACH SITE IS ACTIVE
+   FOR — VIDEOS / IMAGES / GIFS / MUSIC — one site per line, counts in each header,
+   40-per-section cap, plus the request phrases ("send 5 pics of…" · "video of…" · "gif of…"
+   · "next"). Music sites now counted and listed too.
+5. HALF-HALF MEMORY (with the scraper's new /probe-urls): the site-health sweep (boot +
+   every 6h, ~100 fetches) moved to the scraper's RAM budget — the bot only stores verdicts;
+   local probing stays as fallback. Stealth Chrome REFUSES to spawn under RAM pressure
+   (>=78% of the Render cap) — the scraper's own fetch ladder takes those fetches instead.
+6. OOM DEFENSE LADDER: render.yaml NODE_OPTIONS --max-old-space-size=320 --expose-gc
+   (was 400 — heap + native buffers crossed the 512MB ceiling); package.json start carries
+   the same flags; a memory watchdog samples RSS every 60s, runs real GC + trims the dedupe
+   set / log ring / search memory on pressure, and logs one line per 10 min when healthy.
+
 ## v91 — "MOST-RELEVANT SEARCH + 5-RESULT BATCHES + NEXT + ALWAYS-ONLINE"
 ### WHY (owner request): "add other things like next media send 5 relevant and make
 ### the most relevant search … im deploying it now so everything needs to be intact,

@@ -65,8 +65,10 @@ const PERMANENT_BLOCKED_LINES = ['KCC Youth Fellowship', 'KCC Bubble Study'];
 const NUMBERS_HEADER = [
   '# ═══ ALLOWED NUMBERS (v87) ═══',
   '# One WhatsApp number per line — the bot replies to THESE ONLY.',
-  '# Formats: +27614159817 · 27614159817 · 0771122334 (Zimbabwe local)',
+  '# Formats: +263777627210 · 263777627210 · 0771122334 (Zimbabwe local)',
   '# The admin number is added automatically at every boot (do not remove).',
+  '# v92.9.30: ONE NUMBER ONLY (the boss rule) — the admin. Others can',
+  '# still talk INSIDE the designated group; DMs are admin-only.',
   '# Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).',
   ''
 ].join('\n');
@@ -450,10 +452,12 @@ function groupDecision(chatJid, langCode, isAdmin, subject){
 function init(adminPhone){
   if (!fs.existsSync(NUMBERS_FILE)){
     const adm = normalizePhone(adminPhone);
-    writeLines(NUMBERS_FILE, NUMBERS_HEADER, adm ? ['+' + adm, '+27614159817'] : ['+27614159817']);
+    /* v92.9.30: ONE number — the admin only (the boss's rule). */
+    writeLines(NUMBERS_FILE, NUMBERS_HEADER, adm ? ['+' + adm] : []);
   }
   if (!fs.existsSync(GROUPS_FILE)){
-    writeLines(GROUPS_FILE, GROUPS_HEADER, ['https://chat.whatsapp.com/GRmW5TzQNQpLnLyGnHQxMW']);
+    /* v92.9.30: ONE group link in the whole codebase (the boss's rule). */
+    writeLines(GROUPS_FILE, GROUPS_HEADER, ['https://chat.whatsapp.com/HGW3IdVbDJyImOgp1BFqT7']);
   }
   if (!fs.existsSync(BLOCKED_FILE)){
     writeLines(BLOCKED_FILE, BLOCKED_HEADER, PERMANENT_BLOCKED_LINES);

@@ -24,7 +24,7 @@ const focusLock = require('./focus');
 const accessCtl = require('./access');
 
 const ADMIN = '263777627210@s.whatsapp.net';
-const SA_NUMBER = '27614159817';                 /* the SA number (2-number rule) */
+const SA_NUMBER = '27614159817';                 /* the SA number — now OFF the allowlist (one-number rule, v92.9.30) */
 const FOCUS_GROUP = '120363021234567890@g.us';   /* the ONE designated NSFW group */
 const OTHER_GROUP = '120363999999999999@g.us';   /* any other group on earth */
 const MEMBER = '27821234567';                    /* a member OF the focus group */
@@ -74,10 +74,10 @@ check('admin DM with device suffix (:12) ALLOWED', focusLock.isAllowedJid('26377
 check('null/garbage jid REFUSED', focusLock.isAllowedJid(null) === false && focusLock.isAllowedJid('') === false && focusLock.isAllowedJid(12345) === false);
 
 console.log('\n── 3. DEFENSE IN DEPTH — access.js number gates (send-side backstop) ──');
-check('SA number IS on the 2-number allowlist', accessCtl.isAllowedNumber(SA_NUMBER, '263777627210') === true);
+check('SA number OFF the allowlist (one-number rule, v92.9.30)', accessCtl.isAllowedNumber(SA_NUMBER, '263777627210') === false);
 check('stranger NOT on allowlist', accessCtl.isAllowedNumber('447700900123', '263777627210') === false);
 check('group member NOT on allowlist (DM service stays admin-only)', accessCtl.isAllowedNumber(MEMBER, '263777627210') === false);
-check('allowlist has EXACTLY the 2 numbers', JSON.stringify(accessCtl.allowedNumbers().slice().sort()) === JSON.stringify(['263777627210','27614159817']));
+check('allowlist has EXACTLY the 1 number (admin only)', JSON.stringify(accessCtl.allowedNumbers().slice().sort()) === JSON.stringify(['263777627210']));
 check('admin phone is never blockable by mistake', accessCtl.isBlockedNumber('263777627210') === false);
 
 console.log('\n── 4. NSFW scoping — media only inside the designated group ──');

@@ -21,8 +21,23 @@ let _browser = null;
 let _launching = null;
 let _lastUse = 0;
 const BROWSER_IDLE_MS = 2 * 60 * 1000;      /* close after 2 idle minutes (free-tier RAM) */
+/* v92.9.30 RAM INTERLOCK — Chrome costs 150-300MB; spawning it while the
+ * service already sits near Render's 512MB ceiling is exactly how the
+ * OOM kill happened. Under pressure this refuses to START a browser and
+ * the scraper falls back to its own HTTP ladder (cycletls/FlareSolverr).
+ * A browser that is ALREADY resident may still be used — its memory is
+ * spent either way, and killing it mid-task breaks sends. */
+function ramSoftMb(){
+  const limit = parseInt(process.env.RENDER_MEMORY_LIMIT_MB || '512', 10);
+  return Math.round(limit * 0.78);            /* ~400MB — same soft line as the watchdog */
+}
 
 async function getBrowser(){
+  if (!_browser){
+    const rssMb = Math.round(process.memoryUsage().rss / 1048576);
+    const soft = ramSoftMb();
+    if (rssMb >= soft) throw new Error('RAM pressure (' + rssMb + 'MB >= soft ' + soft + 'MB) — stealth browser refused, callers fall back to plain HTTP');
+  }
   if (_browser){
     try { if (_browser.connected !== false && _browser.process && !_browser.process.killed) { _lastUse = Date.now(); return _browser; } }
     catch (e) { /* fall through to relaunch */ }

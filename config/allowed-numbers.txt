@@ -1,11 +1,9 @@
 # ═══ ALLOWED NUMBERS (v87) ═══
 # One WhatsApp number per line — the bot replies to THESE ONLY.
-# Formats: +27614159817 · 27614159817 · 0771122334 (Zimbabwe local)
+# Formats: +263777627210 · 263777627210 · 0771122334 (Zimbabwe local)
 # The admin number is added automatically at every boot (do not remove).
 # Lines starting with # are comments. Edit freely, save, restart (or !reloadaccess).
-# v92.9.28: TWO NUMBERS ONLY (the boss's rule) — the admin (263777627210)
-# and the South Africa number (27614159817). The +93 test numbers are gone.
-# NOTE: even these two are NOT equal — DM service is ADMIN-ONLY by the
-# focus lock; the SA number gets full service INSIDE the designated group.
-+27614159817
+# v92.9.30: ONE NUMBER ONLY (the boss rule) — the admin (263777627210).
+# The SA number (+27614159817) is removed: it can still talk INSIDE the
+# designated group like any member, but DMs are admin-only by the focus lock.
 +263777627210

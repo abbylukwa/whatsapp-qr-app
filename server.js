@@ -2122,7 +2122,7 @@ function focusRequesterOf(chatJid){ return focusLock.peekRequester(chatJid) || c
  * are honoured up to 10 — '10 pics of x' sends 10, as promised in 9e. */
 function extractCountFromQuery(q){
   let count = 0;
-  const MEDIA_RE = /^(pics?|pictures?|images?|photos?|gifs?|videos?|songs?|tracks?|mapics?|mifananidzo|items?|more)\b/i;
+  const MEDIA_RE = /^(pics?|pictures?|images?|photos?|gifs?|videos?|songs?|tracks?|music|albums?|mapics?|mifananidzo|items?|more)\b/i;
   const toks = String(q || '').trim().split(/\s+/).filter(Boolean);
   for (let i = 0; i < toks.length; i++){
     const mNum = toks[i].match(/^(\d{1,2})(?:x|×|pcs|pieces)?$/i);
@@ -5814,17 +5814,16 @@ async function localizedHelpBlock(chatJid, lang){
  * whitelisted DMs); admins keep the full !help menu. */
 function groupHelpText(){
   return '🤖 *MEDIA BOT — HOW TO USE*\n\n'
-    + '🎵 *Song / audio* — type:\n'
-    + '      .play <song name> mp3\n'
-    + '      e.g.  .play Jerusalema mp3\n'
-    + '      or just:  give me the song <name>\n\n'
-    + '🎬 *Video* — type:\n'
-    + '      .play <name> mp4   ·   .video <name>\n'
-    + '      or:  give me a <name> video\n\n'
-    + '🖼 *Picture* —  !pic <name>\n'
-    + '📚 *Facts* —  !wiki <topic>\n'
-    + '⏭ *More results* — reply  next\n'
-    + '🌐 *Pick a source* —  !sites   then  !site <name>\n\n'
+    + 'Just *ASK* — no commands needed. Ask for a *video, gif, pic, pics, music, song* or *album songs* + the name:\n'
+    + '      e.g.  pics of mbira  ·  gifs of cats  ·  album songs of Jah Prayzah\n'
+    + '      or:  pic <name>  ·  gif <name>  ·  video <name>\n'
+    + '      music:  .play <song or album> mp3   (mp4 = video)\n\n'
+    + '⏭ *More results* — reply  next\n\n'
+    + '🌐 *Sources* — I pick from ALIVE sites (auto-tested) or these defaults:\n'
+    + '      🎬 videos: xvideos.com · xnxx.com · pornhub.com · xhamster.com\n'
+    + '      🖼 pics: qorno.com · fuq.com · tiava.com · lobstertube.com\n'
+    + '      🎞 gifs: xgroovy.com · fpo.xxx · leakimedia.com · xnxx.com gifs\n'
+    + '      all alive sources:  !sites   ·  pin one:  !site <name>\n\n'
     + 'Downloads are free. One request at a time — I reply when your file is ready.';
 }
 
@@ -5834,6 +5833,7 @@ function groupHelpText(){
  * stay Latin on purpose — members type them exactly as shown. */
 const GROUP_HELP_I18N = {
   fa: '🤖 *ربات رسانه — راهنما*\n\n'
+    + '· فقط درخواست بده: ویدیو، گیف، عکس، موسیقی، آهنگ یا آلبوم + نام\n'
     + '🎵 *آهنگ / صدا* — بنویس:\n'
     + '      .play <نام آهنگ> mp3\n'
     + '      مثال:  .play Jerusalema mp3\n\n'
@@ -5845,6 +5845,7 @@ const GROUP_HELP_I18N = {
     + '🌐 *انتخاب سایت* —  !sites  و بعد  !site <نام>\n\n'
     + 'دانلود رایگان است. هر بار یک درخواست — وقتی فایل آماده شد جواب می‌دهم.',
   ar: '🤖 *بوت الوسائط — الدليل*\n\n'
+    + '· اطلب مباشرة: فيديو، متحرك، صور، أغاني أو ألبوم + الاسم\n'
     + '🎵 *أغنية / صوت* — اكتب:\n'
     + '      .play <اسم الأغنية> mp3\n'
     + '      مثال:  .play Jerusalema mp3\n\n'
@@ -11605,20 +11606,17 @@ app.get('/loadtest/observe', function(req,res){
 app.get('/ping', function(req,res){ res.json({ ok:true, ts:Date.now() }); });
 app.head('/', function(req,res){ res.status(200).end(); });
 
-/* v92.9.25: COMMS REDACTION — /health and /api/status are PUBLIC (the
- * self-keepalive and uptime monitors need them), so they must never leak
- * the bot's phone number, LID, the main group JID or the admin LIDs —
- * anyone scanning Render could harvest them and target the bot. Identity
- * is masked; operational counters stay for monitoring. */
-function maskNumber(n){ return String(n || '').replace(/^(\d{6})\d+(\d{4})$/, '$1…$2') || '(hidden)'; }
+/* v92.9.26: full identity restored on these endpoints — boss decision
+ * ('no one has my render URL, the leak doesn't matter'). Operational
+ * hardening from v92.9.25 (crash guard, send retry, log redaction) stays. */
 app.get('/health', function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,
   uptime: Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
   window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
   paused: botPaused, adminActive: isAdminActive(),
-  mainGroup: mainGroupJid ? 'set' : 'not set',
-  botNumber: maskNumber(botNumber),
+  mainGroup: mainGroupJid,
+  botNumber, botLid,
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
   dmPool: dmPool.size,
   ai: { active: activeProvider, providers: providerReport },
@@ -11626,10 +11624,10 @@ app.get('/health', function(req,res){ res.json({
 }); });
 
 app.get('/api/status', function(req,res){ res.json({
-  status: connectionStatus, botNumber: maskNumber(botNumber),
+  status: connectionStatus, botNumber, botLid,
   groups: joinedGroups.size, dms: activeDMs.size,
-  queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid ? 'set' : 'not set',
-  adminCount: adminLids.size, ai: { active: activeProvider, providers: providerReport }
+  queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
+  adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
 }); });
 
 /* ═══ v85 FREE TRANSLATOR — HTTP API (no signup; optional env keys used first)

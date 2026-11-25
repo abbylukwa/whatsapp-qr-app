@@ -1,3 +1,35 @@
+## v92.9.33 — "SELF-TEST SELF-WALL FIXED · FULL REGISTRY LIVE-PROBED (223/243 ALIVE)"
+### WHY: owner screenshots 2026-11-26 — self-test sites 'no delivery' + repeated
+### 'recipient cooldown (24h)' warns, bot connected (263777627210, LID OK, 66 groups).
+
+1. SELF-TEST SELF-WALL (the 'no delivery' root cause, code-proven): the self-test's OWN
+   first send — the active-links list, priority 2 → focus group — passed the cold-outreach
+   gate (fresh boot: nobody is warm — lastInboundAt is in-memory and empty after every
+   deploy; policy_state.json wiped by the ephemeral disk) and policyRecordSend then ARMED
+   the 24h recipient cooldown ON THE FOCUS GROUP itself. Its own 5 pics 10s/5s later then
+   hit 'Policy: recipient cooldown (24h)' → sendImageSafe quietFail → 'no delivery ✗' for
+   every site (live logs 2026-11-26). v92.9.31 exempted admin DMs (isAdminRecipientJid)
+   but the GROUP path was never covered, and the adminTrigger flag the sends already carry
+   was never read by the policy gate. FIX: the cold gate and the cooldown-arming line now
+   exempt opts.adminTrigger === true (only ever set by the boss's own diagnostics — deploy
+   self-test + admin-triggered sends). Member replies are unaffected: any inbound group
+   message marks the chat warm via noteInbound and replies skip the gate anyway.
+2. FULL REGISTRY LIVE-PROBED (243 sites, real query 'baddie' = SELFTEST_QUERY, scraper
+   judgment rules: real HTML + ≥20KB + ≥10 links): 223/243 ALIVE (92%). The SITES are not
+   the delivery problem. 20 dead, all with concrete causes:
+   · 14× eporner family (every category, videos + gifs) → HTTP 404: eporner changed its
+     search-URL format — all /search/{q}/ templates broke at once (global-eporner-gifs,
+     zw-zimbabwe-eporner, german/french/italian/persian/russian/southafrica/spanish/turkish
+     + all 4 gif variants).
+   · 3× JS-shells (french-mym.fans, arab-naykhub, spanish-loquosex): SPA pages that render
+     only in a real browser (needs the stealth-Chrome ladder, plain fetch sees 12KB shell).
+   · 2× broken site paths: indian-desisins 404 (site moved its search route),
+     latina-gloryhole.com 200-but-no-links (paywall/redirect shell).
+   · 1× latina-mydirtyhobby 503: active bot-block on the datacenter IP.
+   (14 + 3 + 2 + 1 = 20 dead.)
+   The site-health sweep (now scraper-delegated) dead-marks these automatically so they
+   stop being picked; eporner templates need a URL-format refresh to come back.
+
 ## v92.9.32 — "IMAGE/GIF SIZE SPLIT: THE LAST BIG BOOT TRANSIENT"
 ### WHY: third Render OOM email (2026-11-26). v92.9.31 killed the boot sweep OOM (verified
 ### deployed: remote HEAD 5f78572, scraper /probe-urls live). This closes the only remaining

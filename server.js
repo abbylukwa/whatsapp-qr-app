@@ -2881,7 +2881,16 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
    * after every restart the boot summary armed the 24h cooldown on the
    * admin himself and the next admin send was Policy-walled (live logs
    * 2026-11-25). isAdminRecipientJid: number ↔ LID pairs, 2FA-verified. */
-  if (priority >= 2 && !warmChat(jid) && !isAdminRecipientJid(jid)){
+  /* v92.9.33: SELF-TEST SELF-WALL — the self-test's OWN first send (the
+   * active-links list, priority 2 → focus group) passed this gate (fresh
+   * boot: nobody is warm, policy file wiped by the ephemeral disk) and
+   * policyRecordSend then armed the 24h cooldown ON THE FOCUS GROUP —
+   * so its own 5 pics 10s later hit 'Policy: recipient cooldown (24h)'
+   * → 'no delivery ✗' (live logs 2026-11-26, PornPics/DarkNaija/xvideos
+   * etc.). adminTrigger is only ever set by the boss's own diagnostics
+   * (deploy self-test + admin-triggered sends): those never cold-gate
+   * and never arm the cooldown. */
+  if (priority >= 2 && !warmChat(jid) && !isAdminRecipientJid(jid) && !(opts && opts.adminTrigger === true)){
     const gate = policyCanSend(jid);
     if (!gate.ok){
       pushLog('warn','policy',`Send blocked to ${jid}: ${gate.reason}`);
@@ -2992,7 +3001,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
             const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
             countSentMedia(jid, content);   /* v92.9.6: photos/videos actually delivered */
-            if (priority >= 2 && !warmChat(jid) && taskType !== 'deploydrop' && !isAdminRecipientJid(jid)) policyRecordSend(jid);   /* v92.9.31: admin sends never arm the cooldown */
+            if (priority >= 2 && !warmChat(jid) && taskType !== 'deploydrop' && !isAdminRecipientJid(jid) && !(opts && opts.adminTrigger === true)) policyRecordSend(jid);   /* v92.9.33: admin-triggered diagnostics never arm the cooldown either */
             /* v66: remember when the bot last spoke in a group — greetings
              * scheduler uses this so it never greets a group it is already
              * actively chatting in ("no repeated greeting messages"). */

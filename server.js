@@ -4374,6 +4374,113 @@ async function probeMainGroup(){
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  v92.9.29 DEPLOY SELF-TEST — the boss: "once deployed bot sends all
+ *  active links, 10 seconds after that it sends 5 images of a baddie
+ *  to test it from different image sites, 5s apart, into the group —
+ *  and make sure it only sends to that specific group and that
+ *  specific admin."
+ *
+ *  Runs ONCE per deploy, ~20s after connect:
+ *    1. ONE tame text into the verified focus group: every ENABLED
+ *       scraper slot (video/image/gif) by name — the "active links".
+ *    2. 10s later: 5 test images, each from a DIFFERENT image site
+ *       (pinned via scraper myLinks), sent 5s apart into the SAME group.
+ *    3. Delivery report goes to the ADMIN ONLY — never the group.
+ *  Every send funnels through sendBuffer (focus lock enforced twice:
+ *  here AND at the choke point). Group activation is bypassed via
+ *  adminTrigger — a deploy-time check the boss ordered — but the
+ *  DESTINATION is still hard-locked to the verified focus group.
+ *  DEPLOY_SELFTEST=0 disables. Defers until the group is resolved
+ *  (retries every 60s, max 10). ═════════════════════════════════ */
+let deploySelfTestDone = false;
+let deploySelfTestTries = 0;
+const SELFTEST_QUERY = 'baddie';
+function selftestSlotLabel(s){ return String((s && s.name) || (s && s.url) || '?').replace(/\s*\(.*?\)\s*/g, '').trim(); }
+async function deploySelfTest(){
+  if ((process.env.DEPLOY_SELFTEST || '') === '0'){ deploySelfTestDone = true; pushLog('info','selftest','disabled (DEPLOY_SELFTEST=0)'); return 'done'; }
+  if (!sock || connectionStatus !== 'connected') return 'deferred';
+  const fState = focusLock._state();
+  const focusJid = fState.focusJids && fState.focusJids[0];
+  if (!focusJid){ pushLog('info','selftest','focus group not resolved yet — deferring'); return 'deferred'; }
+  if (!focusLock.isGroupLinkVerified()) pushLog('warn','selftest','group 2FA not confirmed yet — proceeding on the persisted JID (link check continues in background)');
+
+  deploySelfTestDone = true;
+  /* ── Step 1: ALL ACTIVE LINKS into the group (one message) ── */
+  const slotsByType = { image: [], gif: [], video: [], music: [] };
+  let totalSites = 0;
+  try {
+    const r = await axios.get(SCRAPER_URL + '/my-links', { timeout: 20000 });
+    for (const l of (r.data && r.data.links) || []){
+      if (l && l.enabled !== false && Object.prototype.hasOwnProperty.call(slotsByType, l.type)) slotsByType[l.type].push(l);
+    }
+  } catch (e) { pushLog('warn','selftest','active-links fetch failed: ' + e.message); }
+  totalSites = slotsByType.image.length + slotsByType.gif.length + slotsByType.video.length;
+  const siteLine = (t) => {
+    const arr = slotsByType[t] || [];
+    if (!arr.length) return '· ' + t.toUpperCase() + ': none enabled';
+    return '· ' + t.toUpperCase() + ' (' + arr.length + '): ' + arr.map(selftestSlotLabel).join(', ');
+  };
+  const linksText = '✅ DEPLOY CHECK — active sites (' + totalSites + '):\n' +
+    siteLine('video') + '\n' + siteLine('image') + '\n' + siteLine('gif');
+  try {
+    await sendBuffer(focusJid, { text: linksText.slice(0, 3000) }, 2, 'slow', 'group', true, { adminTrigger: true });
+    pushLog('success','selftest','active-links list sent to the verified focus group (' + totalSites + ' sites)');
+  } catch (e) { pushLog('warn','selftest','links list send refused: ' + e.message); }
+
+  /* ── Step 2: 10s later — 5 images, DIFFERENT sites, 5s apart ── */
+  await sleepMs(10000);
+  const picks = [];
+  const seenHosts = new Set();
+  for (const s of slotsByType.image){
+    try { const h = new URL(s.url).hostname.replace(/^www\./, ''); if (seenHosts.has(h)) continue; seenHosts.add(h); } catch (e) {}
+    picks.push(s);
+    if (picks.length >= 5) break;
+  }
+  const results = [];
+  for (let i = 0; i < picks.length; i++){
+    const slot = picks[i];
+    const label = selftestSlotLabel(slot);
+    let delivered = null;
+    try {
+      /* pinned per-site hunt: single-entry myLinks — ONLY this site answers */
+      const r = await axios.post(SCRAPER_URL + '/search', { query: SELFTEST_QUERY, myLinks: [slot.url] }, { timeout: 60000 });
+      const imgs = (r.data && r.data.images) || [];
+      if (imgs.length){
+        const okSend = await sendImageSafe(focusJid, imgs[0], '🧪 deploy test ' + (i + 1) + '/' + picks.length + ' — ' + label, 2, 'slow', 'group', true, { quietFail: true, nsfw: true });
+        if (okSend) delivered = imgs[0];
+      }
+    } catch (e) { pushLog('warn','selftest','site test failed (' + label + '): ' + e.message); }
+    results.push({ label: label, ok: !!delivered });
+    pushLog(delivered ? 'success' : 'warn', 'selftest', 'site ' + (i + 1) + '/' + picks.length + ' ' + label + ': ' + (delivered ? 'DELIVERED ✓' : 'no delivery ✗'));
+    if (i < picks.length - 1) await sleepMs(5000);
+  }
+
+  /* ── Step 3: report to the ADMIN ONLY ── */
+  const passed = results.filter(r => r.ok);
+  const failed = results.filter(r => !r.ok);
+  const report = '🧪 Deploy self-test done.\n' +
+    'Group: ' + (focusLock.isGroupLinkVerified() ? '2FA ✓ (link+JID)' : 'JID-persisted (2FA pending)') + '\n' +
+    'Admin 2FA: ✓ (number+phone-JID)\n' +
+    'Active sites: ' + totalSites + ' · Images delivered: ' + passed.length + '/' + results.length + '\n' +
+    (passed.length ? '✓ ' + passed.map(r => r.label).join(', ') + '\n' : '') +
+    (failed.length ? '✗ no delivery: ' + failed.map(r => r.label).join(', ') : '');
+  try {
+    await sendBuffer(ADMIN_JID, { text: report.slice(0, 1500) }, 2, 'auto', 'admin', false, { adminTrigger: true });
+    pushLog('success','selftest','report sent to admin: ' + passed.length + '/' + results.length + ' sites delivered');
+  } catch (e) { pushLog('warn','selftest','admin report failed: ' + e.message); }
+  return 'done';
+}
+function armDeploySelfTest(){
+  if (deploySelfTestDone) return;
+  deploySelfTest().then(function(state){
+    if (state === 'deferred' && ++deploySelfTestTries <= 10) setTimeout(armDeploySelfTest, 60000);
+  }).catch(function(e){
+    pushLog('warn','selftest','attempt failed: ' + e.message);
+    if (++deploySelfTestTries <= 10) setTimeout(armDeploySelfTest, 60000);
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  WELCOME / GOODBYE
  * ══════════════════════════════════════════════════════════════ */
 async function generateWelcome(userName){
@@ -5112,8 +5219,9 @@ function startDmAiCycle(){
   setInterval(pruneDmPool, 10 * 60 * 1000).unref?.();
   const lo = Math.round((DM_CYCLE_MS * (1 - DM_CYCLE_JITTER_PCT)) / 1000);
   const hi = Math.round((DM_CYCLE_MS * (1 + DM_CYCLE_JITTER_PCT)) / 1000);
-  pushLog('info','ai',`DM AI cycle: ${DM_BATCH_MIN}-${DM_BATCH_MAX} DMs every ${lo}-${hi}s (jittered, oldest-first)` +
-    (AI_QUIET_HOURS ? ` · quiet ${AI_QUIET_START_HOUR}:00-${AI_QUIET_END_HOUR}:00` : ''));
+  /* v92.9.29: honest log — the persona batch is retired; the sweep is a
+   * no-op kept for compatibility. NO proactive DMs ever leave the bot. */
+  pushLog('info','ai','DM AI engine: RETIRED — zero proactive DMs. The bot talks to the ADMIN and the ONE verified group only (ban-safe).');
 }
 
 /* v68.2: INTERACTIVITY GATE — reply to people who are actually talking
@@ -8350,6 +8458,17 @@ async function handleMessage(msg){
   scheduleHumanRead(msg, { admin: isAdmin });
   if (!fromBotPhone && isBotSender(msg, senderJid)) return;
   if (isAdmin) touchAdminActive();
+  /* v92.9.29 ADMIN 2FA — every admin DM is proven by BOTH factors
+   * (phone number + phone JID / LID-resolved JID); logged once so the
+   * panel shows the identity chain working in real life. */
+  if (isAdmin && !isGroup){
+    const _2fa = focusLock.verifyAdmin2FA(chatJid);
+    if (_2fa.ok){
+      if (!global._admin2faLogged){ global._admin2faLogged = true; pushLog('success','focus','ADMIN 2FA ✓ (' + _2fa.factors.join(' + ') + ') — DM service armed for the boss only'); }
+    } else {
+      pushLog('warn','focus','admin DM failed 2FA (' + String(_2fa.factors) + ') — treating as restricted');
+    }
+  }
 
   /* v86 auto-translate: learn this chat's language early (fire-and-forget
    * — network detection runs once per chat per day, never delays handling) */
@@ -9121,6 +9240,23 @@ async function connectBot(){
         /* v66: build group registry (names, announce-only flags, members) */
         setTimeout(function(){ refreshGroupRegistry().catch(function(){}); }, 5000);
 
+        /* v92.9.29 GROUP 2FA — the focus group is trusted only when the
+         * pinned invite LINK resolves to the SAME JID we hold. Link is
+         * ground truth: a drifted/stale persisted JID gets replaced. */
+        setTimeout(async function(){
+          try {
+            if (!sock) return;
+            const info = await sock.groupGetInviteInfo(focusLock.resolveInviteCode());
+            const r = focusLock.verifyGroupLink(info && info.id);
+            if (r && r.ok) pushLog('success','focus','GROUP 2FA ✓ — invite link ↔ JID match: ' + r.jid + (String(r.factors).indexOf('stale') > -1 ? ' (stale JID replaced — link is ground truth)' : ''));
+            else pushLog('warn','focus','GROUP 2FA pending: ' + ((r && r.reason) || 'unknown'));
+          } catch (e) { pushLog('warn','focus','GROUP 2FA invite resolve failed (retry on next intake sweep): ' + e.message); }
+        }, 12000);
+
+        /* v92.9.29 DEPLOY SELF-TEST — active links + 5 site-pinned test
+         * images into the verified group, report to the admin. Once. */
+        setTimeout(function(){ armDeploySelfTest(); }, 20000);
+
         detectAIBackend().catch(e => pushLog('error','ai','detect: '+e.message));
 
         const lidList = [...adminLids];
@@ -9140,25 +9276,31 @@ async function connectBot(){
         let vsCount = '?', vsDefault = '';
         try { const vs = await scraperVideoSites(); if (vs.ok){ vsCount = vs.sites.length; vsDefault = vs.sites[0] ? vs.sites[0].name.split(' ')[0] : ''; } } catch(e){}
         try {
+          /* v92.9.29: the banner version is now DYNAMIC (package.json).
+           * The old hardcoded 'v92.9.12' printed on EVERY deploy since the
+           * original upload — it made every running version LOOK like
+           * v92.9.12 and hid what Render was actually serving. */
+          const focusJidNow = (focusLock._state().focusJids || [])[0] || null;
           const sent = await sock.sendMessage(ADMIN_JID, { text:
-            'BreadBot v92.9.12 ONLINE\n' +
+            'BreadBot v' + require('./package.json').version + ' ONLINE\n' +
             'Mode: MANAGER (school buddy removed)\n' +
             'Brain: AI decisions ' + (brain.isEnabled() ? 'ON 🧠' : 'OFF (rules only)') + '\n' +
             'Bot: ' + botNumber + '\n' +
             'Bot LID: ' + (botLid || 'unknown (will learn on first message)') + '\n' +
             'Admin: ' + ADMIN_PHONE + '\n' +
-            'Main group: ' + (mainGroupJid || 'auto-resolving from ADMIN_GROUP_LINK...') + '\n' +
-            'Groups: ' + joinedGroups.size + '\n' +
+            'Focus group: ' + (focusJidNow || 'resolving from pinned invite link...') + '\n' +
+            'Groups: ' + joinedGroups.size + ' (only the verified one gets service)\n' +
             'Account age: ' + getAccountAgeDays() + 'd\n' +
             'Recipient limit: ' + dailyRecipientLimit(getAccountAgeDays()) + '\n\n' +
-            'Admin commands accepted in ANY chat (DM or group) — v69.\n' +
-            'DM AI: ' + DM_BATCH_MIN + '-' + DM_BATCH_MAX + ' random DMs every ' + (DM_CYCLE_MS/1000) + 's.\n\n' +
+            'Lock: ADMIN + ONE group ONLY — 2FA verified (group: link↔JID · admin: number↔phone-JID).\n' +
+            'DM AI: RETIRED — zero proactive DMs (ban-safe).\n\n' +
             '📦 USEFUL NOW:\n' +
             '· Media: pic <name> · gif <name> · nsfwvideo <name> · .play <song>\n' +
             '· NSFW 24/7: nsfw.see / nsfw.gif / nsfw.play <name> · next = more\n' +
-            '· Site pick: add site:<name|#> to any ask (e.g. site:afghan) · !vidsites lists sites\n' +
+            '· Site pick: add site:<name|#> to any ask (e.g. site:afghan) · !vidsites · !picsites · !gifsites\n' +
             '· Persian: !help persian · Persian songs: .play <خواننده>\n' +
             '· Groups stay silent until you activate one (say .play inside it)\n' +
+            '· Deploy self-test: after every deploy the active-sites list + 5 site-pinned test pics go to the group, report to admin (DEPLOY_SELFTEST=0 to disable)\n' +
             '· Video sites: ' + vsCount + (vsDefault ? ' (default: ' + vsDefault + ')' : '') + ' · full menu: !fullhelp'
           });
           if (sent?.key?.id) markBotSent(sent.key.id);

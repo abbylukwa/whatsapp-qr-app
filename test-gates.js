@@ -18,6 +18,7 @@ const os = require('os');
 /* Isolated data dir so the test never touches the bot's live state */
 const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-gates-'));
 process.env.ADMIN_PHONE = '263777627210';
+process.env.FOCUS_STATE_FILE = path.join(tmpData, 'focus_group.json');   /* v92.9.29: drift-swap writes here, NEVER the live file */
 
 const focusLock = require('./focus');
 const accessCtl = require('./access');
@@ -93,6 +94,32 @@ check('send gate runs BEFORE the group-activation check (belt + braces)', sendBu
 check('DM whitelist gate still backs the focus lock up', /if \(!isGroup && !isAdmin\)\{[\s\S]{0,1200}?accessCtl\.isAllowedNumber\(realPhone \|\| senderJid, ADMIN_PHONE\)/m.test(srv));
 check('BAD-MAC storm now SELF-HEALS (dead-mark + wipe + fresh QR)', /BAD-MAC STORM[\s\S]{0,4500}?markDeadSession\(\)[\s\S]{0,4500}?connectBot\(\); \}, 2000\)/m.test(srv));
 check('LID map feeds the focus lock at boot', /focusLock\.setLidResolver\(function\(lidBase\)\{ return lid2pn\.get/.test(srv));
+
+console.log('\n── 6. TWO-FACTOR IDENTITY (v92.9.29) — group: link↔JID · admin: number↔phone-JID ──');
+const v1 = focusLock.verifyGroupLink(FOCUS_GROUP);            /* link resolves to the SAME jid */
+check('GROUP 2FA pass: link resolves to the persisted JID', v1.ok === true && v1.factors.length === 2);
+const v2 = focusLock.verifyGroupLink('120363777777777777@g.us');   /* link resolves elsewhere */
+check('GROUP 2FA drift: link JID ≠ persisted → link is ground truth (swap+persist)', v2.ok === true && focusLock.isAllowedJid('120363777777777777@g.us') === true && focusLock.isAllowedJid(FOCUS_GROUP) === false);
+const v3 = focusLock.verifyGroupLink(null);
+check('GROUP 2FA: failed resolve → linkVerified false', v3.ok === false && focusLock.isGroupLinkVerified() === false);
+focusLock.verifyGroupLink('120363777777777777@g.us');          /* restore verified state */
+const a1 = focusLock.verifyAdmin2FA('263777627210@s.whatsapp.net');
+check('ADMIN 2FA pass (pn JID): number + phone-JID both match', a1.ok === true && a1.factors.length === 2);
+const a2 = focusLock.verifyAdmin2FA('555666777@lid.whatsapp.net');
+check('ADMIN 2FA pass (LID JID): resolves to admin number + JID', a2.ok === true && a2.factors.length === 2);
+const a3 = focusLock.verifyAdmin2FA(MEMBER + '@s.whatsapp.net');
+check('ADMIN 2FA fail: group member number has neither factor', a3.ok === false);
+const a4 = focusLock.verifyAdmin2FA('263777627211:5@s.whatsapp.net');
+check('ADMIN 2FA fail: near-miss number (±1) has neither factor', a4.ok === false);
+
+console.log('\n── 7. DEPLOY SELF-TEST (v92.9.29) — wired, locked, once-per-deploy ──');
+check('self-test sends ONLY through sendBuffer (focus-locked choke point)', /deploySelfTest\(\)\{[\s\S]{0,6500}?sendBuffer\(focusJid[\s\S]{0,3500}?sendBuffer\(ADMIN_JID/m.test(srv));
+check('self-test is admin-triggered, NOT member-triggered', /sendBuffer\(focusJid[\s\S]{0,120}?adminTrigger: true/.test(srv));
+check('5 images from DIFFERENT sites, 5s apart, 10s after the links list', /await sleepMs\(10000\)[\s\S]{0,700}picks\.length >= 5[\s\S]{0,1800}await sleepMs\(5000\)/m.test(srv));
+check('report goes to the ADMIN only, never the group', /sendBuffer\(ADMIN_JID, \{ text: report[\s\S]{0,120}adminTrigger: true/.test(srv));
+check('self-test arms ONCE per deploy at +20s after connect', /setTimeout\(function\(\)\{ armDeploySelfTest\(\); \}, 20000\)/.test(srv));
+check('boot banner now prints the REAL package version (fossil killed)', /'BreadBot v' \+ require\('\.\/package\.json'\)\.version \+ ' ONLINE/.test(srv) && !/v92\\\.9\\\.12 ONLINE/.test(srv));
+check('no "random DMs" advertising left in the banner', !/random DMs every/.test(srv));
 
 console.log('\n════════════════════════════════════════════════');
 console.log((fail === 0 ? 'RESULT: ALL ' + pass + ' CHECKS PASSED — the lock is real.' : 'RESULT: ' + fail + ' FAILED / ' + pass + ' passed'));

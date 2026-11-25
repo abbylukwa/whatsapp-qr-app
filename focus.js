@@ -28,7 +28,10 @@
 const fs   = require('fs');
 const path = require('path');
 
-const STATE_FILE = path.join(__dirname, 'data', 'focus_group.json');
+/* v92.9.29: FOCUS_STATE_FILE env override — tests must never touch the
+ * live data/focus_group.json (the drift-swap persists, so a test that
+ * runs against the real path would corrupt live state). */
+const STATE_FILE = process.env.FOCUS_STATE_FILE || path.join(__dirname, 'data', 'focus_group.json');
 const FOCUS_INVITE = (process.env.FOCUS_GROUP_INVITE || 'HGW3IdVbDJyImOgp1BFqT7').trim();
 
 let adminJid = '';                       /* set at boot from server config */
@@ -60,6 +63,70 @@ function addFocusJid(jid){
   return true;
 }
 function resolveInviteCode(){ return FOCUS_INVITE; }
+
+/* ═══ v92.9.29 TWO-FACTOR IDENTITY — the boss: "make a 3-way or 2-factor
+ * verification like group JID and group link verification, same for the
+ * phone number verification and phone JID." ═══
+ *
+ * GROUP 2FA — factor 1: the JID is in the focus set (persisted). Factor 2:
+ * the pinned invite LINK resolves to that SAME JID. Only when BOTH agree
+ * is the group fully verified. If they disagree, the LINK is ground truth
+ * (the invite code is pinned in env/config and cannot be spoofed by
+ * someone re-creating a group with a similar name): the stale JID is
+ * replaced by the link-resolved one and the change is persisted.
+ *
+ * PHONE 2FA — factor 1: the phone NUMBER equals the admin's. Factor 2:
+ * the exact JID form matches (the pn JID equals the admin JID, or an
+ * @lid JID resolves through the harvested pair map back to the admin's
+ * number). Both factors must hold for DM service; the group member who
+ * DMs has neither. */
+let linkVerified = false;
+let lastGroupVerifyAt = 0;
+function verifyGroupLink(resolvedJid){
+  lastGroupVerifyAt = Date.now();
+  if (!resolvedJid || typeof resolvedJid !== 'string' || !resolvedJid.endsWith('@g.us')){
+    linkVerified = false;
+    return { ok: false, reason: 'invite resolve failed — group stays JID-persisted only, retry scheduled' };
+  }
+  if (focusJids.has(resolvedJid)){
+    linkVerified = true;
+    return { ok: true, jid: resolvedJid, factors: ['jid-in-focus-set', 'link-resolves-to-same-jid'] };
+  }
+  /* Link is ground truth — swap the stale JID out */
+  const stale = [...focusJids];
+  focusJids.clear(); focusJids.add(resolvedJid);
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ invite: FOCUS_INVITE, jid: resolvedJid, at: Date.now() }));
+  } catch (e) {}
+  linkVerified = true;
+  return { ok: true, jid: resolvedJid, factors: ['link-resolved', 'stale-jid-replaced:' + stale.join('|')] };
+}
+function isGroupLinkVerified(){ return linkVerified && focusJids.size > 0; }
+
+function verifyAdmin2FA(jid){
+  if (!jid || typeof jid !== 'string' || !adminJid) return { ok: false, factors: [] };
+  const at = jid.indexOf('@');
+  const dom = at > -1 ? jid.slice(at + 1) : '';
+  const base = jid.split('@')[0].split(':')[0];
+  const adminBase = adminJid.split('@')[0].split(':')[0];
+  const factors = [];
+  if (dom === 's.whatsapp.net'){
+    /* Factor 1: number matches. Factor 2: exact JID matches. */
+    if (base === adminBase) factors.push('phone-number');
+    if ((base + '@s.whatsapp.net') === adminJid) factors.push('phone-jid');
+    return { ok: factors.length === 2, factors };
+  }
+  if (dom === 'lid.whatsapp.net'){
+    /* Factor 1: LID resolves to the admin's NUMBER. Factor 2: the
+     * resolved number reconstructs the exact admin JID. */
+    const pn = (lidResolver && lidResolver(base)) || null;
+    if (pn && String(pn) === adminBase) factors.push('phone-number');
+    if (pn && (String(pn) + '@s.whatsapp.net') === adminJid) factors.push('phone-jid-via-lid');
+    return { ok: factors.length === 2, factors };
+  }
+  return { ok: false, factors };
+}
 /* THE kill-switch predicate — fail closed: unknown jid = refused */
 function isAllowedJid(jid){
   if (!jid || typeof jid !== 'string') return false;
@@ -123,4 +190,4 @@ function detectSpec(text){
 const PREVIEW_RE = /^(preview|previews|show me|tarisa|پیش نمایش|vista previa|aperçu|превью|預覽|pratinjau|অাগের)\s*$/i;
 function isPreviewRequest(text){ return PREVIEW_RE.test(String(text || '').trim()); }
 
-module.exports = { setAdminJid, setLidResolver, addFocusJid, resolveInviteCode, isAllowedJid, noteRequester, peekRequester, rememberUserSession, getUserSession, adoptUserSession, capVideoCount, detectSpec, isPreviewRequest, _state: () => ({ adminJid, focusJids: [...focusJids] }) };
+module.exports = { setAdminJid, setLidResolver, addFocusJid, resolveInviteCode, verifyGroupLink, isGroupLinkVerified, verifyAdmin2FA, isAllowedJid, noteRequester, peekRequester, rememberUserSession, getUserSession, adoptUserSession, capVideoCount, detectSpec, isPreviewRequest, _state: () => ({ adminJid, focusJids: [...focusJids], linkVerified, lastGroupVerifyAt }) };

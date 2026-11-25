@@ -9086,18 +9086,30 @@ async function connectBot(){
          * got the school account logged out. A rescan is required. */
         if (code === DisconnectReason.loggedOut){
           connectionStatus = 'logged-out';
-          /* v92.9.23: SELF-HEAL — WhatsApp invalidated the session, but
-           * leaving the dead creds in place meant every boot restored
-           * them again (disk/env/gist) and 401'd in a loop — the exact
-           * logged-out trap the boss hit on deploy. Back the dead auth
-           * up, mark fresh-required, restart: the next boot shows a
-           * clean QR. Nothing to juggle. */
-          pushLog('error','bot','401 Logged out — credentials invalid (self-heal: backing up dead auth, restarting fresh — a clean QR appears on the card, scan it once)');
+          /* v92.9.24: SELF-HEAL IN-PROCESS — WhatsApp invalidated the
+           * session. v92.9.23 exited 70 so Render would restart, but
+           * Render's disk is EPHEMERAL: the fresh marker died with the
+           * restart, the gist resurrected the dead session, 401 again —
+           * a crash loop (the boss's 503s + exit-70 alert emails). Now:
+           * back up the dead auth, mark the GIST dead (the only store
+           * that survives restarts), and reconnect IN-PROCESS with a
+           * clean auth state — the QR card shows a fresh code without
+           * the service ever going down. */
+          pushLog('error','bot','401 Logged out — credentials invalid (self-heal v92.9.24: backing up dead auth, marking the gist dead, reconnecting fresh IN-PROCESS — QR appears without any restart, no 503)');
           try { fs.renameSync(AUTH_FOLDER, AUTH_FOLDER + '.bak-' + new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)); }
           catch (e) { try { fs.rmSync(AUTH_FOLDER, { recursive:true, force:true }); } catch (e2) {} }
           try { fs.mkdirSync(path.join(__dirname, 'data'), { recursive:true }); fs.writeFileSync(path.join(__dirname, 'data', 'FRESH_REQUIRED'), 'loggedOut ' + new Date().toISOString()); } catch (e) {}
-          pushLog('warn','bot','Self-heal restart in 3s — no env changes needed. After scanning the fresh QR, delete the stale SESSION_B64_GROUPS env var (the gist auto-backup takes over).');
-          setTimeout(() => process.exit(70), 3000);   /* Render auto-restarts the service */
+          try {
+            sessionStore.markDeadSession().then(function(r){
+              if (r && r.ok) pushLog('warn','session','Gist session marked DEAD — future boots refuse it; the next successful pairing overwrites it with the live session.');
+              else pushLog('warn','session','Gist dead-mark failed (' + (r && r.error || '?') + ') — a future boot may restore the dead session once more, then self-heal again. No crash either way.');
+            }).catch(function(){});
+          } catch (e) {}
+          try { sock.ev.removeAllListeners('connection.update'); } catch(e){}
+          try { sock.ev.removeAllListeners('creds.update'); } catch(e){}
+          try { sock.end(undefined); } catch(e){}
+          pushLog('warn','bot','Fresh QR in 2s — scan it on the card. After pairing, the new session auto-backs-up over the dead one.');
+          setTimeout(function(){ botQrCount = 0; reconnectAttempts = 0; manualDisconnect = false; connectBot(); }, 2000);
           return;
         }
         if (code === 403){ connectionStatus = 'disconnected'; pushLog('error','bot','403 Forbidden — likely banned'); return; }

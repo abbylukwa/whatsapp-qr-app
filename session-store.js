@@ -108,6 +108,9 @@ function decryptEnvelope(raw){
     decipher.setAuthTag(Buffer.from(env.tag, 'base64'));
     const out = Buffer.concat([decipher.update(Buffer.from(env.data, 'base64')), decipher.final()]);
     const files = JSON.parse(out.toString('utf8'));
+    /* v92.9.24: dead-marked blobs carry no creds.json — pass them
+     * through so restoreLatest refuses them with the honest reason */
+    if (files && files.dead === true) return { ts: env.ts || 0, files };
     if (!files || !files.files || !files.files['creds.json']) return null;
     return { ts: env.ts || 0, files };
   } catch (e) { return null; }
@@ -201,11 +204,46 @@ async function fetchSessionBlob(){
 }
 
 /* ── restore at boot — call ONLY when no local creds exist ──────────── */
+/* v92.9.24: PERSISTENT DEAD-MARK — Render's disk is ephemeral, so the
+ * FRESH_REQUIRED file dies with every restart; the gist is the ONLY
+ * store that survives. When the 401 self-heal marks the session dead,
+ * the mark is pushed HERE — restoreLatest refuses it at every future
+ * boot until a fresh pairing overwrites the gist with the live blob. */
+async function markDeadSession(){
+  try {
+    /* v92.9.24: same encrypted push path as pushSessionBlob (findGist →
+     * PATCH, or create when no gist exists yet) — upsert, never fork. */
+    const content = encryptEnvelope(JSON.stringify({ v: 1, dead: true, deadAt: new Date().toISOString(), files: {} }));
+    const H = ghHeaders();                            /* throws NO_TOKEN when unset */
+    const existing = await findGist(H);
+    if (existing){
+      const r = await fetch('https://api.github.com/gists/' + existing.id, {
+        method: 'PATCH', headers: H,
+        body: JSON.stringify({ files: { [GIST_FILE]: { content } } })
+      });
+      if (!r.ok) throw new Error('gist update failed: HTTP ' + r.status);
+    } else {
+      const r = await fetch('https://api.github.com/gists', {
+        method: 'POST', headers: H,
+        body: JSON.stringify({ description: GIST_DESC + ' (DEAD-MARK)', public: false, files: { [GIST_FILE]: { content } } })
+      });
+      if (!r.ok) throw new Error('gist create failed: HTTP ' + r.status);
+      const g = await r.json();
+      gistCache = { id: g.id, updatedAt: g.updated_at };
+    }
+    state.deadMarks = (state.deadMarks || 0) + 1;
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
 async function restoreLatest(folder){
   const p = path.join(folder, 'creds.json');
   if (fs.existsSync(p)) return { ok: false, reason: 'local session already on disk' };
   const r = await fetchSessionBlob();
   if (!r.ok) return r;
+  /* v92.9.24: the 401 self-heal marked this session dead — refuse it */
+  if (r.files && r.files.dead === true){
+    return { ok: false, reason: 'dead-mark: the gist session was logged out by WhatsApp — fresh QR required' };
+  }
   const raw = r.files.files['creds.json'];
   const creds = JSON.parse(raw);
   if (!creds || !creds.noiseKey) return { ok: false, reason: 'cloud blob is not a valid session' };
@@ -249,6 +287,6 @@ function startAutoBackup(folder){
 module.exports = {
   GIST_FILE, status,
   captureFolder, encryptEnvelope, decryptEnvelope,
-  pushSessionBlob, fetchSessionBlob, restoreLatest,
+  pushSessionBlob, fetchSessionBlob, restoreLatest, markDeadSession,
   schedulePush, startAutoBackup
 };

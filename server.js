@@ -630,7 +630,18 @@ function detectLanguage(text){
 const LOG_BUFFER_MAX = 500, logBuffer=[], logClients=new Set();
 const LIVE_MSG_MAX   = 300, liveMessages=[], msgClients=new Set();
 
+/* v92.9.25: never let a secret value (GitHub token, session secret, API keys)
+ * reach the panel/log — axios errors and stack traces sometimes echo them. */
+const SECRET_VALUES = Object.entries(process.env)
+  .filter(function(kv){ return /TOKEN|SECRET|KEY|B64|PASSWORD/i.test(kv[0]) && kv[1] && kv[1].length >= 8; })
+  .map(function(kv){ return kv[1]; });
+function redactSecrets(str){
+  let out = String(str);
+  for (const v of SECRET_VALUES){ if (out.indexOf(v) !== -1) out = out.split(v).join('***'); }
+  return out;
+}
 function pushLog(level, source, message, meta={}){
+  message = redactSecrets(message);
   const entry = { id:Date.now()+Math.random(), ts:new Date().toISOString(),
     level, source, message, meta:Object.keys(meta).length?meta:undefined };
   logBuffer.push(entry); if (logBuffer.length>LOG_BUFFER_MAX) logBuffer.shift();
@@ -1577,7 +1588,12 @@ class DualQueue {
     while (this.fast.length){
       const job = this.fast.shift();
       try { await job.fn(); this.fastRun++; }
-      catch(e){ this.fastFail++; pushLog('error','fastlane',`${job.name}: ${e.message}`); }
+      catch(e){
+        /* v92.9.25: one retry after 3s — a transient socket hiccup must not
+         * lose a message. If the retry fails too, dead-letter it visibly. */
+        try { await new Promise(r => setTimeout(r, 3000)); await job.fn(); this.fastRun++; }
+        catch(e2){ this.fastFail++; pushLog('error','fastlane',`DEAD-LETTER (retried once) ${job.name}: ${e2.message}`); }
+      }
       await new Promise(r=>setTimeout(r, nextFibDelayMs('admin')));
     }
     this.fastRunning = false;
@@ -1608,7 +1624,10 @@ class DualQueue {
         }
       }
       try { await job.fn(); this.slowRun++; }
-      catch(e){ this.slowFail++; pushLog('error','slowlane',`${job.name}: ${e.message}`); }
+      catch(e){
+        try { await new Promise(r => setTimeout(r, 3000)); await job.fn(); this.slowRun++; }
+        catch(e2){ this.slowFail++; pushLog('error','slowlane',`DEAD-LETTER (retried once) ${job.name}: ${e2.message}`); }
+      }
       await new Promise(r=>setTimeout(r, nextFibDelayMs(job.taskType || 'group')));
     }
     this.slowRunning = false;
@@ -11586,14 +11605,20 @@ app.get('/loadtest/observe', function(req,res){
 app.get('/ping', function(req,res){ res.json({ ok:true, ts:Date.now() }); });
 app.head('/', function(req,res){ res.status(200).end(); });
 
+/* v92.9.25: COMMS REDACTION — /health and /api/status are PUBLIC (the
+ * self-keepalive and uptime monitors need them), so they must never leak
+ * the bot's phone number, LID, the main group JID or the admin LIDs —
+ * anyone scanning Render could harvest them and target the bot. Identity
+ * is masked; operational counters stay for monitoring. */
+function maskNumber(n){ return String(n || '').replace(/^(\d{6})\d+(\d{4})$/, '$1…$2') || '(hidden)'; }
 app.get('/health', function(req,res){ res.json({
   ok:true, ts:Date.now(), status:connectionStatus,
   uptime: Math.floor((Date.now()-botStartTime)/1000),
   lanes: jobs.stats(),
   window: { time: describeWindow(), nsfw: describeNsfw(), dmAI: describeDm() },
   paused: botPaused, adminActive: isAdminActive(),
-  mainGroup: mainGroupJid,
-  botNumber, botLid,
+  mainGroup: mainGroupJid ? 'set' : 'not set',
+  botNumber: maskNumber(botNumber),
   groups: joinedGroups.size, dms: activeDMs.size, queue: joinQueue.length,
   dmPool: dmPool.size,
   ai: { active: activeProvider, providers: providerReport },
@@ -11601,10 +11626,10 @@ app.get('/health', function(req,res){ res.json({
 }); });
 
 app.get('/api/status', function(req,res){ res.json({
-  status: connectionStatus, botNumber, botLid,
+  status: connectionStatus, botNumber: maskNumber(botNumber),
   groups: joinedGroups.size, dms: activeDMs.size,
-  queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid,
-  adminLids: [...adminLids], ai: { active: activeProvider, providers: providerReport }
+  queue: joinQueue.length, lanes: jobs.stats(), mainGroup: mainGroupJid ? 'set' : 'not set',
+  adminCount: adminLids.size, ai: { active: activeProvider, providers: providerReport }
 }); });
 
 /* ═══ v85 FREE TRANSLATOR — HTTP API (no signup; optional env keys used first)
@@ -13301,4 +13326,20 @@ process.on('SIGTERM', async function(){
  * is GONE — it swallowed real crashes and left the bot running in an
  * undefined state. crash-recovery.js owns this event (restart with
  * backoff), which is the correct behavior. */
+/* v92.9.25 REALITY CHECK: crash-recovery.js NEVER EXISTED — so this process
+ * had NO uncaughtException handler at all: any stray throw in a timer or
+ * async path killed the bot instantly (the exit-70/503 alert class the boss
+ * kept receiving). The guard below keeps the bot alive through isolated
+ * errors and only restarts on a real doom-loop. */
+let _ucTimes = [];
+process.on('uncaughtException', function(e){
+  try { pushLog('error','crash','uncaughtException: ' + String((e && e.stack) || e).slice(0, 1200)); } catch (e2) {}
+  const now = Date.now();
+  _ucTimes = _ucTimes.filter(function(t){ return now - t < 5 * 60000; });
+  _ucTimes.push(now);
+  if (_ucTimes.length >= 3){
+    try { pushLog('warn','crash','3+ uncaught exceptions in 5 min — controlled fresh restart to clear the state'); } catch (e2) {}
+    setTimeout(function(){ try { process.exit(70); } catch (e3) { process.exit(70); } }, 1500);
+  }
+});
 process.on('unhandledRejection', function(e){ pushLog('error','unhandled', String(e)); });

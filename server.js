@@ -733,6 +733,20 @@ const joinedGroups = new Map();
 const lastGreetingAt = new Map();
 const learningData = new Map();
 const adminLids = new Set(HARDCODED_ADMIN_LIDS);
+/* v92.9.31: jid-only admin check for the SEND gates — the boss (2FA-verified
+ * number + harvested LID pairs) is warm BY DEFINITION. After every restart
+ * the inbound memory is empty and the cold-outreach gate self-walled the
+ * admin: boot summary armed the 24h recipient cooldown on the admin, then
+ * the next admin send (self-test report) was refused 'Policy: recipient
+ * cooldown (24h)' (live unified logs 2026-11-25). Never again. */
+function isAdminRecipientJid(jid){
+  if (typeof jid !== 'string' || !jid.includes('@')) return false;
+  if (jid === ADMIN_JID) return true;
+  const base = jid.split('@')[0].split(':')[0];
+  if (base === ADMIN_PHONE) return true;
+  if (adminLids.has(base)) return true;
+  return false;
+}
 const recentAdminCmds = new Map();
 const recentJoinAttempts = new Map();
 const antilinkWarnCooldown = new Map();
@@ -2462,7 +2476,14 @@ async function sendImageSafe(jid, url, caption='', priority=2, lane='slow', task
   try {
     const { buffer, mimetype } = await downloadAndCheck(url, MEDIA_MAX_BYTES, 'image');
     await sendBuffer(jid, { image: buffer, caption, mimetype }, priority, lane, taskType, typing,
-      { nsfw: opts && opts.nsfw === true, account: opts && opts.account });
+      { nsfw: opts && opts.nsfw === true, account: opts && opts.account,
+        /* v92.9.31: opts now REACH the send gates — sendImageSafe used to
+         * forward only {nsfw, account}, so the deploy self-test's
+         * adminTrigger/activationConfirm were silently dropped and its 5
+         * images to the 2FA-verified focus group were refused 'group not
+         * activated' (live logs 2026-11-25, 5/5 no delivery). */
+        adminTrigger: opts && opts.adminTrigger === true,
+        activationConfirm: opts && opts.activationConfirm === true });
     return true;
   } catch(e){
     pushLog('warn','media',`image skip: ${e.message}`);
@@ -2814,7 +2835,12 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
    * non-NSFW media stays a block + admin report. Runs in LOADTEST too —
    * the sim asserts this guard is real. */
   if ((taskType === 'group' || taskType === 'dmreply') && content &&
-      (content.image || content.video || content.audio || content.document)){
+      (content.image || content.video || content.audio || content.document) &&
+      /* v92.9.31: admin-confirmed media (the boss's own trigger, or the
+       * deploy self-test to the 2FA-verified focus group) is INTENDED
+       * media — exempt from the binding guard, and it can therefore never
+       * trip the nsfw kill switch on the boss's own diagnostic. */
+      !(opts && (opts.adminTrigger || opts.activationConfirm))){
     if (!chatWantsMedia(jid)){
       const mKind = content.audio ? 'audio' : content.video ? 'video' : content.image ? 'image' : 'document';
       const mCap = String(content.caption || '').replace(/\n/g,' ').slice(0, 70);
@@ -2836,7 +2862,11 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
   }
   /* v92.9.13: the deploydrop carve-out is gone with the drop itself —
    * the cold-outreach 24h/recipient gate applies to EVERY sender again. */
-  if (priority >= 2 && !warmChat(jid)){
+  /* v92.9.31: the 2FA-verified ADMIN bypasses the cold-outreach gate —
+   * after every restart the boot summary armed the 24h cooldown on the
+   * admin himself and the next admin send was Policy-walled (live logs
+   * 2026-11-25). isAdminRecipientJid: number ↔ LID pairs, 2FA-verified. */
+  if (priority >= 2 && !warmChat(jid) && !isAdminRecipientJid(jid)){
     const gate = policyCanSend(jid);
     if (!gate.ok){
       pushLog('warn','policy',`Send blocked to ${jid}: ${gate.reason}`);
@@ -2947,7 +2977,7 @@ function sendBuffer(jid, content, priority=2, lane='auto', taskType='group', typ
             const sent = await S.sendMessage(jid, content);
             if (sent?.key?.id) markBotSent(sent.key.id);
             countSentMedia(jid, content);   /* v92.9.6: photos/videos actually delivered */
-            if (priority >= 2 && !warmChat(jid) && taskType !== 'deploydrop') policyRecordSend(jid);
+            if (priority >= 2 && !warmChat(jid) && taskType !== 'deploydrop' && !isAdminRecipientJid(jid)) policyRecordSend(jid);   /* v92.9.31: admin sends never arm the cooldown */
             /* v66: remember when the bot last spoke in a group — greetings
              * scheduler uses this so it never greets a group it is already
              * actively chatting in ("no repeated greeting messages"). */
@@ -4401,6 +4431,20 @@ const SELFTEST_QUERY = 'baddie';
 function selftestSlotLabel(s){ return String((s && s.name) || (s && s.url) || '?').replace(/\s*\(.*?\)\s*/g, '').trim(); }
 async function deploySelfTest(){
   if ((process.env.DEPLOY_SELFTEST || '') === '0'){ deploySelfTestDone = true; pushLog('info','selftest','disabled (DEPLOY_SELFTEST=0)'); return 'done'; }
+  /* v92.9.31: ONCE PER DEPLOY, not once per boot — OOM restarts reset the
+   * in-memory flag and re-ran the whole self-test (5 hunts + sends) on an
+   * already-panting box, feeding the restart loop. File marker keyed on
+   * the deploy commit; wiped with the ephemeral disk on the NEXT deploy,
+   * so it still runs exactly once per deploy. */
+  try {
+    const tag = process.env.RENDER_GIT_COMMIT || null;
+    const mf = path.join(__dirname, 'data', 'selftest-marker.json');
+    if (tag && fs.existsSync(mf) && JSON.parse(fs.readFileSync(mf, 'utf8')).tag === tag){
+      deploySelfTestDone = true;
+      pushLog('info','selftest','already done for deploy ' + String(tag).slice(0,7) + ' — skipped');
+      return 'done';
+    }
+  } catch(_e){}
   if (!sock || connectionStatus !== 'connected') return 'deferred';
   const fState = focusLock._state();
   const focusJid = fState.focusJids && fState.focusJids[0];
@@ -4463,7 +4507,7 @@ async function deploySelfTest(){
       const r = await axios.post(SCRAPER_URL + '/search', { query: SELFTEST_QUERY, myLinks: [slot.url] }, { timeout: 60000 });
       const imgs = (r.data && r.data.images) || [];
       if (imgs.length){
-        const okSend = await sendImageSafe(focusJid, imgs[0], '🧪 deploy test ' + (i + 1) + '/' + picks.length + ' — ' + label, 2, 'slow', 'group', true, { quietFail: true, nsfw: true });
+        const okSend = await sendImageSafe(focusJid, imgs[0], '🧪 deploy test ' + (i + 1) + '/' + picks.length + ' — ' + label, 2, 'slow', 'group', true, { quietFail: true, nsfw: true, adminTrigger: true, activationConfirm: true });
         if (okSend) delivered = imgs[0];
       }
     } catch (e) { pushLog('warn','selftest','site test failed (' + label + '): ' + e.message); }
@@ -4490,6 +4534,18 @@ async function deploySelfTest(){
 function armDeploySelfTest(){
   if (deploySelfTestDone) return;
   deploySelfTest().then(function(state){
+    if (state === 'done'){
+      /* v92.9.31: persist the once-per-deploy marker (survives OOM
+       * restarts of THIS deploy; the next deploy's fresh disk wipes it). */
+      try {
+        const tag = process.env.RENDER_GIT_COMMIT;
+        if (tag){
+          fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+          fs.writeFileSync(path.join(__dirname, 'data', 'selftest-marker.json'), JSON.stringify({ tag: tag, ts: new Date().toISOString() }));
+        }
+      } catch(_e){}
+      return;
+    }
     if (state === 'deferred' && ++deploySelfTestTries <= 10) setTimeout(armDeploySelfTest, 60000);
   }).catch(function(e){
     pushLog('warn','selftest','attempt failed: ' + e.message);

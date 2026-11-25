@@ -30,6 +30,7 @@ const DEAD_COOLDOWN_MS  = 30 * 60 * 1000;       /* dead → skipped 30min */
 const LOCAL_ONLY_CATS = new Set(['afghan']);
 function isLocalOnlyCat(cat){ return LOCAL_ONLY_CATS.has(String(cat || '')); }
 const PROBE_CONC        = 3;                     /* gentle — avoid 429s */
+const LOCAL_SAMPLE_MAX  = 40;                    /* v92.9.31: local fallback cap — never sweep 243 sites on the bot's box */
 const PROBE_QUERY       = process.env.SITE_PROBE_QUERY || 'amateur';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -172,15 +173,24 @@ async function probeAll(opts = {}){
   if (probing) return { skipped: true };
   probing = true;
   const t0 = Date.now();
+  /* v92.9.31 FIX: alive/dead were block-scoped inside the try — the outer
+   * return threw "ReferenceError: alive is not defined" on EVERY sweep
+   * (live unified logs 2026-11-25: "sitehealth boot probe: alive is not
+   * defined"). Hoisted so sweep results reach the caller. */
+  let alive = 0, dead = 0;
   try {
-    if (process.env.SCRAPER_URL){
+    /* v92.9.31 HALF-HALF DEFAULT-ON: the gate required SCRAPER_URL with no
+     * fallback, so on Render (env unset) every boot swept the whole
+     * registry (243 sites, full 4MB bodies) LOCALLY on the bot's 512MB
+     * box — the boot OOM. Same default as server.js SCRAPER_URL. */
+    const scraperBase = (process.env.SCRAPER_URL || process.env.SCRAPER || 'https://intelligent-scraper.onrender.com').replace(/\/+$/, '');
+    {
       try {
-        const base = process.env.SCRAPER_URL.replace(/\/+$/, '');
+        const base = scraperBase;
         const r = await axios.post(base + '/probe-urls',
           { urls: registry.map(s => s.url), query: PROBE_QUERY, timeout: opts.timeout || 14000 },
           { timeout: 300000, maxContentLength: 8 * 1024 * 1024 });
         if (r.data && r.data.ok && r.data.results){
-          let alive = 0, dead = 0;
           for (const [url, res] of Object.entries(r.data.results)){
             if (!registry.some(s => s.url === url)) continue;    /* only known sites */
             if (res && res.ok){ markOk(url, res.ms || 0); alive++; }
@@ -193,8 +203,10 @@ async function probeAll(opts = {}){
         log('warn', 'sitehealth', 'scraper probe unavailable (' + e.message.slice(0, 60) + ') — probing locally');
       }
     }
-    let alive = 0, dead = 0;
-    const list = registry.slice();
+    /* v92.9.31 LOCAL FALLBACK SAMPLE: scraper unreachable → probe at most
+     * LOCAL_SAMPLE_MAX (priority = registry order), never the full 243 —
+     * the full local sweep is what blew the boot RAM. Rest keep verdicts. */
+    const list = registry.slice(0, LOCAL_SAMPLE_MAX);
     let i = 0;
     async function worker(){
       while (i < list.length){
@@ -212,7 +224,7 @@ async function probeAll(opts = {}){
       }
     }
     await Promise.all(Array.from({ length: PROBE_CONC }, worker));
-    log('info', 'sitehealth', `probe sweep done in ${Math.round((Date.now()-t0)/1000)}s — ${alive} alive, ${dead} down`);
+    log('info', 'sitehealth', `probe sweep done in ${Math.round((Date.now()-t0)/1000)}s — ${alive} alive, ${dead} down (local sample ${list.length}/${registry.length})`);
   } finally { probing = false; }
   return { alive, dead, ms: Date.now() - t0 };
 }
@@ -249,7 +261,7 @@ function init(logFn, opts = {}){
   const s = summary();
   log('info', 'sitehealth', `registry: ${s.total} sites — ${s.alive} known alive, ${s.dead} down, ${s.never} unprobed`);
   /* first sweep in the background — never delays boot */
-  if (opts.probeOnBoot !== false) setTimeout(() => probeAll({ all: true }).catch(e => log('warn', 'sitehealth', 'boot probe: ' + e.message)), 15000);
+  if (opts.probeOnBoot !== false) setTimeout(() => probeAll({ all: true }).catch(e => log('warn', 'sitehealth', 'boot probe: ' + e.message)), 90000);   /* v92.9.31: +90s — off the auth-restore + self-test window */
   timer = setInterval(() => probeAll().catch(function(){}), PROBE_INTERVAL_MS);
   if (timer.unref) timer.unref();
   return s;

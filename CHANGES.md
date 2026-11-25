@@ -1,3 +1,37 @@
+## v92.9.31 — "STAY-ALIVE: OOM ROOT CAUSE FIXED · SELF-TEST UN-BROKEN · ADMIN NEVER COOLDOWN-WALLED"
+### WHY: second Render OOM email (2026-11-25) + owner photo of the unified logs — every bug
+### below is proven by a LIVE log line, not theory.
+
+1. HALF-HALF DEFAULT-ON (the OOM root cause): site-health gated the scraper delegation on
+   `if (process.env.SCRAPER_URL)` with NO fallback — on Render it was unset, so EVERY boot
+   swept the ENTIRE registry (live log: 243 sites, "probe sweep done in 139s — 217 alive,
+   26 down", no "via scraper") LOCALLY on the bot's 512MB box: auth restore + 243 full-HTML
+   fetches + self-test hunts stacked in 3 minutes = the OOM. Now defaults to
+   https://intelligent-scraper.onrender.com (same as server.js SCRAPER_URL); local fallback
+   capped to a 40-site priority sample (LOCAL_SAMPLE_MAX); boot sweep deferred +15s → +90s
+   off the auth-restore window.
+2. "sitehealth boot probe: alive is not defined" — REAL ReferenceError: alive/dead were
+   block-scoped inside the try, the function-level return threw on EVERY sweep (live log
+   2026-11-25). Hoisted; sweep results now reach the caller.
+3. SELF-TEST UN-BROKEN (live log: sites 1/5 PornPics … 5/5 ImageFap all "no delivery",
+   guard "Send refused — group not activated by the boss → Movies"): sendImageSafe dropped
+   ALL opts except {nsfw,account} when calling sendBuffer — adminTrigger/activationConfirm
+   never reached the activation gate. Opts now forwarded; the self-test image sends carry
+   adminTrigger+activationConfirm (2FA-verified focus group = the boss's own diagnostic).
+   The media-binding guard (and its nsfw kill-switch path) now exempts admin-confirmed
+   sends — fixing the gate would otherwise have routed the self-test's nsfw pics straight
+   into exit 66.
+4. ADMIN NEVER COOLDOWN-WALLED (live log: "policy Send blocked to 115110005706891:70@lid:
+   recipient cooldown (24h)" + "selftest admin report failed"): after every restart the
+   boot summary itself armed the 24h recipient cooldown on the ADMIN, walling the next
+   admin send. isAdminRecipientJid() (ADMIN_JID + number + harvested LID pairs, 2FA) now
+   bypasses the cold-outreach gate AND never arms the cooldown. The boss is warm by
+   definition.
+5. SELF-TEST ONCE PER DEPLOY, not per boot: OOM restarts reset the in-memory
+   deploySelfTestDone flag and re-ran 5 hunts + sends on an already-panting box (restart
+   loop amplifier). data/selftest-marker.json keyed on RENDER_GIT_COMMIT — survives OOM
+   restarts of the same deploy, wiped by the next deploy's fresh disk.
+
 ## v92.9.30 — "ONE LINK · ONE NUMBER · CLEAN SITE LIST · GROUPS UN-DEAFED · HALF-HALF MEMORY"
 ### WHY (owner request): "The list is poorly constructed make a better list of the active
 ### sites … the code has too many group links … only ONE group link … only ONE phone number

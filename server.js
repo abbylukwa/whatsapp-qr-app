@@ -169,7 +169,7 @@ const BAILEYS_VERSION = (()=>{ try { return require('@whiskeysockets/baileys/pac
 
 let RedgifsDownloader = null;   /* v73.1: redgifs lib no longer used — videos come only from the owner's slots */
 
-const QRCode = require('qrcode');
+/* v92.9.38: qrcode is LAZY now — required at its single call site (QR display), ~10MB off every boot */
 const pino   = require('pino');
 const axios  = require('axios');
 
@@ -180,8 +180,18 @@ const axios  = require('axios');
  * entry" — proven by round-trip test), so makePdf() below hand-rolls a
  * spec-perfect text PDF with ZERO dependencies. */
 let pdfParse = null, mammoth = null;
-try { pdfParse  = require('pdf-parse'); } catch(e){ console.error('doc-brain: pdf-parse unavailable:', e.message); }
-try { mammoth   = require('mammoth');   } catch(e){ console.error('doc-brain: mammoth unavailable:', e.message); }
+/* v92.9.38 LAZY DOC-BRAIN — mammoth + pdf-parse cost ~17MB at boot and the boot
+ * path never calls them (doc parsing happens when a document actually arrives);
+ * they now load on first call instead of on every boot. */
+let docParsersLoaded = false;
+function loadDocParsers(){
+  if (!docParsersLoaded){
+    docParsersLoaded = true;
+    try { pdfParse  = require('pdf-parse'); } catch(e){ pdfParse = false; console.error('doc-brain: pdf-parse unavailable:', e.message); }
+    try { mammoth   = require('mammoth');   } catch(e){ mammoth = false; console.error('doc-brain: mammoth unavailable:', e.message); }
+  }
+  return { pdfParse: pdfParse, mammoth: mammoth };
+}
 
 /* ══════════════════════════════════════════════════════════════
  *  TOGGLES
@@ -9452,6 +9462,7 @@ async function connectBot(){
           setTimeout(function(){ botQrCount = 0; manualDisconnect = false; connectBot(); }, RC.QR_COOLDOWN_MS);
           return;
         }
+        const QRCode = require('qrcode');   /* v92.9.38 lazy — loads on first QR only */
         qrDataUri = await QRCode.toDataURL(qr);
         connectionStatus = 'qr';
         /* v90.2 PHONE-PAIRING: a pending phone-pair request fires the

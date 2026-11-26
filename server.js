@@ -3455,6 +3455,17 @@ function saveLocalMedia(buf, kind, ext, meta){
 }
 /* pull the scraper's (or any) mediaUrl into OUR cache — returns null on failure */
 async function downloadToLocalMedia(mediaUrl, kind){
+  /* v92.9.35: this 60MB arraybuffer+copy used to run UNGATED — a film/music cache
+   * pull landing while RSS was already high was a blind 120MB transient spike.
+   * Same discipline as every other bot-side download: refuse to START while the
+   * memory gate is closed, and hold one of the 2 global download slots. */
+  if (typeof gateMediaOpen === 'function' && !gateMediaOpen()){
+    pushLog('warn','media','local copy deferred — memory gate closed (' + kind + ')');
+    return null;
+  }
+  return withDlSlot(() => downloadToLocalMediaInner(mediaUrl, kind));
+}
+async function downloadToLocalMediaInner(mediaUrl, kind){
   const extMap = { video:'.mp4', audio:'.mp3', music:'.mp3', image:'.jpg', gif:'.gif' };
   let ext = extMap[kind] || '.bin';
   try { const m = /\.(mp4|webm|mov|mp3|m4a|ogg|wav|aac|jpe?g|png|webp|gif)(\?|$)/i.exec(new URL(mediaUrl).pathname);
@@ -9917,12 +9928,60 @@ function cmdsPerSec(){
 }
 function aiShedded(){ return cmdsPerSec() > 6; }        /* 12/s flood → brain goes quiet, commands/media keep working */
 /* memory watchdog: 15s tick, transitions logged once */
+/* v92.9.35 TIER-3 GRACEFUL SELF-RECYCLE — the answer to 5 OOM kills. Deep
+ * research (Baileys issues #745/#2116/#2090/#2237 + container-memory
+ * guidance) proves the media-send path RETAINS native/external memory that
+ * JS-side GC and cache trims can NEVER free — issue #745: "RAM keeps
+ * increasing and does not release that memory until the system memory limit
+ * is reached and the system kills my bot". memGuard's tiers 1-2 (400/445MB)
+ * close gates and clear caches, but between 445MB and the 512MB cgroup line
+ * there was NO plan B: the bot just waited to be SIGKILLed — and every OOM
+ * kill half-wrote the session (bad MAC) and wiped the warm/policy state.
+ * Tier 3: if RSS stays ≥ MEM_RECYCLE_MB (465) for 3 consecutive ticks (45s)
+ * DESPITE closed gates + trims + GC, die on OUR terms: save state, notify
+ * the boss once, close the socket CLEANLY (no logout — the session stays
+ * valid), exit(0). Render restarts in ~30s with a fresh box and an intact
+ * session. A 30-second blip instead of a session-destroying murder.
+ * MEMORY_RECYCLE=0 disables. Never during pairing (QR) or the first 3 min
+ * of a boot (let auth + self-test settle first). */
+const MEM_RECYCLE_MB = Math.max(MEM_CRITICAL_MB, parseInt(process.env.MEM_RECYCLE_MB || '465', 10));
+let recycleStrikes = 0, recycling = false, recyclingAt = 0;
+function gracefulRecycle(rssMB){
+  if (recycling) return;
+  recycling = true; recyclingAt = Date.now();
+  pushLog('error', 'memguard', rssMB + 'MB held ≥ ' + MEM_RECYCLE_MB + 'MB for 45s DESPITE closed gates + trims — GRACEFUL SELF-RECYCLE: Baileys native buffers cannot be JS-freed (upstream #745); exiting CLEANLY so the session survives (an OOM kill here would corrupt it instead). Back online in ~60s.');
+  try { savePolicy(); } catch(e){}
+  /* flush the debounced learning write NOW (the debouncer would fire after exit) */
+  try { fs.writeFileSync(LEARNING_DATA_FILE, JSON.stringify(Object.fromEntries(learningData), null, 2)); } catch(e){}
+  try {
+    if (typeof ADMIN_JID !== 'undefined' && ADMIN_JID && typeof sendBuffer === 'function'){
+      sendBuffer(ADMIN_JID, { text: '♻️ Memory ' + rssMB + 'MB held past ' + MEM_RECYCLE_MB + 'MB after full trims — recycling CLEANLY to protect the session (WhatsApp upstream cannot free its media buffers). Back online in ~60s.' }, 1, 'fast', 'admin', false).catch(function(){});
+    }
+  } catch(e){}
+  setTimeout(function(){
+    try { if (sock) sock.end(undefined); } catch(e){}
+    setTimeout(function(){ try { process.exit(0); } catch(e){} }, 1500);
+  }, 2500);
+}
 function memGuardTick(){
   const rssMB = Math.round(process.memoryUsage().rss / 1048576);
+  /* tier 3 — recycle (guarded: never while pairing, never inside 3 min of boot) */
+  if ((process.env.MEMORY_RECYCLE || '') !== '0' && rssMB >= MEM_RECYCLE_MB && !recycling){
+    const bootYoung = (process.uptime() * 1000) < 180000;
+    const pairing = connectionStatus === 'qr' || isConnecting;
+    if (bootYoung || pairing){ recycleStrikes = 0; }
+    else {
+      recycleStrikes++;
+      if (recycleStrikes >= 3){ gracefulRecycle(rssMB); return; }
+    }
+  } else if (rssMB < MEM_RECYCLE_MB - 15){
+    recycleStrikes = 0;
+  }
   if (rssMB >= MEM_CRITICAL_MB && !gateState.memCritical){
     gateState.memCritical = true; gateState.memHigh = true;
     pushLog('error', 'memguard', rssMB + 'MB ≥ ' + MEM_CRITICAL_MB + 'MB — media gate CLOSED, conversational AI shed, caches cleared');
     try { lastSearchByChat.clear(); } catch(e){}
+    try { if (typeof global.gc === 'function') global.gc(); } catch(e){}
   } else if (rssMB >= MEM_GUARD_MB && !gateState.memHigh){
     gateState.memHigh = true;
     pushLog('warn', 'memguard', rssMB + 'MB ≥ ' + MEM_GUARD_MB + 'MB — media gate CLOSED until back under 370MB');
@@ -13246,22 +13305,54 @@ app.get('/admin/blender/files', function(req, res) {
  * POST /admin/film/share — { file, targets:[whatsapp|youtube|twitter],
  *   jid?, title?, caption?, visibility? } → real deliveries, honest
  *   per-target errors (facebook is text-only — stated, not faked). */
-app.post('/admin/film/upload', express.raw({ type: '*/*', limit: '300mb' }), function(req, res){
-  const buf = Buffer.isBuffer(req.body) ? req.body : null;
-  if (!buf || !buf.length) return res.json({ ok:false, error:'empty body — POST the raw .mp4 bytes with Content-Type: video/mp4' });
-  const maxMb = Math.max(1, parseInt(process.env.FILM_MAX_MB || '200', 10) || 200);
-  if (buf.length > maxMb * 1024 * 1024) return res.json({ ok:false, error:'film too large (' + Math.round(buf.length/1048576) + 'MB > ' + maxMb + 'MB cap — raise FILM_MAX_MB env)' });
-  if (buf.length < 10240) return res.json({ ok:false, error:'file too small to be a film (' + buf.length + 'B) — junk gate' });
+/* v92.9.35 STREAMED FILM UPLOAD — the old express.raw({limit:'300mb'}) buffered the
+ * ENTIRE body in one RAM Buffer BEFORE any size check: a 250MB upload on the 512MB
+ * box was an instant cgroup OOM (Buffer/external memory bypasses --max-old-space-size).
+ * Now the bytes pipe STRAIGHT to disk (memory stays flat at ~64KB chunks), with a
+ * content-length precheck to reject oversized uploads before the first chunk, plus a
+ * streamed-byte cap for chunked bodies that lie about content-length. */
+app.post('/admin/film/upload', function(req, res){
+  const maxMb = Math.max(1, parseInt(process.env.FILM_MAX_MB || '60', 10) || 60);
+  const maxBytes = maxMb * 1024 * 1024;
+  const done = function(o){ if (!res.headersSent) res.json(o); };
+  const cl = parseInt(req.headers['content-length'] || '0', 10);
+  if (!cl || cl < 10240) return done({ ok:false, error:'empty body — POST the raw .mp4 bytes with Content-Type: video/mp4' });
+  if (cl > maxBytes) return done({ ok:false, error:'film too large (' + Math.round(cl/1048576) + 'MB > ' + maxMb + 'MB cap — raise FILM_MAX_MB env)' });
   let ext = '.mp4';
   const nm = String(req.query.name || '');
   const em = /\.(mp4|webm|mov)$/i.exec(nm);
   if (em) ext = '.' + em[1].toLowerCase();
-  const saved = saveLocalMedia(buf, 'film', ext, null);
-  const idx = loadFilmsIndex();
-  idx[saved.file] = { title: (nm || saved.file).replace(/\.(mp4|webm|mov)$/i, ''), size: saved.size, ts: Date.now() };
-  saveFilmsIndex(idx);
-  res.json({ ok:true, file: saved.file, size: saved.size, url: mediaFileUrl(req, saved.file),
-    note: 'Saved to the media cache — the 24h sweep applies, so share it soon.' });
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const file = stamp + '_film_' + MEDIA_CRYPTO.randomBytes(4).toString('hex') + ext;
+  const finalPath = path.join(MEDIA_DIR, file);
+  const tmpPath = finalPath + '.part';
+  let served = 0, aborted = false;
+  const ws = fs.createWriteStream(tmpPath);
+  req.on('data', function(c){
+    served += c.length;
+    if (served > maxBytes && !aborted){
+      aborted = true;
+      try { req.unpipe(ws); } catch(e){}
+      try { req.destroy(); } catch(e){}
+      try { ws.destroy(); } catch(e){}
+      try { fs.unlink(tmpPath, function(){}); } catch(e){}
+      done({ ok:false, error:'film too large (> ' + maxMb + 'MB cap — raise FILM_MAX_MB env)' });
+    }
+  });
+  ws.on('error', function(e){ if (!aborted){ aborted = true; try { fs.unlink(tmpPath, function(){}); } catch(_e){} done({ ok:false, error:'disk write failed: ' + e.message }); } });
+  req.on('error', function(){ if (!aborted){ aborted = true; try { fs.unlink(tmpPath, function(){}); } catch(_e){} } });
+  ws.on('finish', function(){
+    if (aborted) return;
+    if (served < 10240){ try { fs.unlink(tmpPath, function(){}); } catch(_e){} return done({ ok:false, error:'file too small to be a film (' + served + 'B) — junk gate' }); }
+    try {
+      fs.renameSync(tmpPath, finalPath);
+      const idx = loadFilmsIndex();
+      idx[file] = { title: (nm || file).replace(/\.(mp4|webm|mov)$/i, ''), size: served, ts: Date.now() };
+      saveFilmsIndex(idx);
+      done({ ok:true, file: file, size: served, url: mediaFileUrl(req, file), note: 'Saved STREAMED to disk (no RAM buffer) — the 24h sweep applies, so share it soon.' });
+    } catch(e){ done({ ok:false, error:'save failed: ' + e.message }); }
+  });
+  req.pipe(ws);
 });
 app.get('/admin/film/list', function(req, res){
   const idx = loadFilmsIndex();

@@ -1,3 +1,46 @@
+## v92.9.35 — "DEEP RESEARCH: GRACEFUL SELF-RECYCLE · FILM UPLOAD STREAMED · CACHE DOWNLOADS GATED"
+### WHY: fifth OOM email + boss order "do a deep research". Full memory census of the tree
+### (37 axios sites, 40 collections, every uncapped buffer, the Baileys socket layer) +
+### external research (Render cgroup OOM mechanics, Baileys upstream memory issues).
+
+1. GRACEFUL SELF-RECYCLE (tier 3 of the memory defense — THE structural answer):
+   Deep research proves Baileys' media-send path RETAINS native/external memory that JS
+   GC + cache trims can never free — upstream issues: #745 "RAM keeps increasing and does
+   not release that memory until the system memory limit is reached and the system kills
+   my bot"; #2116 leak/crash sending large files on RC versions; #2090/#2237 rc-version
+   long-session growth. memGuard tiers 1-2 (400/445MB) close gates and clear caches, but
+   between 445MB and the 512MB cgroup kill there was NO plan B — the bot waited to be
+   SIGKILLed, and every murder half-wrote the session (bad MAC) and wiped warm/policy
+   state. NOW: RSS ≥ 465MB (MEM_RECYCLE_MB env) for 3 consecutive ticks (45s) DESPITE
+   closed gates + trims + GC → die on OUR terms: save policy+learning, one admin notice,
+   close the socket CLEANLY (no logout — session stays valid), exit(0). Render restarts
+   in ~30s with a fresh box and an INTACT session. A 30-second blip replaces a
+   session-destroying murder. MEMORY_RECYCLE=0 disables; never during pairing (QR) or
+   the first 3 min of a boot. Tier-2 critical now also runs a real GC when available.
+2. FILM UPLOAD STREAMED: express.raw({limit:'300mb'}) buffered the ENTIRE body in one
+   RAM Buffer BEFORE any size check — a 250MB upload on the 512MB box was an instant
+   cgroup OOM (Buffer/external memory bypasses --max-old-space-size; container-memory
+   guidance: cap request sizes). Now bytes pipe STRAIGHT to disk (~64KB chunks, flat
+   memory), content-length precheck rejects oversize before the first chunk, streamed
+   byte-cap covers chunked bodies. FILM_MAX_MB default 60 (200 was never actually
+   reachable without the OOM it caused).
+3. LOCAL MEDIA-CACHE DOWNLOADS GATED: downloadToLocalMedia (60MB arraybuffer + Buffer
+   copy ≈ 120MB transient — films/music cache pulls) ran UNGATED. Now refuses to start
+   while the memory gate is closed and holds one of the 2 global download slots, same
+   as every other bot-side download.
+4. Research-driven NON-changes (checked, deliberately NOT applied):
+   · makeCacheableSignalKeyStore NOT added — upstream #1370 reports exponential memory
+     growth with it (multi-socket); the bot's plain useMultiFileAuthState is fine.
+   · No Baileys upgrade mid-storm: rc14 is the line the box is proven on; upgrading
+     inside an OOM investigation changes two variables at once.
+5. Full census result (what the audit checked and found already-safe): 37 axios call
+   sites — all arraybuffer downloads now capped (12MB images / 40MB video / 60MB cache);
+   express.json default 100KB body limit; liveMessages/log rings capped; lastInboundAt
+   ≤2000; processedMessages ≤10000→5000 trim; dupShield/busyReplied ≤500 LRU-style;
+   learningData ≤400 msgs/group; activeChats capped; boot JSON loads all tiny (2B-2KB);
+   Baileys 7.0.0-rc14 options already sane (silent logger, syncFullHistory:false, no
+   in-memory store, markOnlineOnConnect:false).
+
 ## v92.9.34 — "TEXT-BACKLOG STALE DROP: THE LAST RESTART-STORM AMPLIFIER"
 ### WHY: fourth Render OOM email (2026-11-26, while v92.9.32/33 were the live code).
 

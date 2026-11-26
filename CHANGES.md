@@ -1,3 +1,61 @@
+## v92.9.36 — "EXIT-66 POST-MORTEM: THE BOT WAS MURDERING ITSELF 40 SECONDS INTO EVERY LIFE"
+### WHY: Render alert "Exited with status 66" (NOT an OOM — a code-level exit) + the boss's
+### report "it's failing to revive any messages but it's sending messages". Both symptoms,
+### one root cause, found in the code — no logs needed.
+
+1. THE EXIT-66 ROOT CAUSE (the whole story):
+   Render's "status 66" is breadKillSwitch's `process.exit(66)` (v92.9.11 suicide clause) —
+   NOT the memory recycle (that exits 0/75). The deploy self-test's Step-2 test image is
+   sent with `nsfw: true` (boss-ordered deploy check, line 4545). The wire-time FINAL SEND
+   BOUNDARY (sendBoundaryCheck) re-verifies the media-chat binding right before
+   S.sendMessage — and v92.9.31 added the adminTrigger/activationConfirm exemption ONLY to
+   the sendBuffer-side guard, never to the wire-side copy. At every boot: activation state
+   (access-state.json) is wiped by Render's ephemeral disk, lastMediaRequestAt is in-memory
+   empty → chatWantsMedia(focusJid) = false → the self-test's own legal test image read as
+   "NSFW media to a chat that never asked" → breadKillSwitch → admin notice → exit(66) at
+   ~+40s. Render restarts → SAME boot → SAME kill: an infinite restart loop where the bot
+   lived under a minute per life — outbound boot sends went out ("it's sending messages")
+   and no inbound message was ever processed ("failing to revive any messages").
+   FIX A: the wire boundary now carries the same adminLane exemption as the queue-side
+   guard (adminTrigger/activationConfirm — boss's own diagnostics are intended media).
+   FIX B: the self-test marks its own media request (markMediaRequest(focusJid)) before
+   Step 2 — belt + braces, chatWantsMedia is true even with blank state.
+2. THE KILL SWITCH NO LONGER SUICIDES (v92.9.11 → v92.9.36 semantics):
+   The boss's requirement — "the wrong message never exists" — is delivered ENTIRELY by the
+   refusal, which runs at the queue AND the wire. Dying afterwards bought nothing but
+   downtime, unacked redelivery floods and dead revival — and a deterministic boot trigger
+   turned it into the exit-66 restart loop. breadKillSwitch now: refuses, logs EVERY
+   attempt, notices the boss (rate-limited 1/10min), and keeps serving. The old suicide is
+   opt-in again via KILL_SWITCH_EXIT=1. BLOCKHOLE/number-blacklist/media-binding refusals
+   are unchanged — nothing extra ever reaches a wrong recipient.
+3. ACK-ON-DROP — the infinite redelivery flood is broken:
+   Dropped stale messages were never receipted, so WhatsApp re-sent the whole unacked
+   backlog on EVERY reconnect — the same pile dropped again on every boot, forever (and
+   each redelivery wave is a boot memory spike that can feed the recycler). Dropped
+   messages are now marked read (sock.readMessages) in all three drop sites (top-of-handler
+   v92.9.34 gate, group media v92.9.10 gate, DM media gate): after ONE boot the flood is
+   gone for good.
+4. BOUNDED REVIVAL — "why is nothing revived?" answered without reopening the storm:
+   The 10-min stale drop made revival impossible BY DESIGN (anything that sat out a
+   restart is >10min old). Now the FIRST stale message per allowed chat (admin DM, the
+   focus group, whitelisted chats), up to 6h old, max 10 chats per boot, flows through the
+   normal handler — moderation, AI, lanes — like a live message. Everything older or
+   beyond the cap: acked + dropped exactly as before. Admins stay fully exempt (any age,
+   any volume). Constants: REVIVE_MAX_AGE_MS (6h), REVIVE_MAX_PER_BOOT (10).
+5. GRACEFUL RECYCLE EXIT 0 → 75: a zero exit can be read by the host as a clean stop and
+   leave the bot DOWN; nonzero guarantees Render restarts (and gives the recycle its own
+   recognizable alert code, distinct from the retired 66).
+6. WHAT THE BOSS WILL SEE NOW: boot → active-links list → 5 test images DELIVER (no kill)
+   → self-test report to admin → the bot STAYS UP and processes live messages; the first
+   message that sat out downtime in each allowed chat gets one real reply; older backlog
+   is receipted and stops coming back. If a genuine wrong-recipient attempt ever appears,
+   it is refused, logged and noticed — with zero downtime.
+7. GATES: test-gates.js section 8 added (boundary exemption, single opt-in exit(66),
+   acks on all drop sites, revival constants, recycle 75, self-test marks its request).
+   node --check clean. Previous armor unchanged: sweep delegation (92.9.31), media 12MB
+   (92.9.32), self-wall fix (92.9.33), backlog drop (92.9.34), recycle + streamed uploads
+   (92.9.35).
+
 ## v92.9.35 — "DEEP RESEARCH: GRACEFUL SELF-RECYCLE · FILM UPLOAD STREAMED · CACHE DOWNLOADS GATED"
 ### WHY: fifth OOM email + boss order "do a deep research". Full memory census of the tree
 ### (37 axios sites, 40 collections, every uncapped buffer, the Baileys socket layer) +

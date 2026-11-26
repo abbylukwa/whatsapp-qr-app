@@ -121,6 +121,14 @@ check('self-test arms ONCE per deploy at +20s after connect', /setTimeout\(funct
 check('boot banner now prints the REAL package version (fossil killed)', /'BreadBot v' \+ require\('\.\/package\.json'\)\.version \+ ' ONLINE/.test(srv) && !/v92\\\.9\\\.12 ONLINE/.test(srv));
 check('no "random DMs" advertising left in the banner', !/random DMs every/.test(srv));
 
+console.log('\n── 8. EXIT-66 POST-MORTEM (v92.9.36) — refuse, never suicide; revive, never drown ──');
+check('final wire boundary exempts the boss diagnostic lane (adminTrigger/activationConfirm)', /const adminLane = !!\(opts && \(opts\.adminTrigger === true \|\| opts\.activationConfirm === true\)\)/.test(srv));
+check('kill switch refuses WITHOUT dying — exit(66) only behind KILL_SWITCH_EXIT=1', /KILL_SWITCH_EXIT[\s\S]{0,220}process\.exit\(66\)/.test(srv) && srv.indexOf('process.exit(66)') === srv.lastIndexOf('process.exit(66)'));
+check('dropped stale messages are ACKed — WhatsApp stops redelivering the backlog', /function ackStaleMessage/.test(srv) && (srv.match(/ackStaleMessage\(msg\)/g) || []).length >= 3);
+check('bounded revival — first stale message per allowed chat is served (≤6h, ≤10/boot)', /function reviveStaleMessage/.test(srv) && /REVIVE_MAX_PER_BOOT = 10/.test(srv) && /REVIVE_MAX_AGE_MS = 6 \* 60 \* 60 \* 1000/.test(srv));
+check('graceful memory recycle exits 75 (nonzero = Render always restarts)', /process\.exit\(75\)/.test(srv));
+check('self-test marks its own media request before the 5 test images', /await sleepMs\(10000\);[\s\S]{0,400}markMediaRequest\(focusJid\)/.test(srv));
+
 console.log('\n════════════════════════════════════════════════');
 console.log((fail === 0 ? 'RESULT: ALL ' + pass + ' CHECKS PASSED — the lock is real.' : 'RESULT: ' + fail + ' FAILED / ' + pass + ' passed'));
 try { fs.rmSync(tmpData, { recursive: true, force: true }); } catch (e) {}

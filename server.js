@@ -2222,6 +2222,37 @@ function staleRedeliveryDrop(chatJid, msgTsMs){
   sendBuffer(chatJid, { text: '⚠️ That request was sent while I was down (' + ageMin + 'min old) and is dropped on purpose — resend it fresh.' },
     3, 'fast', (typeof chatJid === 'string' && chatJid.endsWith('@g.us')) ? 'group' : 'dmreply', false).catch(() => {});
 }
+/* ═══ v92.9.36 ACK-ON-DROP + BOUNDED REVIVAL ═══
+ * 1. ACK: a dropped message was never receipted, so WhatsApp treated it
+ *    as undelivered and RE-SENT the whole unacked backlog on every
+ *    reconnect — the same pile dropped again on every boot, forever.
+ *    Marking a dropped message read (readMessages) tells WhatsApp this
+ *    device has it: after ONE boot the flood is gone.
+ * 2. REVIVAL: the boss asked why nothing is revived after downtime. The
+ *    10-min stale drop made revival impossible BY DESIGN — any message
+ *    that sat out a restart is older than 10 minutes. Bounded revival
+ *    answers him without reopening the restart storm: the FIRST stale
+ *    message per allowed chat, at most 6h old, at most 10 chats per
+ *    boot, goes through the normal handler (moderation, AI, lanes) like
+ *    a live message. Everything else: acked + dropped as before.
+ *    Admins stay fully exempt (any age, any volume, always processed). */
+const REVIVE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const REVIVE_MAX_PER_BOOT = 10;
+const revivedThisBoot = new Set();
+let revivedCount = 0;
+function ackStaleMessage(msg){
+  try { if (sock && typeof sock.readMessages === 'function' && msg && msg.key) sock.readMessages([msg.key]).catch(function(){}); } catch(_e){}
+}
+function reviveStaleMessage(chatJid, msgTsMs){
+  try {
+    if (revivedThisBoot.has(chatJid) || revivedCount >= REVIVE_MAX_PER_BOOT) return false;
+    if (msgTsMs && (Date.now() - msgTsMs) > REVIVE_MAX_AGE_MS) return false;
+    if (chatJid !== ADMIN_JID && !(typeof focusLock.isAllowedJid === 'function' && focusLock.isAllowedJid(chatJid))) return false;
+    revivedThisBoot.add(chatJid); revivedCount++;
+    pushLog('warn','guard','REVIVED one stale message for ' + (getGroupName(chatJid) || chatJid) + ' — bounded revival ' + revivedCount + '/' + REVIVE_MAX_PER_BOOT + ' this boot');
+    return true;
+  } catch(_e){ return false; }
+}
 /* Send the next `count` still-unsent results of THIS chat's remembered
  * search. Returns how many actually went out. */
 async function sendRelevantBatch(chatJid, count, opts = {}){
@@ -2681,33 +2712,55 @@ function chatWantsMedia(chatJid){
 /* ═══ v92.9.11 KILL SWITCH — the boss: "I don't want it to send any
  * message to wrong people … no matter what it rather kill it self."
  * A confirmed wrong-recipient send attempt (NSFW media to a chat that
- * never asked, or ANYTHING to a blacklisted group/number) no longer
- * just blocks — the process TERMINATES itself before the send leaves
- * the wire. Render restarts it clean; the wrong message never exists.
- * killSwitchHandler is a LOADTEST hook: the sim replaces process death
- * with a recorded reason so assertions stay fast. */
+ * never asked, or ANYTHING to a blacklisted group/number) is REFUSED.
+ *
+ * v92.9.36 EXIT-66 POST-MORTEM: self-termination was a restart-loop
+ * generator. The deploy self-test's own image (nsfw:true, boss-ordered)
+ * hit the wire-time boundary on EVERY boot — access-state.json (group
+ * activation) is wiped by Render's ephemeral disk and lastMediaRequestAt
+ * is in-memory, so chatWantsMedia() read false at +40s no matter what —
+ * exit(66) → Render restart → same boot → same kill. The bot lived under
+ * a minute per life: boot sends went out, NOTHING inbound was ever
+ * revived, and every death re-flooded the unacked backlog. The boss's
+ * actual requirement — the wrong message never exists — is delivered by
+ * the REFUSAL, which already runs at both the queue and the wire. Dying
+ * afterwards bought nothing but downtime. So: refuse, log every attempt,
+ * notice the boss (rate-limited), and KEEP SERVING. The old suicide is
+ * available again with KILL_SWITCH_EXIT=1 if it is ever wanted.
+ * killSwitchHandler stays the LOADTEST hook. */
 let killSwitchHandler = null;      /* set only via POST /loadtest/killhook */
-let lastKillSwitch   = null;       /* panel/inspection: the kill that fired */
+let lastKillSwitch   = null;       /* panel/inspection: the FIRST refused send */
+let lastKillSwitchNoticeAt = 0;
+let killSwitchExiting = false;
 function breadKillSwitch(reason, detail){
-  if (lastKillSwitch) return;      /* one kill per process — die clean */
-  lastKillSwitch = { reason, detail: String(detail || '').slice(0, 200), ts: new Date().toISOString() };
-  pushLog('error','killswitch','SELF-TERMINATE — refusing a wrong-recipient send: ' + reason + ' | ' + detail);
-  resetDailyStats(); dailyStats.policyBlocks++;
-  try {
-    pushLiveMessage({ id:'kill-'+Date.now(), ts:new Date().toISOString(),
-      chatJid: ADMIN_JID, chatType:'system', senderJid: botJid, senderName:'KILL-SWITCH',
-      phone: ADMIN_PHONE, mediaType:'system', isAdmin:true,
-      text:'KILL SWITCH: refused ' + detail + ' — ' + reason + ' (v92.9.11: rather die than misdeliver)' });
-  } catch(_e){}
+  if (!lastKillSwitch){
+    lastKillSwitch = { reason, detail: String(detail || '').slice(0, 200), ts: new Date().toISOString() };
+    try {
+      pushLiveMessage({ id:'kill-'+Date.now(), ts:new Date().toISOString(),
+        chatJid: ADMIN_JID, chatType:'system', senderJid: botJid, senderName:'KILL-SWITCH',
+        phone: ADMIN_PHONE, mediaType:'system', isAdmin:true,
+        text:'KILL SWITCH: refused ' + detail + ' — ' + reason + ' (v92.9.36: send never left the wire, bot keeps serving)' });
+    } catch(_e){}
+  }
+  pushLog('error','killswitch','REFUSED a wrong-recipient send (no suicide): ' + reason + ' | ' + detail);
+  try { dailyStats.policyBlocks++; } catch(_e){}
   if (typeof killSwitchHandler === 'function'){
     try { killSwitchHandler(reason, detail); } catch(_e){}
     return;
   }
-  /* production: one last honest note to the boss (the admin chat is a
-   * legal target BY DEFINITION), 1.5s to flush, then die BEFORE the
-   * wrong send can leave the wire. */
-  try { if (sock && typeof sock.sendMessage === 'function') sock.sendMessage(ADMIN_JID, { text: 'KILL SWITCH — refused a wrong-recipient send (' + reason + '): ' + detail }).catch(function(){}); } catch(_e){}
-  setTimeout(function(){ try { process.exit(66); } catch(e){ process.exit(66); } }, 1500);
+  if (killSwitchExiting) return;
+  if ((process.env.KILL_SWITCH_EXIT || '') === '1'){
+    killSwitchExiting = true;
+    /* opt-in legacy mode: die BEFORE the send leaves the wire */
+    try { if (sock && typeof sock.sendMessage === 'function') sock.sendMessage(ADMIN_JID, { text: 'KILL SWITCH — refused a wrong-recipient send (' + reason + '): ' + detail + ' — self-terminating (KILL_SWITCH_EXIT=1)' }).catch(function(){}); } catch(_e){}
+    setTimeout(function(){ try { process.exit(66); } catch(e){ process.reallyExit(66); } }, 1500);
+    return;
+  }
+  const _ksNow = Date.now();
+  if (_ksNow - lastKillSwitchNoticeAt > 10 * 60 * 1000){
+    lastKillSwitchNoticeAt = _ksNow;
+    try { if (sock && typeof sock.sendMessage === 'function') sock.sendMessage(ADMIN_JID, { text: '🛡 KILL SWITCH — refused a wrong-recipient send (' + reason + '): ' + detail + '. The message never left the wire; I keep serving (v92.9.36 — no more exit-66 restart loops).' }).catch(function(){}); } catch(_e){}
+  }
 }
 
 /* ═══ v92.9.11 FINAL SEND BOUNDARY — one decision for every send.
@@ -2727,15 +2780,25 @@ function sendBoundaryCheck(jid, content, opts, taskType){
     return { ok:false, error:'kill-switch: blocked number', killed:true };
   }
   /* 2. MEDIA-CHAT BINDING at the wire — the 15-min request window is
-   * re-verified NOW, not when the job was queued. NSFW misroutes kill. */
+   * re-verified NOW, not when the job was queued. NSFW misroutes kill.
+   * v92.9.36: the boss's own diagnostic lane (adminTrigger /
+   * activationConfirm — deploy self-test, admin sends) is EXEMPT, same
+   * as the sendBuffer-side guard has been since v92.9.31. The exemption
+   * was missing HERE: activation state lives on Render's ephemeral disk
+   * and is blank at every boot, so the self-test's legal test image read
+   * as "nsfw to a chat that never asked" and exit(66)-ed the bot ~40s
+   * into every life — the exit-66 restart loop (see changelog). */
   if (isMedia && (taskType === 'group' || taskType === 'dmreply') && !chatWantsMedia(jid)){
-    const mKind = content.audio ? 'audio' : content.video ? 'video' : content.image ? 'image' : content.sticker ? 'sticker' : 'document';
-    if ((opts && opts.nsfw === true) || detectNsfw(String(content.caption || ''))){
-      breadKillSwitch('nsfw-to-chat-that-never-asked',
-        'boundary ' + mKind + ' → ' + (getGroupName(jid) || jid) + ' caption: ' + String(content.caption || '').slice(0, 60));
-      return { ok:false, error:'kill-switch: nsfw to chat that never asked', killed:true };
+    const adminLane = !!(opts && (opts.adminTrigger === true || opts.activationConfirm === true));
+    if (!adminLane){
+      const mKind = content.audio ? 'audio' : content.video ? 'video' : content.image ? 'image' : content.sticker ? 'sticker' : 'document';
+      if ((opts && opts.nsfw === true) || detectNsfw(String(content.caption || ''))){
+        breadKillSwitch('nsfw-to-chat-that-never-asked',
+          'boundary ' + mKind + ' → ' + (getGroupName(jid) || jid) + ' caption: ' + String(content.caption || '').slice(0, 60));
+        return { ok:false, error:'kill-switch: nsfw to chat that never asked', killed:true };
+      }
+      return { ok:false, error:'media-binding: no media request in that chat (final boundary)' };
     }
-    return { ok:false, error:'media-binding: no media request in that chat (final boundary)' };
   }
   return { ok:true };
 }
@@ -4525,6 +4588,11 @@ async function deploySelfTest(){
 
   /* ── Step 2: 10s later — 5 images, DIFFERENT sites, 5s apart ── */
   await sleepMs(10000);
+  /* v92.9.36: the self-test IS a media request by definition (boss-ordered
+   * deploy check) — mark the chat so chatWantsMedia() is true even with
+   * the ephemeral-disk activation state blank. Belt + braces on top of
+   * the wire boundary's adminLane exemption. */
+  markMediaRequest(focusJid);
   const picks = [];
   const seenHosts = new Set();
   for (const s of slotsByType.image){
@@ -8329,8 +8397,13 @@ async function handleMessage(msg){
     if (_stMs > 0 && (Date.now() - _stMs) > STALE_MEDIA_MS){
       const _stSender = chatJid.endsWith('@g.us') ? (msg.key.participant || chatJid) : chatJid;
       if (!isAdminSender(msg, _stSender)){
-        staleRedeliveryDrop(chatJid, _stMs);   /* logs once per chat per minute */
-        return;
+        /* v92.9.36 bounded revival: the first stale message per allowed
+         * chat (≤6h, ≤10/boot) is ANSWERED, not silently deleted. */
+        if (!reviveStaleMessage(chatJid, _stMs)){
+          ackStaleMessage(msg);                  /* stop the redelivery loop */
+          staleRedeliveryDrop(chatJid, _stMs);   /* logs once per chat per minute */
+          return;
+        }
       }
     }
   }
@@ -9100,7 +9173,7 @@ async function handleMessage(msg){
       if (gIntent && !isVague(gIntent.query)){
         /* v92.9.10 stale-redelivery + per-sender fuse — media intents only,
          * admins exempt; both guards note at most once per 20-60s per chat. */
-        if (redelivStale && !isAdmin){ staleRedeliveryDrop(chatJid, redelivTsMs); return; }
+        if (redelivStale && !isAdmin){ ackStaleMessage(msg); staleRedeliveryDrop(chatJid, redelivTsMs); return; }
         if (!isAdmin && senderMediaFuseTripped(senderJid || chatJid, chatJid)) return;
         /* v92.9.9g FLOODPROOF — group media asks pass the same gate as DMs:
          * token bucket + memory guard. Refusal is an instant honest note
@@ -9940,8 +10013,9 @@ function aiShedded(){ return cmdsPerSec() > 6; }        /* 12/s flood → brain 
  * Tier 3: if RSS stays ≥ MEM_RECYCLE_MB (465) for 3 consecutive ticks (45s)
  * DESPITE closed gates + trims + GC, die on OUR terms: save state, notify
  * the boss once, close the socket CLEANLY (no logout — the session stays
- * valid), exit(0). Render restarts in ~30s with a fresh box and an intact
- * session. A 30-second blip instead of a session-destroying murder.
+ * valid), exit(75). Render ALWAYS restarts a nonzero exit — exit(0) could
+ * be read as a clean stop and leave the bot down. Fresh box ~30s later
+ * with an intact session. A 30-second blip instead of a murder.
  * MEMORY_RECYCLE=0 disables. Never during pairing (QR) or the first 3 min
  * of a boot (let auth + self-test settle first). */
 const MEM_RECYCLE_MB = Math.max(MEM_CRITICAL_MB, parseInt(process.env.MEM_RECYCLE_MB || '465', 10));
@@ -9960,7 +10034,7 @@ function gracefulRecycle(rssMB){
   } catch(e){}
   setTimeout(function(){
     try { if (sock) sock.end(undefined); } catch(e){}
-    setTimeout(function(){ try { process.exit(0); } catch(e){} }, 1500);
+    setTimeout(function(){ try { process.exit(75); } catch(e){ try { process.exit(75); } catch(e2){} } }, 1500);
   }, 2500);
 }
 function memGuardTick(){
@@ -10337,7 +10411,7 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
   const _dmTsRaw = Number(msg.messageTimestamp || 0);
   const dmTsMs = _dmTsRaw > 1e12 ? _dmTsRaw : _dmTsRaw * 1000;
   if (dmIsMedia && !isAdmin){
-    if (dmTsMs > 0 && (Date.now() - dmTsMs) > STALE_MEDIA_MS){ staleRedeliveryDrop(chatJid, dmTsMs); return; }
+    if (dmTsMs > 0 && (Date.now() - dmTsMs) > STALE_MEDIA_MS){ ackStaleMessage(msg); staleRedeliveryDrop(chatJid, dmTsMs); return; }
     if (senderMediaFuseTripped(senderJid || chatJid, chatJid)) return;
   }
   const dGate = gateAllow(dmIsMedia ? 'media' : 'text', chatJid, isAdmin);

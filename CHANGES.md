@@ -1,3 +1,25 @@
+## v92.9.34 — "TEXT-BACKLOG STALE DROP: THE LAST RESTART-STORM AMPLIFIER"
+### WHY: fourth Render OOM email (2026-11-26, while v92.9.32/33 were the live code).
+
+1. TEXT-BACKLOG STALE DROP: after an OOM restart WhatsApp re-delivers every unacked
+   message. Media intents were already dropped (staleRedeliveryDrop, v92.9.10, 10-min
+   rule) but plain TEXT from the backlog ran the FULL handler — moderation, discovery,
+   AI replies, send lanes — so every restart→OOM cycle processed a bigger pile than the
+   one before and could tip the box over again ON BOOT, feeding its own loop. Now any
+   message older than STALE_MEDIA_MS (10 min) is dropped at the VERY TOP of handleMessage
+   (before focus lock / moderation / AI / lanes) with the standard once-per-chat-per-minute
+   log. Live messages are seconds old — nothing live is ever affected. Admin exempt: the
+   boss's word is processed even if it sat out the outage.
+2. This closes the last known unguarded boot/spike vector on the 512MB box:
+   boot sweep → scraper-delegated (v92.9.31) · image/gif downloads → 12MB cap (v92.9.32)
+   · self-test sends → never cooldown-walled (v92.9.33) · Chrome → RAM interlock
+   (v92.9.30) · text backlog → dropped (v92.9.34).
+   If a fifth OOM arrives on THIS code with a paired session, the remaining suspects are
+   Baileys-internal (uncontrollable from JS) and the honest answer is capacity: 512MB
+   free tier is undersized for Baileys + 66 groups + AI pool + media queue. Starter (2GB)
+   ends this class of problem permanently. Render → Events tab dates any new email
+   against the v92.9.34 deploy line.
+
 ## v92.9.33 — "SELF-TEST SELF-WALL FIXED · FULL REGISTRY LIVE-PROBED (223/243 ALIVE)"
 ### WHY: owner screenshots 2026-11-26 — self-test sites 'no delivery' + repeated
 ### 'recipient cooldown (24h)' warns, bot connected (263777627210, LID OK, 66 groups).

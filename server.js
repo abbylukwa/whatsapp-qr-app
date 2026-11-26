@@ -8302,6 +8302,27 @@ async function handleMessage(msg){
 
   const chatJid = msg.key?.remoteJid;
   if (!chatJid) return;
+  /* v92.9.34 TEXT-BACKLOG STALE DROP — the last restart-storm amplifier.
+   * After an OOM restart WhatsApp RE-DELIVERS every unacked message: the
+   * media intents were already dropped (staleRedeliveryDrop, v92.9.10) but
+   * plain TEXT from the backlog ran the FULL handler — moderation, discovery,
+   * AI replies, send lanes — so every restart→OOM cycle processed a bigger
+   * pile than the last and could tip the box over AGAIN on boot. A text
+   * older than STALE_MEDIA_MS was sent while I was DOWN: the conversation
+   * has moved on, nobody wants a reply from 20 minutes ago. Drop it before
+   * ANY processing (no AI bytes, no moderation, no lanes). Admin is exempt —
+   * the boss's word is processed even if it sat out the outage. */
+  {
+    const _stRaw = Number(msg.messageTimestamp || 0);
+    const _stMs = _stRaw > 1e12 ? _stRaw : _stRaw * 1000;
+    if (_stMs > 0 && (Date.now() - _stMs) > STALE_MEDIA_MS){
+      const _stSender = chatJid.endsWith('@g.us') ? (msg.key.participant || chatJid) : chatJid;
+      if (!isAdminSender(msg, _stSender)){
+        staleRedeliveryDrop(chatJid, _stMs);   /* logs once per chat per minute */
+        return;
+      }
+    }
+  }
   /* v92.9.16 FOCUS LOCK — non-whitelisted chats are dropped before ANY
    * processing (no AI, no media, no bytes). The invite code is resolved
    * to the group JID on first sight and persisted for reboots. */

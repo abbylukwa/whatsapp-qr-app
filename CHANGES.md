@@ -1,3 +1,39 @@
+## v92.9.37 — "THE DEAFNESS X-RAY: NOTHING INBOUND CAN BE INVISIBLE ANYMORE"
+### WHY: boss: "still not even working, not receiving any messages, look thru out any
+### possibilities, it's not displaying received messages in the live logs even messages
+### from self". Outbound works, inbound zero — traced every gate in the 14-step inbound
+### path and made every drop observable.
+
+1. THE PRIME SUSPECT — STALE SESSION + AN UNREACHABLE SELF-HEAL:
+   The inbound path surfaces undecryptable messages (Bad-MAC/No-session stubs) and the
+   v92.7 storm self-heal fixed them — but only at ≥15 undecryptable within 10 min of
+   connect with ZERO decrypted. That threshold was sized for the 66-group flood era. ONE
+   LINK · ONE NUMBER means the boss sends a HANDFUL of test messages — the storm NEVER
+   hit 15, the self-heal NEVER fired, and the bot stayed deaf FOREVER while outgoing kept
+   working (the exact reported symptom). After the exit-66 chaos (hours of abrupt deaths,
+   each without state flush), the restored gist session snapshot IS the stale-session
+   case: it decrypts NOTHING, every inbound arrives as a stub and returns at the stub
+   branch, silently. NOW: self-heal fires at 3 undecryptable with zero decrypted (any
+   time, once per process) — wipe stale auth, mark the gist dead, fresh QR, admin texted.
+   A healthy session can NEVER trigger it (live messages increment decryptedSinceConnect).
+2. INBOUND TRACE (the X-ray): every message is recorded with its VERDICT the moment a
+   gate decides — accepted / drop:stale / drop:focus-lock / drop:observe-mode /
+   drop:dup / drop:echo / drop:flood / drop:handler-pool-full / drop:no-content /
+   drop:group-blacklisted / drop:dm-not-whitelisted / drop:dm-blocked-number /
+   undecryptable / stub — plus counters (upserts, real, stubs, undecryptable, per-reason
+   drops, lastUpsertAt, lastRealAt). GET /debug/inbound = one JSON page: connection
+   state (status, bot number/LID, connected-for, QR-pending), storm numbers, revival
+   bookkeeping, last 60 verdicts. If a message ever vanishes again, this page says
+   where and why — no more guessing from a quiet panel.
+3. DEAFNESS MADE VISIBLE ON THE PANEL: undecryptable arrivals now push a CRYPTO system
+   line to the live logs (rate-limited 60s) — the boss sees "N message(s) arrived
+   UNDECRYPTABLE" instead of silence; focus-lock drops push a FOCUS-LOCK system line
+   (rate-limited 5 min) naming the chat and the ONE-LINK-ONE-NUMBER rule.
+4. The trace is cheap: a bounded 150-entry ring + counter increments — no memory risk
+   on the 512MB box (the drop sites were already O(1) log points).
+5. GATES: test-gates.js section 9 (trace wired at display point, CRYPTO/FOCUS-LOCK panel
+   lines, storm threshold 3, /debug/inbound, ≥10 trace sites). node --check clean.
+
 ## v92.9.36 — "EXIT-66 POST-MORTEM: THE BOT WAS MURDERING ITSELF 40 SECONDS INTO EVERY LIFE"
 ### WHY: Render alert "Exited with status 66" (NOT an OOM — a code-level exit) + the boss's
 ### report "it's failing to revive any messages but it's sending messages". Both symptoms,

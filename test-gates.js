@@ -87,7 +87,7 @@ check('setDesignated rejects a DM jid (groups only)', accessCtl.setDesignated(AD
 
 console.log('\n── 5. STATIC PROOF — the gates sit above EVERY code path ──');
 const srv = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
-check('intake gate: handleMessage drops non-whitelisted chats BEFORE processing', /if \(!focusLock\.isAllowedJid\(chatJid\)\)\{[\s\S]{0,2000}?else return;/m.test(srv));
+check('intake gate: handleMessage drops non-whitelisted chats BEFORE processing (with a trace verdict, v92.9.37)', /if \(!focusLock\.isAllowedJid\(chatJid\)\)\{[\s\S]{0,2400}?drop:focus-lock[\s\S]{0,400}?return;/m.test(srv));
 const sendBufSlice = srv.slice(srv.indexOf('function sendBuffer'), srv.indexOf('function sendBuffer') + 4000);
 check('send gate: sendBuffer refuses ANY jid that is not admin/focus group', /send REFUSED \(not admin\/focus group\)/.test(sendBufSlice));
 check('send gate runs BEFORE the group-activation check (belt + braces)', sendBufSlice.indexOf('focusLock.isAllowedJid(jid)') > -1 && sendBufSlice.indexOf('focusLock.isAllowedJid(jid)') < sendBufSlice.indexOf('accessCtl.isGroupActive(jid)'));
@@ -128,6 +128,14 @@ check('dropped stale messages are ACKed — WhatsApp stops redelivering the back
 check('bounded revival — first stale message per allowed chat is served (≤6h, ≤10/boot)', /function reviveStaleMessage/.test(srv) && /REVIVE_MAX_PER_BOOT = 10/.test(srv) && /REVIVE_MAX_AGE_MS = 6 \* 60 \* 60 \* 1000/.test(srv));
 check('graceful memory recycle exits 75 (nonzero = Render always restarts)', /process\.exit\(75\)/.test(srv));
 check('self-test marks its own media request before the 5 test images', /await sleepMs\(10000\);[\s\S]{0,400}markMediaRequest\(focusJid\)/.test(srv));
+
+console.log('\n── 9. INBOUND TRACE + STORM SELF-HEAL (v92.9.37) — deafness can never be silent again ──');
+check('every inbound message gets a verdict (traceInbound exists + wired at the display point)', /function traceInbound/.test(srv) && /traceInbound\(chatJid, senderJid, 'accepted'/.test(srv));
+check('undecryptable arrivals are VISIBLE on the panel (CRYPTO system line)', /senderName:'CRYPTO'/.test(srv));
+check('focus-lock drops announce themselves on the panel (FOCUS-LOCK system line)', /senderName:'FOCUS-LOCK'/.test(srv));
+check('storm self-heal fires at 3 undecryptable with zero decrypted (was 15 — unreachable for a 1-group bot)', /decryptedSinceConnect === 0 && undecryptableCount >= 3/.test(srv));
+check('X-ray endpoint /debug/inbound exposes connection + counters + trace', /app\.get\('\/debug\/inbound'/.test(srv) && /inboundTrace\.slice\(-60\)/.test(srv));
+check('stale/focus/dup/echo/flood drops all carry trace reasons', (srv.match(/traceInbound\(/g) || []).length >= 10);
 
 console.log('\n════════════════════════════════════════════════');
 console.log((fail === 0 ? 'RESULT: ALL ' + pass + ' CHECKS PASSED — the lock is real.' : 'RESULT: ' + fail + ' FAILED / ' + pass + ' passed'));

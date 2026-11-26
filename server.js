@@ -684,6 +684,30 @@ function pushLiveMessage(entry){
   for (const res of msgClients) { try{res.write(payload);}catch(e){msgClients.delete(res);} }
 }
 
+/* ═══ v92.9.37 INBOUND TRACE — the boss: "not displaying received messages
+ * in the live logs even messages from self". From now on NOTHING inbound
+ * can be invisible: every message is recorded with its VERDICT — accepted
+ * or the exact drop reason — and GET /debug/inbound shows the whole
+ * picture (connection state, counters, last 150 verdicts). The live panel
+ * also shows a system line when messages arrive undecryptable or get
+ * focus-locked, so deafness is never silent again. */
+const INBOUND_TRACE_MAX = 150;
+const inboundTrace = [];
+const inboundCounts = { upserts:0, real:0, stubs:0, undecryptable:0, drops:{}, lastUpsertAt:0, lastRealAt:0 };
+function traceInbound(chat, from, verdict, extra){
+  try {
+    const v = String(verdict || '?');
+    inboundCounts.upserts++; inboundCounts.lastUpsertAt = Date.now();
+    if (v === 'accepted'){ inboundCounts.real++; inboundCounts.lastRealAt = Date.now(); }
+    else if (v === 'undecryptable'){ inboundCounts.undecryptable++; }
+    else if (v.indexOf('stub') === 0){ inboundCounts.stubs++; }
+    else { inboundCounts.drops[v] = (inboundCounts.drops[v] || 0) + 1; }
+    inboundTrace.push({ ts:new Date().toISOString(), chat:String(chat||'?').slice(0,60),
+      from:String(from||'?').slice(0,50), verdict:v, extra:String(extra||'').slice(0,80) });
+    if (inboundTrace.length > INBOUND_TRACE_MAX) inboundTrace.shift();
+  } catch(_e){}
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  STATE
  * ══════════════════════════════════════════════════════════════ */
@@ -8373,6 +8397,7 @@ async function handleMessage(msg){
     const chatJidEarly = msg.key?.remoteJid;
     const sEarly = chatJidEarly?.endsWith('@g.us') ? (msg.key.participant || chatJidEarly) : chatJidEarly;
     if (!isAdminSender(msg, sEarly)){
+      traceInbound(chatJidEarly, sEarly, 'drop:flood', 'flood gate tripped');
       resetDailyStats(); dailyStats.messagesDropped++; if (LOADTEST) lt.droppedFlood++; return;
     }
   }
@@ -8400,10 +8425,12 @@ async function handleMessage(msg){
         /* v92.9.36 bounded revival: the first stale message per allowed
          * chat (≤6h, ≤10/boot) is ANSWERED, not silently deleted. */
         if (!reviveStaleMessage(chatJid, _stMs)){
+          traceInbound(chatJid, _stSender, 'drop:stale', Math.round((Date.now()-_stMs)/60000) + 'min old');
           ackStaleMessage(msg);                  /* stop the redelivery loop */
           staleRedeliveryDrop(chatJid, _stMs);   /* logs once per chat per minute */
           return;
         }
+        traceInbound(chatJid, _stSender, 'revived', 'bounded revival this boot');
       }
     }
   }
@@ -8419,8 +8446,20 @@ async function handleMessage(msg){
       try { const S0 = sock; const info = await S0.groupGetInviteInfo(focusLock.resolveInviteCode());
             if (info && info.id){ focusLock.addFocusJid(info.id); pushLog('ok', 'focus', 'focus group resolved: ' + info.id); } } catch (e) { pushLog('warn', 'focus', 'invite resolve failed: ' + e.message); }
       if (focusLock.isAllowedJid(chatJid)){ /* now allowed */ }
-      else return;
-    } else return;
+      else {
+        traceInbound(chatJid, (msg.key && msg.key.participant) || chatJid, 'drop:focus-lock', 'chat not whitelisted');
+        if (Date.now() - (global._focusDropNoteAt || 0) > 5 * 60 * 1000){
+          global._focusDropNoteAt = Date.now();
+          pushLiveMessage({ id:'focusdrop-'+Date.now(), ts:new Date().toISOString(), chatJid: ADMIN_JID, chatType:'system',
+            senderJid: botJid, senderName:'FOCUS-LOCK', phone: ADMIN_PHONE, mediaType:'system', isAdmin:true,
+            text:'🔇 Dropped a message from ' + (getGroupName(chatJid) || chatJid) + ' — not whitelisted. ONE LINK · ONE NUMBER listens only to the focus group + your DM (see /debug/inbound for the trace).' });
+        }
+        return;
+      }
+    } else {
+      traceInbound(chatJid, (msg.key && msg.key.participant) || chatJid, 'drop:focus-lock', 'chat not whitelisted');
+      return;
+    }
   }
   focusLock.noteRequester(chatJid, (msg.key && msg.key.participant) || chatJid);
   /* v92.9.20: OBSERVE MODE — listen-only. Every group message is
@@ -8429,6 +8468,7 @@ async function handleMessage(msg){
   if (chatJid.endsWith('@g.us') && observe.active()){
     try { const _oText = (msg.message && (msg.message.conversation || (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text))) || '';
           if (_oText) observe.capture(chatJid, (msg.key && msg.key.participant) || chatJid, _oText); } catch (_oErr) {}
+    traceInbound(chatJid, (msg.key && msg.key.participant) || chatJid, 'drop:observe-mode', 'captured for report, no reply');
     return;
   }
   /* v92.9.18: moderation — scam links / group-link spam, human-timed.
@@ -8477,13 +8517,13 @@ async function handleMessage(msg){
   if (activeChats.size < ACTIVE_SET_CAP) activeChats.add(chatJid);
 
   const msgId = msg.key.id;
-  if (processedMessages.has(msgId)){ if (LOADTEST) lt.droppedDup++; return; }
+  if (processedMessages.has(msgId)){ if (LOADTEST) lt.droppedDup++; traceInbound(chatJid, (msg.key.participant || chatJid), 'drop:dup', 'processed this boot already'); return; }
   processedMessages.add(msgId);
   if (processedMessages.size > 10000){
     const a=[...processedMessages]; processedMessages.clear();
     for (const i of a.slice(-5000)) processedMessages.add(i);
   }
-  if (botSentIds.has(msgId)) return;
+  if (botSentIds.has(msgId)){ traceInbound(chatJid, (msg.key.participant || chatJid), 'drop:echo', 'my own send looping back'); return; }
   if (LOADTEST) lt.handled++;   // passed the gates — this message is being processed
   accountStats.groups.in++;     // v68: per-account counter (two connections, handled differently)
 
@@ -8511,14 +8551,32 @@ async function handleMessage(msg){
     const stubParam = String(msg.messageStubParameter || '');
     if (/Bad MAC|No session|decrypt/i.test(stubParam)){
       undecryptableCount++;
+      traceInbound(chatJid, (msg.key && msg.key.participant) || chatJid, 'undecryptable', 'stub: ' + stubParam.slice(0, 40));
       if (Date.now() > lastUndecryptableLogAt + 5 * 60 * 1000){
         lastUndecryptableLogAt = Date.now();
         pushLog('warn','crypto',
           undecryptableCount + ' message(s) arrived with keys this session does not have (sent while I was offline/asleep — WhatsApp cannot re-deliver them). NEW messages sent while I am awake arrive normally.');
       }
-      if (!badMacStormWarned && undecryptableCount >= 15 && (Date.now() - connectedAtMs) < 10 * 60 * 1000 && decryptedSinceConnect === 0 && !LOADTEST){
+      /* v92.9.37: make deafness VISIBLE on the panel — the boss watched a
+       * quiet live log and concluded "not receiving anything"; now the
+       * undecryptable arrivals show up as system lines (rate-limited). */
+      if (Date.now() - (global._badMacNoteAt || 0) > 60 * 1000){
+        global._badMacNoteAt = Date.now();
+        pushLiveMessage({ id:'badmac-'+Date.now(), ts:new Date().toISOString(), chatJid: ADMIN_JID, chatType:'system',
+          senderJid: botJid, senderName:'CRYPTO', phone: ADMIN_PHONE, mediaType:'system', isAdmin:true,
+          text:'⚠️ ' + undecryptableCount + ' message(s) arrived UNDECRYPTABLE (stale session keys — ' + (getGroupName(chatJid) || chatJid) + '). Outgoing works; incoming CANNOT be read. Self-heal wipes + fresh QR at 3 with zero decrypted (v92.9.37).' });
+      }
+      /* v92.9.37: the old trigger needed ≥15 undecryptable within 10 min —
+       * sized for the old 66-group flood era. ONE LINK · ONE NUMBER means
+       * the boss sends a HANDFUL of test messages: the storm never hit 15,
+       * the self-heal never fired, and the bot stayed deaf FOREVER while
+       * outgoing kept working (the exact reported symptom). A session that
+       * decrypts NOTHING while 3+ ciphertexts arrived IS stale — one
+       * re-pair fixes it; a healthy session never triggers this because
+       * the boss's live messages increment decryptedSinceConnect. */
+      if (!badMacStormWarned && !LOADTEST && decryptedSinceConnect === 0 && undecryptableCount >= 3){
         badMacStormWarned = true;
-        pushLog('error','crypto','BAD-MAC STORM: ' + undecryptableCount + ' undecryptable messages within ' + Math.round((Date.now()-connectedAtMs)/1000) + 's of connect and ZERO real messages decrypted — the restored session snapshot is STALE (v92.9.28 SELF-HEAL: wipe + fresh QR, no manual work needed beyond one scan).');
+        pushLog('error','crypto','BAD-MAC STORM: ' + undecryptableCount + ' undecryptable message(s) with ZERO real messages decrypted since connect — the restored session snapshot is STALE (v92.9.37 SELF-HEAL: wipe + fresh QR, no manual work needed beyond one scan).');
         (async () => {
           /* 1. Tell the boss FIRST — outgoing still works on a stale session */
           try {
@@ -8596,7 +8654,7 @@ async function handleMessage(msg){
                 || m?.imageMessage || m?.videoMessage
                 || m?.audioMessage || m?.documentMessage
                 || m?.contactMessage || m?.locationMessage);
-  if (!hasText) return;
+  if (!hasText){ traceInbound(chatJid, (msg.key.participant || chatJid), 'drop:no-content', 'no text/media payload'); return; }
 
   /* v69 FIX: on the GROUPS account, fromMe = typed on the BOT's own
    * phone (Linked Devices or the handset itself) — only the boss has
@@ -8637,6 +8695,7 @@ async function handleMessage(msg){
       blockedSkipLogAt = Date.now();
       pushLog('warn','access','BLACKLISTED group — every message dropped unseen: ' + (getGroupName(chatJid) || chatJid));
     }
+    traceInbound(chatJid, (msg.key && msg.key.participant) || chatJid, 'drop:group-blacklisted', 'config/blocked-groups.txt');
     return;
   }
   /* ═══ v87 ACCESS GATE — DM whitelist ═══
@@ -8653,10 +8712,12 @@ async function handleMessage(msg){
      * scheduler/broadcast/pending path can bypass it either. */
     if (accessCtl.isBlockedNumber(realPhone || senderJid)){
       pushLog('warn','access','BLOCKED number — message dropped unseen: ' + (realPhone ? '+' + accessCtl.normalizePhone(realPhone) : senderJid));
+      traceInbound(chatJid, senderJid, 'drop:dm-blocked-number', 'config/blocked-numbers.txt');
       return;
     }
     if (!accessCtl.isAllowedNumber(realPhone || senderJid, ADMIN_PHONE)){
       pushLog('info','access','DM from unknown number ignored (not opened): ' + (realPhone ? '+' + accessCtl.normalizePhone(realPhone) : senderJid));
+      traceInbound(chatJid, senderJid, 'drop:dm-not-whitelisted', 'access gate (admin passes by isAdmin)');
       return;
     }
   }
@@ -8699,6 +8760,7 @@ async function handleMessage(msg){
       if (di.status) liveEntry.contactStatus = di.status;
     } catch(e){}
   }
+  traceInbound(chatJid, senderJid, 'accepted', (fromBotPhone ? 'fromMe (boss phone)' : 'remote') + (isGroup ? ' group' : ' dm'));
   pushLiveMessage(liveEntry);
 
   /* ═══ v85 FREE TRANSLATOR — "!translate" command, EVERYONE (admin or not,
@@ -9668,6 +9730,7 @@ async function connectBot(){
           const chatJidEarly = msg.key?.remoteJid;
           const sEarly = chatJidEarly?.endsWith('@g.us') ? (msg.key.participant || chatJidEarly) : chatJidEarly;
           if (!isAdminSender(msg, sEarly)){
+            traceInbound(chatJidEarly, sEarly, 'drop:handler-pool-full', handlerInflight.size + '/' + HANDLER_CONCURRENCY + ' slots busy');
             resetDailyStats(); dailyStats.messagesDropped++;
             pushLog('warn','intake', handlerInflight.size + '/' + HANDLER_CONCURRENCY + ' handler slots busy — shedding non-admin message (flood guard)');
             continue;
@@ -10625,6 +10688,33 @@ async function serveDmCommand(chatJid, senderJid, msg, text, pushName, phone, is
  * (escHtml stays — /admin/generate-prompt escapes through it.) */
 function escHtml(s){ return String(s || '').replace(/[&<>"']/g, function(c){ return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
 app.get('/healthz', function(req, res){ res.json({ ok: true, uptime: Math.round(process.uptime()), ts: new Date().toISOString() }); });
+/* ═══ v92.9.37 INBOUND TRACE ENDPOINT — the boss: "look thru out any
+ * possibilities it's not displaying received messages in the live logs".
+ * This is the X-ray: connection state, upsert counters, the storm
+ * detector's live numbers, the revival bookkeeping and the last 60
+ * inbound verdicts with the EXACT drop reason for each message. If a
+ * message ever vanishes again, this page says where and why. */
+app.get('/debug/inbound', function(req, res){
+  res.json({
+    connection: {
+      status: connectionStatus,
+      botNumber: botNumber || null,
+      botLid: botLid || null,
+      connectedAtMs: connectedAtMs || null,
+      connectedForS: connectedAtMs ? Math.round((Date.now() - connectedAtMs) / 1000) : null,
+      qrPending: connectionStatus === 'qr'
+    },
+    counts: inboundCounts,
+    storm: {
+      undecryptableCount: undecryptableCount,
+      decryptedSinceConnect: decryptedSinceConnect,
+      badMacStormWarned: badMacStormWarned,
+      note: 'undecryptable = arrived with keys this session does not have (stale snapshot); self-heal wipes + fresh QR at 3 with zero decrypted'
+    },
+    revival: { revivedCount: revivedCount, chats: [...revivedThisBoot], perBootCap: REVIVE_MAX_PER_BOOT },
+    trace: inboundTrace.slice(-60)
+  });
+});
 /* v88: registry health + music provider status — panel + crash tests read this */
 app.get('/api/site-health', function(req, res){
   res.json({

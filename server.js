@@ -13865,8 +13865,10 @@ const HTTP_SERVER = app.listen(PORT, async function(){
 
   /* v68.7: detect the AI backend at BOOT — it used to run only inside
    * connectBot(), so with the groups account offline the panel showed
-   * "AI: NONE" even with working keys. Detection is account-independent. */
-  detectAIBackend().catch(function(){});
+   * "AI: NONE" even with working keys. Detection is account-independent.
+   * v92.9.39: the call MOVED into the sequential boot chain (BOOT 1/3) —
+   * it no longer races the session restore and the WhatsApp connect. */
+
 
   scheduleGreetings();
   scheduleGroupJoins();
@@ -13899,7 +13901,14 @@ const HTTP_SERVER = app.listen(PORT, async function(){
   ensureSessionFromEnv('groups', AUTH_FOLDER, 'SESSION_B64_GROUPS');
   (async () => {
     try {
-      if (!fs.existsSync(path.join(AUTH_FOLDER, 'creds.json'))){
+      /* v92.9.39 SEQUENTIAL BOOT — one task at a time, cleared when done */
+      pushLog('info','boot','BOOT 1/3 AI backend detection — start');
+      { const bt0 = Date.now();
+        try { await detectAIBackend(); }
+        catch(e){ pushLog('warn','boot','BOOT 1/3 AI detection warn: ' + e.message); }
+        pushLog('info','boot','BOOT 1/3 AI backend detection — done in ' + (Date.now() - bt0) + 'ms (one-shot, cleared)'); }
+      pushLog('info','boot','BOOT 2/3 session restore — start');
+      if (!fs.existsSync(path.join(AUTH_FOLDER,'creds.json'))){
         /* v92.9.22: FRESH_QR also skips the gist — the third restore
          * path. The auto-backup below stays ON: once the fresh QR is
          * scanned, the NEW session backs itself up and future deploys
@@ -13921,8 +13930,10 @@ const HTTP_SERVER = app.listen(PORT, async function(){
       } else {
         pushLog('info','session','auto-backup OFF — add GITHUB_TOKEN (+ recommended SESSION_SECRET) in Render env and the session backs itself up automatically');
       }
+      pushLog('info','boot','BOOT 2/3 session restore — done (one-shot, cleared)');
     } catch(e){
       pushLog('info','session','cloud session restore skipped: ' + e.message);
+      pushLog('info','boot','BOOT 2/3 session restore — skipped (' + e.message + ')');
     }
     /* v82: School account DISABLED by default — single account mode.
      * The school account code is kept for !school on/off toggle but
@@ -13933,7 +13944,13 @@ const HTTP_SERVER = app.listen(PORT, async function(){
       makeLoadtestStub();
       // School stub skipped in v82 (single-account mode by default)
     } else {
-      connectBot().catch(function(err){ pushLog('error','system','Boot: '+err.message); });
+      /* v92.9.39 BOOT 3/3 — the last task starts ONLY after 1 and 2 finished */
+      pushLog('info','boot','BOOT 3/3 WhatsApp connect — start');
+      { const bt0 = Date.now();
+        try { await connectBot(); }
+        catch(err){ pushLog('error','system','Boot: ' + err.message); }
+        pushLog('info','boot','BOOT 3/3 WhatsApp connect — socket up in ' + (Date.now() - bt0) + 'ms (connection event is async by design)'); }
+      pushLog('info','boot','BOOT COMPLETE — 3 tasks ran ONE-AT-A-TIME, one-shot handles cleared');
       /* v92: the school account is REMOVED (boss: "totally remove the
        * school buddy") — single manager bot, nothing to enable. */
     }
